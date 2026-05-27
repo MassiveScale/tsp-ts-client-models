@@ -27,7 +27,7 @@
     "@typespec/versioning": "^0.82.0",
     "eslint": "^9.15.0",
     "prettier": "^3.3.3",
-    "typescript": "^5.3.3",
+    "typescript": "^6.0.3",
     "typescript-eslint": "^8.49.0"
   },
   "scripts": {
