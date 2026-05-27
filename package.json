@@ -1,0 +1,44 @@
+{
+  "name": "@massivescale/tsp-ts-client-models",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "dist/src/index.js",
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "default": "./dist/src/index.js"
+    },
+    "./testing": {
+      "types": "./dist/src/testing/index.d.ts",
+      "default": "./dist/src/testing/index.js"
+    }
+  },
+  "dependencies": {
+    "handlebars": "^4.7.9"
+  },
+  "peerDependencies": {
+    "@typespec/compiler": "latest"
+  },
+  "devDependencies": {
+    "@types/node": "latest",
+    "@typespec/compiler": "latest",
+    "@typespec/http": "^1.12.0",
+    "@typespec/rest": "^0.82.0",
+    "@typespec/versioning": "^0.82.0",
+    "eslint": "^9.15.0",
+    "prettier": "^3.3.3",
+    "typescript": "^5.3.3",
+    "typescript-eslint": "^8.49.0"
+  },
+  "scripts": {
+    "prepare": "tsc && node scripts/copy-templates.mjs",
+    "build": "tsc && node scripts/copy-templates.mjs",
+    "watch": "tsc --watch",
+    "test": "node --test \"dist/test/**/*.test.js\"",
+    "lint": "eslint src/ test/ --report-unused-disable-directives --max-warnings=0",
+    "lint:fix": "eslint . --report-unused-disable-directives --fix",
+    "format": "prettier .  --write",
+    "format:check": "prettier --check ."
+  },
+  "packageManager": "npm@11.14.1+sha512.6a8a4d67478497a2dbc6815cad72e64c43f33413717e242756047d466241ab39bee61e691683a64658e94496ec5f1a1c05e4a5ec62dcc773280dfd949443a367"
+}
