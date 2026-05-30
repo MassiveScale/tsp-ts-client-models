@@ -101,6 +101,8 @@ After making any change to the codebase:
 
 Both steps must pass before a change is considered complete.
 
+Update documentation and changelog
+
 ## Maintenance
 
 - **CLAUDE.md** — Redirects to this file. Do not add content there.
