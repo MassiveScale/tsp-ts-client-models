@@ -1,0 +1,4 @@
+# Handlebars templates contain C# code — prettier misparses them as HTML
+src/templates/
+dist/
+node_modules/
