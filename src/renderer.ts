@@ -4,10 +4,18 @@ import { fileURLToPath } from "node:url";
 import Handlebars from "handlebars";
 
 /** Absolute path to the bundled default templates directory. */
-const TEMPLATES_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "../templates");
+const TEMPLATES_DIR = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../templates",
+);
 
 /** Names of the built-in Handlebars templates. */
-export type TemplateName = "file" | "interface" | "enum" | "endpoints" | "index";
+export type TemplateName =
+  | "file"
+  | "interface"
+  | "enum"
+  | "endpoints"
+  | "index";
 
 /**
  * Partial map of template names to absolute file paths used to override the
@@ -233,8 +241,14 @@ export function createRenderer(overrides: TemplateOverrides = {}): Renderer {
     renderInterface(view) {
       const docBlock = renderDocBlock(view.doc, "");
       const blocks = view.properties.map(renderPropertyBlock);
-      const propertiesBlock = blocks.length > 0 ? blocks.join("\n") + "\n}" : "}";
-      return interfaceTemplate({ docBlock, interfaceName: view.interfaceName, genericSuffix: view.genericSuffix, propertiesBlock });
+      const propertiesBlock =
+        blocks.length > 0 ? blocks.join("\n") + "\n}" : "}";
+      return interfaceTemplate({
+        docBlock,
+        interfaceName: view.interfaceName,
+        genericSuffix: view.genericSuffix,
+        propertiesBlock,
+      });
     },
 
     renderEnum(view) {
@@ -250,7 +264,11 @@ export function createRenderer(overrides: TemplateOverrides = {}): Renderer {
       // safe `{{{methodsBlock}}}` (3 braces) — 4 braces would be CLOSE_RAW_BLOCK.
       const methodsBlock =
         blocks.length > 0 ? blocks.join("\n") + "\n} as const;" : "} as const;";
-      return endpointsTemplate({ doc: view.doc, className: view.className, methodsBlock });
+      return endpointsTemplate({
+        doc: view.doc,
+        className: view.className,
+        methodsBlock,
+      });
     },
 
     renderIndex(view) {

@@ -1,4 +1,8 @@
-import { createTypeSpecLibrary, JSONSchemaType, paramMessage } from "@typespec/compiler";
+import {
+  createTypeSpecLibrary,
+  JSONSchemaType,
+  paramMessage,
+} from "@typespec/compiler";
 import type { TemplateOverrides } from "./renderer.js";
 
 export interface EmitterOptions {
@@ -29,7 +33,8 @@ const EmitterOptionsSchema: JSONSchemaType<EmitterOptions> = {
     },
     "npm-package-name": {
       type: "string",
-      description: "The name for the generated npm package (e.g. '@my-org/my-api-client').",
+      description:
+        "The name for the generated npm package (e.g. '@my-org/my-api-client').",
       nullable: true,
     },
     "npm-version": {
@@ -51,15 +56,36 @@ const EmitterOptionsSchema: JSONSchemaType<EmitterOptions> = {
     },
     templates: {
       type: "object",
-      description: "Override built-in Handlebars templates with custom .hbs file paths.",
+      description:
+        "Override built-in Handlebars templates with custom .hbs file paths.",
       additionalProperties: false,
       nullable: true,
       properties: {
-        file: { type: "string", nullable: true, description: "Outer file wrapper template." },
-        interface: { type: "string", nullable: true, description: "TypeScript interface template." },
-        enum: { type: "string", nullable: true, description: "TypeScript enum template." },
-        endpoints: { type: "string", nullable: true, description: "Endpoint path utility template." },
-        index: { type: "string", nullable: true, description: "Barrel index template." },
+        file: {
+          type: "string",
+          nullable: true,
+          description: "Outer file wrapper template.",
+        },
+        interface: {
+          type: "string",
+          nullable: true,
+          description: "TypeScript interface template.",
+        },
+        enum: {
+          type: "string",
+          nullable: true,
+          description: "TypeScript enum template.",
+        },
+        endpoints: {
+          type: "string",
+          nullable: true,
+          description: "Endpoint path utility template.",
+        },
+        index: {
+          type: "string",
+          nullable: true,
+          description: "Barrel index template.",
+        },
       },
       required: [],
     },
