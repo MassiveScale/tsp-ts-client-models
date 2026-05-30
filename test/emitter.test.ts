@@ -1,7 +1,7 @@
 import { strictEqual, ok, match } from "node:assert";
 import { describe, it } from "node:test";
 import { emit, emitWithDiagnostics } from "./test-host.js";
-import { tryParseSemver, toCalVer, deriveNpmVersion } from "../src/emitter.js";
+import { tryParseSemver, toCalVer, deriveNpmVersion, resolveRoutePrefix } from "../src/emitter.js";
 
 describe("emitter", () => {
   // ─── Basic sanity ────────────────────────────────────────────────────────────
@@ -43,7 +43,7 @@ describe("emitter", () => {
     ok(content.includes("export const ItemsEndpoints"), "Expected ItemsEndpoints export");
     ok(content.includes("list:"), "Expected list method");
     ok(content.includes("() =>"), "Expected no-arg arrow function");
-    ok(content.includes("`/items`"), "Expected path template literal");
+    ok(content.includes("`/api/items`"), "Expected path template literal with default prefix");
     ok(content.includes("as const"), "Expected as const");
   });
 
@@ -67,7 +67,7 @@ describe("emitter", () => {
     ok(endpointsFile, "Expected endpoints/Widgets.ts");
     const content = results[endpointsFile];
     ok(content.includes("(id: string)"), "Expected path param in function signature");
-    ok(content.includes("`/widgets/${id}`"), "Expected template literal with path param");
+    ok(content.includes("`/api/widgets/${id}`"), "Expected template literal with path param");
   });
 
   it("emits POST, PATCH, DELETE endpoint methods", async () => {
@@ -115,7 +115,7 @@ describe("emitter", () => {
     ok(endpointsFile);
     const content = results[endpointsFile];
     ok(content.includes("(storeId: string, itemId: string)"), "Expected both path params");
-    ok(content.includes("`/stores/${storeId}/items/${itemId}`"), "Expected full path template");
+    ok(content.includes("`/api/stores/${storeId}/items/${itemId}`"), "Expected full path template");
   });
 
   // ─── models.ts ───────────────────────────────────────────────────────────────
@@ -824,6 +824,138 @@ describe("emitter", () => {
         ok(content.includes("AUTO-GENERATED"), `Expected AUTO-GENERATED header in ${path}`);
       }
     }
+  });
+
+  // ─── route-prefix ────────────────────────────────────────────────────────────
+
+  it("default route-prefix inserts version value for versioned API", async () => {
+    const results = await emit(`
+      import "@typespec/http";
+      import "@typespec/versioning";
+      using Http;
+      using Versioning;
+
+      @service(#{ title: "Test API" })
+      @versioned(Versions)
+      namespace TestApi;
+
+      enum Versions { v1: "v1.0" }
+
+      @route("/items")
+      interface Items {
+        @get list(): string[];
+      }
+    `);
+
+    const endpointsFile = Object.keys(results).find((k) => k.endsWith("Items.ts") && k.includes("endpoints"));
+    ok(endpointsFile, "Expected endpoints/Items.ts");
+    ok(results[endpointsFile].includes("`/api/v1.0/items`"), "Expected default prefix with version value");
+  });
+
+  it("route-prefix option with {version} token uses actual version", async () => {
+    const results = await emit(
+      `
+      import "@typespec/http";
+      import "@typespec/versioning";
+      using Http;
+      using Versioning;
+
+      @service(#{ title: "Test API" })
+      @versioned(Versions)
+      namespace TestApi;
+
+      enum Versions { v2: "v2.0" }
+
+      @route("/items")
+      interface Items {
+        @get list(): string[];
+      }
+    `,
+      { "route-prefix": "services/{version}/rest" },
+    );
+
+    const endpointsFile = Object.keys(results).find((k) => k.endsWith("Items.ts") && k.includes("endpoints"));
+    ok(endpointsFile);
+    ok(results[endpointsFile].includes("`/services/v2.0/rest/items`"), "Expected custom prefix with version token replaced");
+  });
+
+  it("route-prefix option without {version} token is used as literal prefix", async () => {
+    const results = await emit(
+      `
+      import "@typespec/http";
+      using Http;
+
+      @service(#{ title: "Test API" })
+      namespace TestApi;
+
+      @route("/items")
+      interface Items {
+        @get list(): string[];
+      }
+    `,
+      { "route-prefix": "myapi/v1" },
+    );
+
+    const endpointsFile = Object.keys(results).find((k) => k.endsWith("Items.ts") && k.includes("endpoints"));
+    ok(endpointsFile);
+    ok(results[endpointsFile].includes("`/myapi/v1/items`"), "Expected literal prefix");
+  });
+
+  it("empty route-prefix emits path without any prefix", async () => {
+    const results = await emit(
+      `
+      import "@typespec/http";
+      using Http;
+
+      @service(#{ title: "Test API" })
+      namespace TestApi;
+
+      @route("/items")
+      interface Items {
+        @get list(): string[];
+      }
+    `,
+      { "route-prefix": "" },
+    );
+
+    const endpointsFile = Object.keys(results).find((k) => k.endsWith("Items.ts") && k.includes("endpoints"));
+    ok(endpointsFile);
+    ok(results[endpointsFile].includes("`/items`"), "Expected path with no prefix");
+    ok(!results[endpointsFile].includes("`/api/items`"), "Expected no default prefix applied");
+  });
+
+  it("route-prefix path params still work correctly with a prefix", async () => {
+    const results = await emit(
+      `
+      import "@typespec/http";
+      using Http;
+
+      @service(#{ title: "Test API" })
+      namespace TestApi;
+
+      @route("/widgets")
+      interface Widgets {
+        @get read(@path id: string): string;
+      }
+    `,
+      { "route-prefix": "api/v1" },
+    );
+
+    const endpointsFile = Object.keys(results).find((k) => k.endsWith("Widgets.ts") && k.includes("endpoints"));
+    ok(endpointsFile);
+    ok(results[endpointsFile].includes("`/api/v1/widgets/${id}`"), "Expected prefixed path with path param");
+  });
+
+  describe("resolveRoutePrefix", () => {
+    it("replaces {version} token with version value", () => strictEqual(resolveRoutePrefix("api/{version}", "v1.0"), "api/v1.0"));
+    it("removes {version} token when no version provided", () => strictEqual(resolveRoutePrefix("api/{version}", undefined), "api"));
+    it("returns empty string when prefix is empty", () => strictEqual(resolveRoutePrefix("", "v1.0"), ""));
+    it("returns empty string when prefix is empty and no version", () => strictEqual(resolveRoutePrefix("", undefined), ""));
+    it("returns literal prefix when no {version} token", () => strictEqual(resolveRoutePrefix("api/v2", "v1.0"), "api/v2"));
+    it("handles {version}-only prefix with a version", () => strictEqual(resolveRoutePrefix("{version}", "v2.0"), "v2.0"));
+    it("handles {version}-only prefix with no version", () => strictEqual(resolveRoutePrefix("{version}", undefined), ""));
+    it("strips leading and trailing slashes from resolved prefix", () => strictEqual(resolveRoutePrefix("/api/{version}/", "v1.0"), "api/v1.0"));
+    it("collapses double slashes when version is empty", () => strictEqual(resolveRoutePrefix("api/{version}/rest", undefined), "api/rest"));
   });
 
   // ─── deriveNpmVersion unit tests ─────────────────────────────────────────────

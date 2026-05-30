@@ -7,6 +7,7 @@ export interface EmitterOptions {
   "npm-package-name"?: string;
   "npm-version"?: string;
   "npm-description"?: string;
+  "route-prefix"?: string;
   templates?: TemplateOverrides;
 }
 
@@ -40,6 +41,12 @@ const EmitterOptionsSchema: JSONSchemaType<EmitterOptions> = {
     "npm-description": {
       type: "string",
       description: "The description for the generated npm package.",
+      nullable: true,
+    },
+    "route-prefix": {
+      type: "string",
+      description:
+        "Route prefix prepended to all endpoint paths. Use {version} as a placeholder for the API version (e.g. 'api/{version}'). Defaults to 'api/{version}'.",
       nullable: true,
     },
     templates: {

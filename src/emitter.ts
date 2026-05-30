@@ -289,13 +289,17 @@ async function emitService(
     byContainer.get(key)!.ops.push(op);
   }
 
+  const prefixTemplate = options["route-prefix"] ?? "api/{version}";
+
   if (versionsToEmit.length > 0) {
     for (const version of versionsToEmit) {
       const vDir = useVersionedFolders ? resolvePath(outputDir, version.value) : outputDir;
-      await emitVersion(program, nsFullName, byContainer, vDir, version, renderer);
+      const routePrefix = resolveRoutePrefix(prefixTemplate, version.value);
+      await emitVersion(program, nsFullName, byContainer, vDir, version, routePrefix, renderer);
     }
   } else {
-    await emitVersion(program, nsFullName, byContainer, outputDir, undefined, renderer);
+    const routePrefix = resolveRoutePrefix(prefixTemplate, undefined);
+    await emitVersion(program, nsFullName, byContainer, outputDir, undefined, routePrefix, renderer);
   }
 
   // Emit package.json once at the root output dir
@@ -309,6 +313,7 @@ async function emitVersion(
   byContainer: Map<string, { name: string; container: Interface | Namespace; ops: HttpOperation[] }>,
   vDir: string,
   version: Version | undefined,
+  routePrefix: string,
   renderer: Renderer,
 ): Promise<void> {
   const models = new Map<string, Model>();
@@ -344,7 +349,7 @@ async function emitVersion(
 
     const doc = getDoc(program, container);
     const className = `${name}Endpoints`;
-    const content = buildEndpointsFile(className, vOps, doc, renderer);
+    const content = buildEndpointsFile(className, vOps, doc, routePrefix, renderer);
     const relPath = `endpoints/${name}.ts`;
     await writeFile(program, resolvePath(vDir, relPath), content);
     endpointExports.push(`./endpoints/${name}.js`);
@@ -588,21 +593,22 @@ function buildEndpointsFile(
   className: string,
   ops: HttpOperation[],
   doc: string | undefined,
+  routePrefix: string,
   renderer: Renderer,
 ): string {
-  const methods: EndpointMethodView[] = ops.map((op) => buildEndpointMethodView(op));
+  const methods: EndpointMethodView[] = ops.map((op) => buildEndpointMethodView(op, routePrefix));
   const endpointsView: EndpointsView = { doc: doc ?? undefined, className, methods };
   const body = renderer.renderEndpoints(endpointsView);
   const fileView: FileView = { body, fileName: `${className}.ts` };
   return renderer.renderFile(fileView);
 }
 
-function buildEndpointMethodView(op: HttpOperation): EndpointMethodView {
+function buildEndpointMethodView(op: HttpOperation, routePrefix: string): EndpointMethodView {
   const pathParams = op.parameters.parameters
     .filter((p) => p.type === "path")
     .map((p) => p.param.name);
 
-  const functionText = buildEndpointFunctionText(op.path, pathParams);
+  const functionText = buildEndpointFunctionText(op.path, pathParams, routePrefix);
 
   return {
     name: op.operation.name,
@@ -613,10 +619,24 @@ function buildEndpointMethodView(op: HttpOperation): EndpointMethodView {
 /** Backtick character constant — avoids escape issues in template literals. */
 const BT = "`";
 
-function buildEndpointFunctionText(path: string, pathParamNames: string[]): string {
+/**
+ * Resolves the route prefix by substituting the `{version}` token with the
+ * actual version value. When no version is provided the token (and any
+ * resulting trailing slash) is removed. Leading/trailing slashes are stripped
+ * so the caller can safely prepend `/${prefix}${path}`.
+ */
+export function resolveRoutePrefix(prefix: string, versionValue: string | undefined): string {
+  let resolved = prefix.replace("{version}", versionValue ?? "");
+  // Collapse consecutive slashes then strip leading/trailing slashes.
+  resolved = resolved.replace(/\/+/g, "/").replace(/^\/+|\/+$/g, "");
+  return resolved;
+}
+
+function buildEndpointFunctionText(path: string, pathParamNames: string[], routePrefix: string): string {
   // Convert {param} to ${param} for JS template literals.
   // In replacement strings: $$ → $, $1 → first capture group.
-  const templatePath = path.replace(/\{([^}]+)\}/g, "$${$1}");
+  const fullPath = routePrefix ? `/${routePrefix}${path}` : path;
+  const templatePath = fullPath.replace(/\{([^}]+)\}/g, "$${$1}");
   const pathExpr = BT + templatePath + BT;
 
   if (pathParamNames.length === 0) {
