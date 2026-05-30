@@ -1,7 +1,12 @@
 import { strictEqual, ok, match } from "node:assert";
 import { describe, it } from "node:test";
 import { emit, emitWithDiagnostics } from "./test-host.js";
-import { tryParseSemver, toCalVer, deriveNpmVersion } from "../src/emitter.js";
+import {
+  tryParseSemver,
+  toCalVer,
+  deriveNpmVersion,
+  resolveRoutePrefix,
+} from "../src/emitter.js";
 
 describe("emitter", () => {
   // ─── Basic sanity ────────────────────────────────────────────────────────────
@@ -37,13 +42,21 @@ describe("emitter", () => {
       }
     `);
 
-    const endpointsFile = Object.keys(results).find((k) => k.endsWith("Items.ts") && k.includes("endpoints"));
+    const endpointsFile = Object.keys(results).find(
+      (k) => k.endsWith("Items.ts") && k.includes("endpoints"),
+    );
     ok(endpointsFile, "Expected endpoints/Items.ts to be emitted");
     const content = results[endpointsFile];
-    ok(content.includes("export const ItemsEndpoints"), "Expected ItemsEndpoints export");
+    ok(
+      content.includes("export const ItemsEndpoints"),
+      "Expected ItemsEndpoints export",
+    );
     ok(content.includes("list:"), "Expected list method");
     ok(content.includes("() =>"), "Expected no-arg arrow function");
-    ok(content.includes("`/items`"), "Expected path template literal");
+    ok(
+      content.includes("`/api/items`"),
+      "Expected path template literal with default prefix",
+    );
     ok(content.includes("as const"), "Expected as const");
   });
 
@@ -63,11 +76,19 @@ describe("emitter", () => {
       }
     `);
 
-    const endpointsFile = Object.keys(results).find((k) => k.endsWith("Widgets.ts") && k.includes("endpoints"));
+    const endpointsFile = Object.keys(results).find(
+      (k) => k.endsWith("Widgets.ts") && k.includes("endpoints"),
+    );
     ok(endpointsFile, "Expected endpoints/Widgets.ts");
     const content = results[endpointsFile];
-    ok(content.includes("(id: string)"), "Expected path param in function signature");
-    ok(content.includes("`/widgets/${id}`"), "Expected template literal with path param");
+    ok(
+      content.includes("(id: string)"),
+      "Expected path param in function signature",
+    );
+    ok(
+      content.includes("`/api/widgets/${id}`"),
+      "Expected template literal with path param",
+    );
   });
 
   it("emits POST, PATCH, DELETE endpoint methods", async () => {
@@ -88,7 +109,9 @@ describe("emitter", () => {
       }
     `);
 
-    const endpointsFile = Object.keys(results).find((k) => k.endsWith("Items.ts") && k.includes("endpoints"));
+    const endpointsFile = Object.keys(results).find(
+      (k) => k.endsWith("Items.ts") && k.includes("endpoints"),
+    );
     ok(endpointsFile, "Expected endpoints/Items.ts");
     const content = results[endpointsFile];
     ok(content.includes("create:"), "Expected create method");
@@ -111,11 +134,19 @@ describe("emitter", () => {
       }
     `);
 
-    const endpointsFile = Object.keys(results).find((k) => k.endsWith("Items.ts") && k.includes("endpoints"));
+    const endpointsFile = Object.keys(results).find(
+      (k) => k.endsWith("Items.ts") && k.includes("endpoints"),
+    );
     ok(endpointsFile);
     const content = results[endpointsFile];
-    ok(content.includes("(storeId: string, itemId: string)"), "Expected both path params");
-    ok(content.includes("`/stores/${storeId}/items/${itemId}`"), "Expected full path template");
+    ok(
+      content.includes("(storeId: string, itemId: string)"),
+      "Expected both path params",
+    );
+    ok(
+      content.includes("`/api/stores/${storeId}/items/${itemId}`"),
+      "Expected full path template",
+    );
   });
 
   // ─── models.ts ───────────────────────────────────────────────────────────────
@@ -141,13 +172,21 @@ describe("emitter", () => {
       }
     `);
 
-    const modelsFile = Object.keys(results).find((k) => k.endsWith("models.ts"));
+    const modelsFile = Object.keys(results).find((k) =>
+      k.endsWith("models.ts"),
+    );
     ok(modelsFile, "Expected models.ts to be emitted");
     const content = results[modelsFile];
-    ok(content.includes("export interface Widget"), "Expected interface declaration");
+    ok(
+      content.includes("export interface Widget"),
+      "Expected interface declaration",
+    );
     ok(content.includes("name: string;"), "Expected name property");
     ok(content.includes("count: number;"), "Expected count as number");
-    ok(content.includes("/** A widget. */"), "Expected JSDoc comment on interface");
+    ok(
+      content.includes("/** A widget. */"),
+      "Expected JSDoc comment on interface",
+    );
     ok(content.includes("/** The name. */"), "Expected JSDoc on property");
   });
 
@@ -167,11 +206,19 @@ describe("emitter", () => {
       }
     `);
 
-    const modelsFile = Object.keys(results).find((k) => k.endsWith("models.ts"));
+    const modelsFile = Object.keys(results).find((k) =>
+      k.endsWith("models.ts"),
+    );
     ok(modelsFile);
     const content = results[modelsFile];
-    ok(content.includes("required: string;"), "Required property should not have ?");
-    ok(content.includes("optional?: number;"), "Optional property should have ?");
+    ok(
+      content.includes("required: string;"),
+      "Required property should not have ?",
+    );
+    ok(
+      content.includes("optional?: number;"),
+      "Optional property should have ?",
+    );
     ok(!content.includes("required?: string"), "Required prop must not have ?");
   });
 
@@ -198,7 +245,9 @@ describe("emitter", () => {
       }
     `);
 
-    const modelsFile = Object.keys(results).find((k) => k.endsWith("models.ts"));
+    const modelsFile = Object.keys(results).find((k) =>
+      k.endsWith("models.ts"),
+    );
     ok(modelsFile, "Expected models.ts");
     const content = results[modelsFile];
     ok(content.includes("export enum Color"), "Expected enum declaration");
@@ -233,7 +282,9 @@ describe("emitter", () => {
       }
     `);
 
-    const modelsFile = Object.keys(results).find((k) => k.endsWith("models.ts"));
+    const modelsFile = Object.keys(results).find((k) =>
+      k.endsWith("models.ts"),
+    );
     ok(modelsFile);
     const content = results[modelsFile];
     ok(content.includes("s: string;"), "string → string");
@@ -263,9 +314,14 @@ describe("emitter", () => {
       }
     `);
 
-    const modelsFile = Object.keys(results).find((k) => k.endsWith("models.ts"));
+    const modelsFile = Object.keys(results).find((k) =>
+      k.endsWith("models.ts"),
+    );
     ok(modelsFile);
-    ok(results[modelsFile].includes("items: Widget[];"), "Expected Widget[] array type");
+    ok(
+      results[modelsFile].includes("items: Widget[];"),
+      "Expected Widget[] array type",
+    );
   });
 
   it("emits generic interfaces with type parameters", async () => {
@@ -289,10 +345,15 @@ describe("emitter", () => {
       }
     `);
 
-    const modelsFile = Object.keys(results).find((k) => k.endsWith("models.ts"));
+    const modelsFile = Object.keys(results).find((k) =>
+      k.endsWith("models.ts"),
+    );
     ok(modelsFile, "Expected models.ts");
     const content = results[modelsFile];
-    ok(content.includes("export interface Page<T>"), "Expected generic interface");
+    ok(
+      content.includes("export interface Page<T>"),
+      "Expected generic interface",
+    );
     ok(content.includes("items: T[];"), "Expected T[] property");
   });
 
@@ -314,12 +375,14 @@ describe("emitter", () => {
       }
     `);
 
-    const modelsFile = Object.keys(results).find((k) => k.endsWith("models.ts"));
+    const modelsFile = Object.keys(results).find((k) =>
+      k.endsWith("models.ts"),
+    );
     ok(modelsFile);
     const content = results[modelsFile];
     ok(
       content.includes('"active" | "inactive"'),
-      'Expected string literal union type',
+      "Expected string literal union type",
     );
   });
 
@@ -348,14 +411,22 @@ describe("emitter", () => {
       }
     `);
 
-    const modelsFile = Object.keys(results).find((k) => k.endsWith("models.ts"));
+    const modelsFile = Object.keys(results).find((k) =>
+      k.endsWith("models.ts"),
+    );
     ok(modelsFile, "Expected models.ts with request type");
     const content = results[modelsFile];
-    ok(content.includes("export interface ItemCreateRequest"), "Expected ItemCreateRequest interface");
+    ok(
+      content.includes("export interface ItemCreateRequest"),
+      "Expected ItemCreateRequest interface",
+    );
     ok(content.includes("name: string;"), "Expected name property");
     ok(content.includes("count: number;"), "Expected count property");
     ok(!content.includes("id: string"), "Read-only id should be excluded");
-    ok(!content.includes("createdAt"), "Read-only createdAt should be excluded");
+    ok(
+      !content.includes("createdAt"),
+      "Read-only createdAt should be excluded",
+    );
   });
 
   it("generates an UpdateRequest interface excluding read-only and create-only properties for PATCH", async () => {
@@ -380,13 +451,21 @@ describe("emitter", () => {
       }
     `);
 
-    const modelsFile = Object.keys(results).find((k) => k.endsWith("models.ts"));
+    const modelsFile = Object.keys(results).find((k) =>
+      k.endsWith("models.ts"),
+    );
     ok(modelsFile, "Expected models.ts");
     const content = results[modelsFile];
-    ok(content.includes("export interface ItemUpdateRequest"), "Expected ItemUpdateRequest");
+    ok(
+      content.includes("export interface ItemUpdateRequest"),
+      "Expected ItemUpdateRequest",
+    );
     ok(content.includes("name: string;"), "Expected name");
     ok(!content.includes("id: string"), "id should be excluded");
-    ok(!content.includes("tenantId"), "create-only tenantId should be excluded from update");
+    ok(
+      !content.includes("tenantId"),
+      "create-only tenantId should be excluded from update",
+    );
   });
 
   it("does not generate a request type when all properties are writable", async () => {
@@ -405,9 +484,14 @@ describe("emitter", () => {
       }
     `);
 
-    const modelsFile = Object.keys(results).find((k) => k.endsWith("models.ts"));
+    const modelsFile = Object.keys(results).find((k) =>
+      k.endsWith("models.ts"),
+    );
     if (modelsFile) {
-      ok(!results[modelsFile].includes("ItemCreateRequest"), "Should not emit ItemCreateRequest when all properties are writable");
+      ok(
+        !results[modelsFile].includes("ItemCreateRequest"),
+        "Should not emit ItemCreateRequest when all properties are writable",
+      );
     }
   });
 
@@ -432,8 +516,14 @@ describe("emitter", () => {
     const indexFile = Object.keys(results).find((k) => k.endsWith("index.ts"));
     ok(indexFile, "Expected index.ts");
     const content = results[indexFile];
-    ok(content.includes('export * from "./models.js"'), "Expected models export");
-    ok(content.includes('export * from "./endpoints/Widgets.js"'), "Expected endpoints export");
+    ok(
+      content.includes('export * from "./models.js"'),
+      "Expected models export",
+    );
+    ok(
+      content.includes('export * from "./endpoints/Widgets.js"'),
+      "Expected endpoints export",
+    );
     ok(content.includes("AUTO-GENERATED"), "Expected auto-generated header");
   });
 
@@ -451,10 +541,15 @@ describe("emitter", () => {
       }
     `);
 
-    const pkgFile = Object.keys(results).find((k) => k.endsWith("package.json"));
+    const pkgFile = Object.keys(results).find((k) =>
+      k.endsWith("package.json"),
+    );
     ok(pkgFile, "Expected package.json");
     const pkg = JSON.parse(results[pkgFile]);
-    ok(pkg.description?.includes("TestApi"), "Expected description containing namespace");
+    ok(
+      pkg.description?.includes("TestApi"),
+      "Expected description containing namespace",
+    );
     strictEqual(pkg.type, "module");
     strictEqual(pkg.sideEffects, false);
   });
@@ -476,7 +571,9 @@ describe("emitter", () => {
       { "npm-package-name": "@acme/test-api-client" },
     );
 
-    const pkgFile = Object.keys(results).find((k) => k.endsWith("package.json"));
+    const pkgFile = Object.keys(results).find((k) =>
+      k.endsWith("package.json"),
+    );
     ok(pkgFile);
     const pkg = JSON.parse(results[pkgFile]);
     strictEqual(pkg.name, "@acme/test-api-client");
@@ -499,9 +596,14 @@ describe("emitter", () => {
       { "npm-description": "My custom description." },
     );
 
-    const pkgFile = Object.keys(results).find((k) => k.endsWith("package.json"));
+    const pkgFile = Object.keys(results).find((k) =>
+      k.endsWith("package.json"),
+    );
     ok(pkgFile);
-    strictEqual(JSON.parse(results[pkgFile]).description, "My custom description.");
+    strictEqual(
+      JSON.parse(results[pkgFile]).description,
+      "My custom description.",
+    );
   });
 
   // ─── Versioning ──────────────────────────────────────────────────────────────
@@ -529,11 +631,18 @@ describe("emitter", () => {
       }
     `);
 
-    const v1File = Object.keys(results).find((k) => k.includes("v1.0") && k.endsWith("Items.ts"));
-    const endpointsFile = Object.keys(results).find((k) => k.endsWith("Items.ts") && k.includes("endpoints"));
+    const v1File = Object.keys(results).find(
+      (k) => k.includes("v1.0") && k.endsWith("Items.ts"),
+    );
+    const endpointsFile = Object.keys(results).find(
+      (k) => k.endsWith("Items.ts") && k.includes("endpoints"),
+    );
 
     ok(!v1File, "v1.0 folder should not be emitted by default");
-    ok(endpointsFile, "Expected endpoints/Items.ts at root (no version folder in single-version mode)");
+    ok(
+      endpointsFile,
+      "Expected endpoints/Items.ts at root (no version folder in single-version mode)",
+    );
     ok(results[endpointsFile].includes("list:"), "v2 should have list");
     ok(results[endpointsFile].includes("create:"), "v2 should have create");
   });
@@ -564,10 +673,15 @@ describe("emitter", () => {
       { "target-version": "v1.0" },
     );
 
-    const endpointsFile = Object.keys(results).find((k) => k.endsWith("Items.ts") && k.includes("endpoints"));
+    const endpointsFile = Object.keys(results).find(
+      (k) => k.endsWith("Items.ts") && k.includes("endpoints"),
+    );
     ok(endpointsFile, "Expected endpoints/Items.ts");
     ok(results[endpointsFile].includes("list:"), "v1 should have list");
-    ok(!results[endpointsFile].includes("create:"), "v1 should not have create (added in v2)");
+    ok(
+      !results[endpointsFile].includes("create:"),
+      "v1 should not have create (added in v2)",
+    );
   });
 
   it("emits all versions in separate subfolders when all-versions is true", async () => {
@@ -596,8 +710,12 @@ describe("emitter", () => {
       { "all-versions": true },
     );
 
-    const v1File = Object.keys(results).find((k) => k.includes("v1.0") && k.endsWith("Items.ts"));
-    const v2File = Object.keys(results).find((k) => k.includes("v2.0") && k.endsWith("Items.ts"));
+    const v1File = Object.keys(results).find(
+      (k) => k.includes("v1.0") && k.endsWith("Items.ts"),
+    );
+    const v2File = Object.keys(results).find(
+      (k) => k.includes("v2.0") && k.endsWith("Items.ts"),
+    );
 
     ok(v1File, "Expected v1.0/endpoints/Items.ts");
     ok(v2File, "Expected v2.0/endpoints/Items.ts");
@@ -630,7 +748,10 @@ describe("emitter", () => {
     );
 
     ok(
-      diags.some((d) => d.code === "@massivescale/tsp-ts-client-models/version-not-found"),
+      diags.some(
+        (d) =>
+          d.code === "@massivescale/tsp-ts-client-models/version-not-found",
+      ),
       "Expected version-not-found diagnostic",
     );
   });
@@ -638,20 +759,30 @@ describe("emitter", () => {
   // ─── npm version derivation ──────────────────────────────────────────────────
 
   describe("tryParseSemver", () => {
-    it("parses two-part version", () => strictEqual(tryParseSemver("1.2"), "1.2.0"));
-    it("parses three-part version", () => strictEqual(tryParseSemver("1.2.3"), "1.2.3"));
+    it("parses two-part version", () =>
+      strictEqual(tryParseSemver("1.2"), "1.2.0"));
+    it("parses three-part version", () =>
+      strictEqual(tryParseSemver("1.2.3"), "1.2.3"));
     it("strips leading v", () => strictEqual(tryParseSemver("v2.1"), "2.1.0"));
-    it("strips leading V", () => strictEqual(tryParseSemver("V3.0.1"), "3.0.1"));
-    it("preserves pre-release suffix", () => strictEqual(tryParseSemver("v2.0-preview"), "2.0.0-preview"));
-    it("preserves rc suffix", () => strictEqual(tryParseSemver("1.0.0-rc.1"), "1.0.0-rc.1"));
-    it("returns undefined for single-digit", () => strictEqual(tryParseSemver("v1"), undefined));
-    it("returns undefined for date-style string", () => strictEqual(tryParseSemver("2022-10-15"), undefined));
-    it("returns undefined for plain label", () => strictEqual(tryParseSemver("preview"), undefined));
+    it("strips leading V", () =>
+      strictEqual(tryParseSemver("V3.0.1"), "3.0.1"));
+    it("preserves pre-release suffix", () =>
+      strictEqual(tryParseSemver("v2.0-preview"), "2.0.0-preview"));
+    it("preserves rc suffix", () =>
+      strictEqual(tryParseSemver("1.0.0-rc.1"), "1.0.0-rc.1"));
+    it("returns undefined for single-digit", () =>
+      strictEqual(tryParseSemver("v1"), undefined));
+    it("returns undefined for date-style string", () =>
+      strictEqual(tryParseSemver("2022-10-15"), undefined));
+    it("returns undefined for plain label", () =>
+      strictEqual(tryParseSemver("preview"), undefined));
   });
 
   describe("toCalVer", () => {
-    it("formats as YYYY.MM.DD", () => strictEqual(toCalVer(new Date(2026, 4, 21)), "2026.05.21"));
-    it("zero-pads month and day", () => strictEqual(toCalVer(new Date(2026, 0, 3)), "2026.01.03"));
+    it("formats as YYYY.MM.DD", () =>
+      strictEqual(toCalVer(new Date(2026, 4, 21)), "2026.05.21"));
+    it("zero-pads month and day", () =>
+      strictEqual(toCalVer(new Date(2026, 0, 3)), "2026.01.03"));
   });
 
   it("uses semver parsed from TypeSpec API version as npm version", async () => {
@@ -673,9 +804,15 @@ describe("emitter", () => {
       }
     `);
 
-    const pkgFile = Object.keys(results).find((k) => k.endsWith("package.json"));
+    const pkgFile = Object.keys(results).find((k) =>
+      k.endsWith("package.json"),
+    );
     ok(pkgFile, "Expected package.json");
-    strictEqual(JSON.parse(results[pkgFile]).version, "2.1.0", "Expected semver from TypeSpec version");
+    strictEqual(
+      JSON.parse(results[pkgFile]).version,
+      "2.1.0",
+      "Expected semver from TypeSpec version",
+    );
   });
 
   it("falls back to CalVer when TypeSpec version is not semver-parseable", async () => {
@@ -697,9 +834,15 @@ describe("emitter", () => {
       }
     `);
 
-    const pkgFile = Object.keys(results).find((k) => k.endsWith("package.json"));
+    const pkgFile = Object.keys(results).find((k) =>
+      k.endsWith("package.json"),
+    );
     ok(pkgFile);
-    match(JSON.parse(results[pkgFile]).version, /^\d{4}\.\d{2}\.\d{2}$/, "Expected CalVer fallback");
+    match(
+      JSON.parse(results[pkgFile]).version,
+      /^\d{4}\.\d{2}\.\d{2}$/,
+      "Expected CalVer fallback",
+    );
   });
 
   it("falls back to CalVer for unversioned API", async () => {
@@ -716,9 +859,15 @@ describe("emitter", () => {
       }
     `);
 
-    const pkgFile = Object.keys(results).find((k) => k.endsWith("package.json"));
+    const pkgFile = Object.keys(results).find((k) =>
+      k.endsWith("package.json"),
+    );
     ok(pkgFile);
-    match(JSON.parse(results[pkgFile]).version, /^\d{4}\.\d{2}\.\d{2}$/, "Expected CalVer for unversioned API");
+    match(
+      JSON.parse(results[pkgFile]).version,
+      /^\d{4}\.\d{2}\.\d{2}$/,
+      "Expected CalVer for unversioned API",
+    );
   });
 
   it("uses npm-version option over derived version", async () => {
@@ -738,7 +887,9 @@ describe("emitter", () => {
       { "npm-version": "3.0.0-beta.1" },
     );
 
-    const pkgFile = Object.keys(results).find((k) => k.endsWith("package.json"));
+    const pkgFile = Object.keys(results).find((k) =>
+      k.endsWith("package.json"),
+    );
     ok(pkgFile);
     strictEqual(JSON.parse(results[pkgFile]).version, "3.0.0-beta.1");
   });
@@ -765,7 +916,9 @@ describe("emitter", () => {
       { "target-version": "v1.0" },
     );
 
-    const pkgFile = Object.keys(results).find((k) => k.endsWith("package.json"));
+    const pkgFile = Object.keys(results).find((k) =>
+      k.endsWith("package.json"),
+    );
     ok(pkgFile);
     strictEqual(JSON.parse(results[pkgFile]).version, "1.0.0");
   });
@@ -792,7 +945,9 @@ describe("emitter", () => {
       }
     `);
 
-    const modelsFile = Object.keys(results).find((k) => k.endsWith("models.ts"));
+    const modelsFile = Object.keys(results).find((k) =>
+      k.endsWith("models.ts"),
+    );
     ok(modelsFile);
     const content = results[modelsFile];
     ok(content.includes("First line."), "Expected first doc line");
@@ -821,9 +976,184 @@ describe("emitter", () => {
 
     for (const [path, content] of Object.entries(results)) {
       if (path.endsWith(".ts")) {
-        ok(content.includes("AUTO-GENERATED"), `Expected AUTO-GENERATED header in ${path}`);
+        ok(
+          content.includes("AUTO-GENERATED"),
+          `Expected AUTO-GENERATED header in ${path}`,
+        );
       }
     }
+  });
+
+  // ─── route-prefix ────────────────────────────────────────────────────────────
+
+  it("default route-prefix inserts version value for versioned API", async () => {
+    const results = await emit(`
+      import "@typespec/http";
+      import "@typespec/versioning";
+      using Http;
+      using Versioning;
+
+      @service(#{ title: "Test API" })
+      @versioned(Versions)
+      namespace TestApi;
+
+      enum Versions { v1: "v1.0" }
+
+      @route("/items")
+      interface Items {
+        @get list(): string[];
+      }
+    `);
+
+    const endpointsFile = Object.keys(results).find(
+      (k) => k.endsWith("Items.ts") && k.includes("endpoints"),
+    );
+    ok(endpointsFile, "Expected endpoints/Items.ts");
+    ok(
+      results[endpointsFile].includes("`/api/v1.0/items`"),
+      "Expected default prefix with version value",
+    );
+  });
+
+  it("route-prefix option with {version} token uses actual version", async () => {
+    const results = await emit(
+      `
+      import "@typespec/http";
+      import "@typespec/versioning";
+      using Http;
+      using Versioning;
+
+      @service(#{ title: "Test API" })
+      @versioned(Versions)
+      namespace TestApi;
+
+      enum Versions { v2: "v2.0" }
+
+      @route("/items")
+      interface Items {
+        @get list(): string[];
+      }
+    `,
+      { "route-prefix": "services/{version}/rest" },
+    );
+
+    const endpointsFile = Object.keys(results).find(
+      (k) => k.endsWith("Items.ts") && k.includes("endpoints"),
+    );
+    ok(endpointsFile);
+    ok(
+      results[endpointsFile].includes("`/services/v2.0/rest/items`"),
+      "Expected custom prefix with version token replaced",
+    );
+  });
+
+  it("route-prefix option without {version} token is used as literal prefix", async () => {
+    const results = await emit(
+      `
+      import "@typespec/http";
+      using Http;
+
+      @service(#{ title: "Test API" })
+      namespace TestApi;
+
+      @route("/items")
+      interface Items {
+        @get list(): string[];
+      }
+    `,
+      { "route-prefix": "myapi/v1" },
+    );
+
+    const endpointsFile = Object.keys(results).find(
+      (k) => k.endsWith("Items.ts") && k.includes("endpoints"),
+    );
+    ok(endpointsFile);
+    ok(
+      results[endpointsFile].includes("`/myapi/v1/items`"),
+      "Expected literal prefix",
+    );
+  });
+
+  it("empty route-prefix emits path without any prefix", async () => {
+    const results = await emit(
+      `
+      import "@typespec/http";
+      using Http;
+
+      @service(#{ title: "Test API" })
+      namespace TestApi;
+
+      @route("/items")
+      interface Items {
+        @get list(): string[];
+      }
+    `,
+      { "route-prefix": "" },
+    );
+
+    const endpointsFile = Object.keys(results).find(
+      (k) => k.endsWith("Items.ts") && k.includes("endpoints"),
+    );
+    ok(endpointsFile);
+    ok(
+      results[endpointsFile].includes("`/items`"),
+      "Expected path with no prefix",
+    );
+    ok(
+      !results[endpointsFile].includes("`/api/items`"),
+      "Expected no default prefix applied",
+    );
+  });
+
+  it("route-prefix path params still work correctly with a prefix", async () => {
+    const results = await emit(
+      `
+      import "@typespec/http";
+      using Http;
+
+      @service(#{ title: "Test API" })
+      namespace TestApi;
+
+      @route("/widgets")
+      interface Widgets {
+        @get read(@path id: string): string;
+      }
+    `,
+      { "route-prefix": "api/v1" },
+    );
+
+    const endpointsFile = Object.keys(results).find(
+      (k) => k.endsWith("Widgets.ts") && k.includes("endpoints"),
+    );
+    ok(endpointsFile);
+    ok(
+      results[endpointsFile].includes("`/api/v1/widgets/${id}`"),
+      "Expected prefixed path with path param",
+    );
+  });
+
+  describe("resolveRoutePrefix", () => {
+    it("replaces {version} token with version value", () =>
+      strictEqual(resolveRoutePrefix("api/{version}", "v1.0"), "api/v1.0"));
+    it("removes {version} token when no version provided", () =>
+      strictEqual(resolveRoutePrefix("api/{version}", undefined), "api"));
+    it("returns empty string when prefix is empty", () =>
+      strictEqual(resolveRoutePrefix("", "v1.0"), ""));
+    it("returns empty string when prefix is empty and no version", () =>
+      strictEqual(resolveRoutePrefix("", undefined), ""));
+    it("returns literal prefix when no {version} token", () =>
+      strictEqual(resolveRoutePrefix("api/v2", "v1.0"), "api/v2"));
+    it("handles {version}-only prefix with a version", () =>
+      strictEqual(resolveRoutePrefix("{version}", "v2.0"), "v2.0"));
+    it("handles {version}-only prefix with no version", () =>
+      strictEqual(resolveRoutePrefix("{version}", undefined), ""));
+    it("strips leading and trailing slashes from resolved prefix", () =>
+      strictEqual(resolveRoutePrefix("/api/{version}/", "v1.0"), "api/v1.0"));
+    it("collapses double slashes when version is empty", () =>
+      strictEqual(
+        resolveRoutePrefix("api/{version}/rest", undefined),
+        "api/rest",
+      ));
   });
 
   // ─── deriveNpmVersion unit tests ─────────────────────────────────────────────
@@ -832,7 +1162,10 @@ describe("emitter", () => {
     const noVersions: never[] = [];
 
     it("returns npm-version option when set", () => {
-      strictEqual(deriveNpmVersion(noVersions, { "npm-version": "5.0.0" }), "5.0.0");
+      strictEqual(
+        deriveNpmVersion(noVersions, { "npm-version": "5.0.0" }),
+        "5.0.0",
+      );
     });
 
     it("returns CalVer when no versions and no option", () => {

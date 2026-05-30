@@ -87,6 +87,7 @@ ESLint uses the flat config format (`eslint.config.js`) with `typescript-eslint`
 After making any change to the codebase:
 
 1. **Rebuild and test the package:**
+
    ```powershell
    npm run build && npm test
    ```
@@ -99,6 +100,8 @@ After making any change to the codebase:
    Run this for every subdirectory under `example/` that contains a `build.ps1`.
 
 Both steps must pass before a change is considered complete.
+
+Update documentation and changelog
 
 ## Maintenance
 

@@ -32,7 +32,12 @@ import {
   isVisible,
   resolveRequestVisibility,
 } from "@typespec/http";
-import { getAllVersions, getAvailabilityMap, Availability, Version } from "@typespec/versioning";
+import {
+  getAllVersions,
+  getAvailabilityMap,
+  Availability,
+  Version,
+} from "@typespec/versioning";
 import { resolve } from "node:path";
 import {
   createRenderer,
@@ -51,7 +56,9 @@ import { EmitterOptions, createDiagnostic } from "./lib.js";
 
 // ─── Entry point ────────────────────────────────────────────────────────────
 
-export async function $onEmit(context: EmitContext<EmitterOptions>): Promise<void> {
+export async function $onEmit(
+  context: EmitContext<EmitterOptions>,
+): Promise<void> {
   const { program, emitterOutputDir, options } = context;
   if (program.compilerOptions.noEmit) return;
 
@@ -63,7 +70,14 @@ export async function $onEmit(context: EmitContext<EmitterOptions>): Promise<voi
   for (const service of services) {
     if (!isService(program, service.namespace)) continue;
     if (service.operations.length === 0) continue;
-    await emitService(program, service.namespace, service.operations, emitterOutputDir, options, renderer);
+    await emitService(
+      program,
+      service.namespace,
+      service.operations,
+      emitterOutputDir,
+      options,
+      renderer,
+    );
   }
 }
 
@@ -85,18 +99,25 @@ function buildRenderer(program: Program, options: EmitterOptions): Renderer {
   }
 }
 
-function resolveTemplateOverrides(templates?: TemplateOverrides): TemplateOverrides {
+function resolveTemplateOverrides(
+  templates?: TemplateOverrides,
+): TemplateOverrides {
   if (!templates) return {};
   const result: TemplateOverrides = {};
   for (const [key, val] of Object.entries(templates)) {
-    if (val) (result as Record<string, string>)[key] = resolve(process.cwd(), val);
+    if (val)
+      (result as Record<string, string>)[key] = resolve(process.cwd(), val);
   }
   return result;
 }
 
 // ─── File writing helper ─────────────────────────────────────────────────────
 
-async function writeFile(program: Program, filePath: string, content: string): Promise<void> {
+async function writeFile(
+  program: Program,
+  filePath: string,
+  content: string,
+): Promise<void> {
   const dir = filePath.substring(0, filePath.lastIndexOf("/"));
   if (dir) await program.host.mkdirp(dir);
   await program.host.writeFile(filePath, content);
@@ -134,13 +155,18 @@ export function toCalVer(date: Date): string {
  * 2. Semver parsed from the targeted TypeSpec API version
  * 3. CalVer (`YYYY.MM.DD`) fallback
  */
-export function deriveNpmVersion(allVersions: Version[], options: EmitterOptions): string {
+export function deriveNpmVersion(
+  allVersions: Version[],
+  options: EmitterOptions,
+): string {
   if (options["npm-version"]) return options["npm-version"];
 
   let versionString: string | undefined;
   if (allVersions.length > 0) {
     if (options["target-version"] && options["all-versions"] !== true) {
-      versionString = allVersions.find((v) => v.value === options["target-version"])?.value;
+      versionString = allVersions.find(
+        (v) => v.value === options["target-version"],
+      )?.value;
     }
     versionString ??= allVersions[allVersions.length - 1].value;
   }
@@ -172,7 +198,10 @@ function resolveTargetVersions(
         createDiagnostic({
           code: "version-not-found",
           target: NoTarget,
-          format: { version: targetValue, available: "none (API is not versioned)" },
+          format: {
+            version: targetValue,
+            available: "none (API is not versioned)",
+          },
         }),
       );
       return null;
@@ -187,7 +216,10 @@ function resolveTargetVersions(
         createDiagnostic({
           code: "version-not-found",
           target: NoTarget,
-          format: { version: targetValue, available: versions.map((v) => v.value).join(", ") },
+          format: {
+            version: targetValue,
+            available: versions.map((v) => v.value).join(", "),
+          },
         }),
       );
       return null;
@@ -200,7 +232,11 @@ function resolveTargetVersions(
 
 // ─── Version filtering ───────────────────────────────────────────────────────
 
-function isOpInVersion(program: Program, op: HttpOperation, version: Version): boolean {
+function isOpInVersion(
+  program: Program,
+  op: HttpOperation,
+  version: Version,
+): boolean {
   const avail = getAvailabilityMap(program, op.operation);
   if (!avail) return true;
   const a = avail.get(version.name);
@@ -228,13 +264,23 @@ function requestTypeSuffix(verb: string): string {
   }
 }
 
-const MERGE_PATCH_SUFFIXES = ["MergePatchUpdate", "MergePatchUpdateReplaceOnly", "MergePatchCreateOrUpdate"];
+const MERGE_PATCH_SUFFIXES = [
+  "MergePatchUpdate",
+  "MergePatchUpdateReplaceOnly",
+  "MergePatchCreateOrUpdate",
+];
 
 function isSynthesizedMergePatchModel(model: Model): boolean {
-  return model.name ? MERGE_PATCH_SUFFIXES.some((s) => model.name!.endsWith(s)) : false;
+  return model.name
+    ? MERGE_PATCH_SUFFIXES.some((s) => model.name!.endsWith(s))
+    : false;
 }
 
-function hasHiddenProperties(model: Model, visibility: Visibility, program: Program): boolean {
+function hasHiddenProperties(
+  model: Model,
+  visibility: Visibility,
+  program: Program,
+): boolean {
   for (const [, prop] of flattenProperties(model)) {
     if (!isVisible(program, prop, visibility)) return true;
   }
@@ -280,22 +326,49 @@ async function emitService(
   const useVersionedFolders = options["all-versions"] === true;
 
   // Group operations by container (Interface or Namespace)
-  const byContainer = new Map<string, { name: string; container: Interface | Namespace; ops: HttpOperation[] }>();
+  const byContainer = new Map<
+    string,
+    { name: string; container: Interface | Namespace; ops: HttpOperation[] }
+  >();
   for (const op of operations) {
     const c = op.container;
-    const key = c.kind === "Interface" ? c.name : `__ns_${(c as Namespace).name}`;
+    const key =
+      c.kind === "Interface" ? c.name : `__ns_${(c as Namespace).name}`;
     const name = c.kind === "Interface" ? c.name : serviceNs.name;
-    if (!byContainer.has(key)) byContainer.set(key, { name, container: c, ops: [] });
+    if (!byContainer.has(key))
+      byContainer.set(key, { name, container: c, ops: [] });
     byContainer.get(key)!.ops.push(op);
   }
 
+  const prefixTemplate = options["route-prefix"] ?? "api/{version}";
+
   if (versionsToEmit.length > 0) {
     for (const version of versionsToEmit) {
-      const vDir = useVersionedFolders ? resolvePath(outputDir, version.value) : outputDir;
-      await emitVersion(program, nsFullName, byContainer, vDir, version, renderer);
+      const vDir = useVersionedFolders
+        ? resolvePath(outputDir, version.value)
+        : outputDir;
+      const routePrefix = resolveRoutePrefix(prefixTemplate, version.value);
+      await emitVersion(
+        program,
+        nsFullName,
+        byContainer,
+        vDir,
+        version,
+        routePrefix,
+        renderer,
+      );
     }
   } else {
-    await emitVersion(program, nsFullName, byContainer, outputDir, undefined, renderer);
+    const routePrefix = resolveRoutePrefix(prefixTemplate, undefined);
+    await emitVersion(
+      program,
+      nsFullName,
+      byContainer,
+      outputDir,
+      undefined,
+      routePrefix,
+      renderer,
+    );
   }
 
   // Emit package.json once at the root output dir
@@ -306,9 +379,13 @@ async function emitService(
 async function emitVersion(
   program: Program,
   nsFullName: string,
-  byContainer: Map<string, { name: string; container: Interface | Namespace; ops: HttpOperation[] }>,
+  byContainer: Map<
+    string,
+    { name: string; container: Interface | Namespace; ops: HttpOperation[] }
+  >,
   vDir: string,
   version: Version | undefined,
+  routePrefix: string,
   renderer: Renderer,
 ): Promise<void> {
   const models = new Map<string, Model>();
@@ -320,14 +397,28 @@ async function emitVersion(
   // full collection pass. Models that only appear as write-operation bodies (and
   // never as read-operation responses) will be suppressed in favour of their
   // filtered request types. Models that appear in both contexts are kept.
-  const readResponseModelNames = collectReadResponseModelNames(program, byContainer, version);
+  const readResponseModelNames = collectReadResponseModelNames(
+    program,
+    byContainer,
+    version,
+  );
 
   // First pass: collect all types and build request types
   for (const { ops } of byContainer.values()) {
-    const vOps = version ? ops.filter((op) => isOpInVersion(program, op, version)) : ops;
+    const vOps = version
+      ? ops.filter((op) => isOpInVersion(program, op, version))
+      : ops;
     for (const op of vOps) {
       collectTypesFromOp(op, program, models, enums);
-      collectRequestType(op, program, models, enums, version, requestTypes, requestTypeBaseModels);
+      collectRequestType(
+        op,
+        program,
+        models,
+        enums,
+        version,
+        requestTypes,
+        requestTypeBaseModels,
+      );
     }
   }
 
@@ -339,12 +430,20 @@ async function emitVersion(
   // Emit endpoint files and collect their relative paths for the index
   const endpointExports: string[] = [];
   for (const { name, container, ops } of byContainer.values()) {
-    const vOps = version ? ops.filter((op) => isOpInVersion(program, op, version)) : ops;
+    const vOps = version
+      ? ops.filter((op) => isOpInVersion(program, op, version))
+      : ops;
     if (vOps.length === 0) continue;
 
     const doc = getDoc(program, container);
     const className = `${name}Endpoints`;
-    const content = buildEndpointsFile(className, vOps, doc, renderer);
+    const content = buildEndpointsFile(
+      className,
+      vOps,
+      doc,
+      routePrefix,
+      renderer,
+    );
     const relPath = `endpoints/${name}.ts`;
     await writeFile(program, resolvePath(vDir, relPath), content);
     endpointExports.push(`./endpoints/${name}.js`);
@@ -357,7 +456,16 @@ async function emitVersion(
     requestTypes.size > 0;
 
   if (hasModels) {
-    const content = buildModelsFile(nsFullName, models, enums, requestTypes, requestTypeBaseModels, readResponseModelNames, program, renderer);
+    const content = buildModelsFile(
+      nsFullName,
+      models,
+      enums,
+      requestTypes,
+      requestTypeBaseModels,
+      readResponseModelNames,
+      program,
+      renderer,
+    );
     await writeFile(program, resolvePath(vDir, "models.ts"), content);
   }
 
@@ -437,18 +545,24 @@ function collectRequestType(
 
 function collectReadResponseModelNames(
   program: Program,
-  byContainer: Map<string, { name: string; container: Interface | Namespace; ops: HttpOperation[] }>,
+  byContainer: Map<
+    string,
+    { name: string; container: Interface | Namespace; ops: HttpOperation[] }
+  >,
   version: Version | undefined,
 ): Set<string> {
   const tmpModels = new Map<string, Model>();
   const tmpEnums = new Map<string, Enum>();
   for (const { ops } of byContainer.values()) {
-    const vOps = version ? ops.filter((op) => isOpInVersion(program, op, version)) : ops;
+    const vOps = version
+      ? ops.filter((op) => isOpInVersion(program, op, version))
+      : ops;
     for (const op of vOps) {
       if (op.verb !== "get" && op.verb !== "head") continue;
       for (const resp of op.responses) {
         for (const content of resp.responses) {
-          if (content.body) mapTsType(content.body.type, program, tmpModels, tmpEnums);
+          if (content.body)
+            mapTsType(content.body.type, program, tmpModels, tmpEnums);
         }
       }
     }
@@ -472,7 +586,8 @@ function deepCollectTypes(
         const prevModels = models.size;
         const prevEnums = enums.size;
         mapTsType(prop.type, program, models, enums);
-        if (models.size !== prevModels || enums.size !== prevEnums) changed = true;
+        if (models.size !== prevModels || enums.size !== prevEnums)
+          changed = true;
       }
     }
   }
@@ -501,12 +616,31 @@ function buildModelsFile(
     if (!isEmittable(model, nsFullName)) continue;
     // Suppress models that have a request type and are NOT needed for any
     // GET/HEAD response — they'll appear only via their filtered request type.
-    if (requestTypeBaseModels.has(model.name!) && !readResponseModelNames.has(model.name!)) continue;
-    parts.push(renderer.renderInterface(buildInterfaceView(model, program, models, enums)));
+    if (
+      requestTypeBaseModels.has(model.name!) &&
+      !readResponseModelNames.has(model.name!)
+    )
+      continue;
+    parts.push(
+      renderer.renderInterface(
+        buildInterfaceView(model, program, models, enums),
+      ),
+    );
   }
 
   for (const [, rt] of requestTypes) {
-    parts.push(renderer.renderInterface(buildFilteredInterfaceView(rt.name, rt.doc, rt.props, program, models, enums)));
+    parts.push(
+      renderer.renderInterface(
+        buildFilteredInterfaceView(
+          rt.name,
+          rt.doc,
+          rt.props,
+          program,
+          models,
+          enums,
+        ),
+      ),
+    );
   }
 
   const body = parts.join("\n\n");
@@ -521,13 +655,19 @@ function buildInterfaceView(
   enums: Map<string, Enum>,
 ): InterfaceView {
   const typeParams = collectTypeParams(model);
-  const genericSuffix = typeParams.length > 0 ? `<${typeParams.join(", ")}>` : "";
+  const genericSuffix =
+    typeParams.length > 0 ? `<${typeParams.join(", ")}>` : "";
   const doc = getDoc(program, model);
   return {
     doc: doc ?? undefined,
     interfaceName: model.name!,
     genericSuffix,
-    properties: buildPropertyViews(flattenProperties(model), program, models, enums),
+    properties: buildPropertyViews(
+      flattenProperties(model),
+      program,
+      models,
+      enums,
+    ),
   };
 }
 
@@ -572,7 +712,8 @@ function buildEnumView(e: Enum, program: Program): EnumView {
   const members: EnumMemberView[] = [];
   for (const [, member] of e.members) {
     const memberDoc = getDoc(program, member);
-    const stringValue = typeof member.value === "string" ? member.value : member.name;
+    const stringValue =
+      typeof member.value === "string" ? member.value : member.name;
     members.push({
       doc: memberDoc ?? undefined,
       name: member.name,
@@ -588,21 +729,35 @@ function buildEndpointsFile(
   className: string,
   ops: HttpOperation[],
   doc: string | undefined,
+  routePrefix: string,
   renderer: Renderer,
 ): string {
-  const methods: EndpointMethodView[] = ops.map((op) => buildEndpointMethodView(op));
-  const endpointsView: EndpointsView = { doc: doc ?? undefined, className, methods };
+  const methods: EndpointMethodView[] = ops.map((op) =>
+    buildEndpointMethodView(op, routePrefix),
+  );
+  const endpointsView: EndpointsView = {
+    doc: doc ?? undefined,
+    className,
+    methods,
+  };
   const body = renderer.renderEndpoints(endpointsView);
   const fileView: FileView = { body, fileName: `${className}.ts` };
   return renderer.renderFile(fileView);
 }
 
-function buildEndpointMethodView(op: HttpOperation): EndpointMethodView {
+function buildEndpointMethodView(
+  op: HttpOperation,
+  routePrefix: string,
+): EndpointMethodView {
   const pathParams = op.parameters.parameters
     .filter((p) => p.type === "path")
     .map((p) => p.param.name);
 
-  const functionText = buildEndpointFunctionText(op.path, pathParams);
+  const functionText = buildEndpointFunctionText(
+    op.path,
+    pathParams,
+    routePrefix,
+  );
 
   return {
     name: op.operation.name,
@@ -613,10 +768,31 @@ function buildEndpointMethodView(op: HttpOperation): EndpointMethodView {
 /** Backtick character constant — avoids escape issues in template literals. */
 const BT = "`";
 
-function buildEndpointFunctionText(path: string, pathParamNames: string[]): string {
+/**
+ * Resolves the route prefix by substituting the `{version}` token with the
+ * actual version value. When no version is provided the token (and any
+ * resulting trailing slash) is removed. Leading/trailing slashes are stripped
+ * so the caller can safely prepend `/${prefix}${path}`.
+ */
+export function resolveRoutePrefix(
+  prefix: string,
+  versionValue: string | undefined,
+): string {
+  let resolved = prefix.replace("{version}", versionValue ?? "");
+  // Collapse consecutive slashes then strip leading/trailing slashes.
+  resolved = resolved.replace(/\/+/g, "/").replace(/^\/+|\/+$/g, "");
+  return resolved;
+}
+
+function buildEndpointFunctionText(
+  path: string,
+  pathParamNames: string[],
+  routePrefix: string,
+): string {
   // Convert {param} to ${param} for JS template literals.
   // In replacement strings: $$ → $, $1 → first capture group.
-  const templatePath = path.replace(/\{([^}]+)\}/g, "$${$1}");
+  const fullPath = routePrefix ? `/${routePrefix}${path}` : path;
+  const templatePath = fullPath.replace(/\{([^}]+)\}/g, "$${$1}");
   const pathExpr = BT + templatePath + BT;
 
   if (pathParamNames.length === 0) {
@@ -675,7 +851,10 @@ function mapTsType(
 
       if (m.templateMapper?.args) {
         const args = m.templateMapper.args
-          .filter((a): a is Type => (a as { entityKind?: string }).entityKind === "Type")
+          .filter(
+            (a): a is Type =>
+              (a as { entityKind?: string }).entityKind === "Type",
+          )
           .map((a) => mapTsType(a, program, models, enums));
         if (m.name === "Array" && args.length === 1) return `${args[0]}[]`;
         const decl = m.namespace?.models.get(m.name);
@@ -811,13 +990,17 @@ function builtinScalarName(scalar: Scalar): string {
 function isEmittable(model: Model, serviceNsName: string): boolean {
   if (!model.name) return false;
   const ns = model.namespace ? getNamespaceFullName(model.namespace) : "";
-  return ns === serviceNsName || ns.startsWith(`${serviceNsName}.`) || ns === "";
+  return (
+    ns === serviceNsName || ns.startsWith(`${serviceNsName}.`) || ns === ""
+  );
 }
 
 function isEmittableEnum(e: Enum, serviceNsName: string): boolean {
   if (!e.name) return false;
   const ns = e.namespace ? getNamespaceFullName(e.namespace) : "";
-  return ns === serviceNsName || ns.startsWith(`${serviceNsName}.`) || ns === "";
+  return (
+    ns === serviceNsName || ns.startsWith(`${serviceNsName}.`) || ns === ""
+  );
 }
 
 // ─── Model helpers ───────────────────────────────────────────────────────────
@@ -843,7 +1026,11 @@ function collectTypeParams(model: Model): string[] {
   return [...new Set(params)];
 }
 
-function gatherTemplateParams(type: Type, out: string[], visited: Set<Type> = new Set()): void {
+function gatherTemplateParams(
+  type: Type,
+  out: string[],
+  visited: Set<Type> = new Set(),
+): void {
   if (visited.has(type)) return;
   visited.add(type);
 
@@ -860,7 +1047,8 @@ function gatherTemplateParams(type: Type, out: string[], visited: Set<Type> = ne
         }
       }
     }
-    for (const [, p] of m.properties) gatherTemplateParams(p.type, out, visited);
+    for (const [, p] of m.properties)
+      gatherTemplateParams(p.type, out, visited);
   }
 }
 
@@ -876,4 +1064,3 @@ export { sanitizeVersionForPath };
 function capitalize(s: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
-
