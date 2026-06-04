@@ -1,5 +1,6 @@
-{{#if doc}}/**
- * {{docLines doc " * "}}
- */
-{{/if}}export const {{className}} = {
-{{{methodsBlock}}}
+{{{renderDoc doc ""}}}export const {{className}} = {
+{{#each methods}}
+
+{{{renderDoc doc "  "}}}  {{name}}: {{functionText}},
+{{/each}}
+} as const;
