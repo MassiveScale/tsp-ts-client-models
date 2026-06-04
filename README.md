@@ -65,60 +65,60 @@ Each template receives the corresponding view model as its Handlebars context.
 
 **`enum`** — `EnumView`
 
-| Field | Type | Description |
-|---|---|---|
-| `doc` | `string \| undefined` | JSDoc text from `@doc`. |
-| `enumName` | `string` | Enum name. |
-| `members[]` | `EnumMemberView[]` | Ordered list of members. |
-| `members[].doc` | `string \| undefined` | Per-member `@doc` text. |
-| `members[].name` | `string` | Member name. |
-| `members[].memberValue` | `string` | Wire string value. |
+| Field                   | Type                  | Description              |
+| ----------------------- | --------------------- | ------------------------ |
+| `doc`                   | `string \| undefined` | JSDoc text from `@doc`.  |
+| `enumName`              | `string`              | Enum name.               |
+| `members[]`             | `EnumMemberView[]`    | Ordered list of members. |
+| `members[].doc`         | `string \| undefined` | Per-member `@doc` text.  |
+| `members[].name`        | `string`              | Member name.             |
+| `members[].memberValue` | `string`              | Wire string value.       |
 
 **`interface`** — `InterfaceView`
 
-| Field | Type | Description |
-|---|---|---|
-| `doc` | `string \| undefined` | JSDoc text from `@doc`. |
-| `interfaceName` | `string` | PascalCase interface name. |
-| `genericSuffix` | `string` | Generic parameter string, e.g. `<T>`, or `""`. |
-| `properties[]` | `PropertyView[]` | Ordered list of properties. |
-| `properties[].doc` | `string \| undefined` | Per-property `@doc` text. |
-| `properties[].name` | `string` | Property name. |
-| `properties[].type` | `string` | TypeScript type string. |
-| `properties[].optional` | `boolean` | When `true`, emit `name?`. |
+| Field                   | Type                  | Description                                    |
+| ----------------------- | --------------------- | ---------------------------------------------- |
+| `doc`                   | `string \| undefined` | JSDoc text from `@doc`.                        |
+| `interfaceName`         | `string`              | PascalCase interface name.                     |
+| `genericSuffix`         | `string`              | Generic parameter string, e.g. `<T>`, or `""`. |
+| `properties[]`          | `PropertyView[]`      | Ordered list of properties.                    |
+| `properties[].doc`      | `string \| undefined` | Per-property `@doc` text.                      |
+| `properties[].name`     | `string`              | Property name.                                 |
+| `properties[].type`     | `string`              | TypeScript type string.                        |
+| `properties[].optional` | `boolean`             | When `true`, emit `name?`.                     |
 
 **`endpoints`** — `EndpointsView`
 
-| Field | Type | Description |
-|---|---|---|
-| `doc` | `string \| undefined` | JSDoc text from `@doc`. |
-| `className` | `string` | Exported `const` name, e.g. `WidgetsEndpoints`. |
-| `methods[]` | `EndpointMethodView[]` | Ordered list of endpoint methods. |
-| `methods[].doc` | `string \| undefined` | Per-operation `@doc` text. |
-| `methods[].name` | `string` | camelCase method name. |
-| `methods[].functionText` | `string` | Pre-rendered arrow function, e.g. `(id: string) => \`/api/v1.0/widgets/${id}\``. |
+| Field                    | Type                   | Description                                                                      |
+| ------------------------ | ---------------------- | -------------------------------------------------------------------------------- |
+| `doc`                    | `string \| undefined`  | JSDoc text from `@doc`.                                                          |
+| `className`              | `string`               | Exported `const` name, e.g. `WidgetsEndpoints`.                                  |
+| `methods[]`              | `EndpointMethodView[]` | Ordered list of endpoint methods.                                                |
+| `methods[].doc`          | `string \| undefined`  | Per-operation `@doc` text.                                                       |
+| `methods[].name`         | `string`               | camelCase method name.                                                           |
+| `methods[].functionText` | `string`               | Pre-rendered arrow function, e.g. `(id: string) => \`/api/v1.0/widgets/${id}\``. |
 
 **`file`** — `FileView`
 
-| Field | Type | Description |
-|---|---|---|
-| `body` | `string` | Pre-rendered inner content to wrap with the file header. |
-| `fileName` | `string` | Basename of the file being emitted. |
+| Field      | Type     | Description                                              |
+| ---------- | -------- | -------------------------------------------------------- |
+| `body`     | `string` | Pre-rendered inner content to wrap with the file header. |
+| `fileName` | `string` | Basename of the file being emitted.                      |
 
 **`index`** — `IndexView`
 
-| Field | Type | Description |
-|---|---|---|
+| Field       | Type       | Description                                                   |
+| ----------- | ---------- | ------------------------------------------------------------- |
 | `exports[]` | `string[]` | Ordered list of relative import paths (with `.js` extension). |
 
 ### Built-in Handlebars helpers
 
-| Helper | Signature | Description |
-|---|---|---|
+| Helper      | Signature              | Description                                                                                                                                           |
+| ----------- | ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `renderDoc` | `renderDoc doc indent` | Formats `doc` as a JSDoc comment indented by `indent`. Single-line: `/** text */`. Multi-line: full `/**…*/` block. Returns `""` when `doc` is falsy. |
-| `docLines` | `docLines doc prefix` | Joins `doc` lines with `\n{prefix}`. Useful for embedding multi-line text inside a comment block. |
-| `isDefined` | `isDefined value` | Returns `true` when `value` is not `undefined`. |
-| `eq` | `eq a b` | Returns `true` when `a === b`. |
+| `docLines`  | `docLines doc prefix`  | Joins `doc` lines with `\n{prefix}`. Useful for embedding multi-line text inside a comment block.                                                     |
+| `isDefined` | `isDefined value`      | Returns `true` when `value` is not `undefined`.                                                                                                       |
+| `eq`        | `eq a b`               | Returns `true` when `a === b`.                                                                                                                        |
 
 ## Using the generated client
 
