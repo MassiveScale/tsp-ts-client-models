@@ -251,8 +251,8 @@ describe("emitter", () => {
     ok(modelsFile, "Expected models.ts");
     const content = results[modelsFile];
     ok(content.includes("export enum Color"), "Expected enum declaration");
-    ok(content.includes('Red = "red"'), "Expected Red member");
-    ok(content.includes('Green = "green"'), "Expected Green member");
+    ok(content.includes("Red = 'red'"), "Expected Red member");
+    ok(content.includes("Green = 'green'"), "Expected Green member");
     ok(content.includes("/** Widget colours. */"), "Expected enum JSDoc");
     ok(content.includes("/** Red. */"), "Expected member JSDoc");
   });
