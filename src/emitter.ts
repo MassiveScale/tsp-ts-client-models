@@ -443,6 +443,7 @@ async function emitVersion(
       doc,
       routePrefix,
       renderer,
+      program,
     );
     const relPath = `endpoints/${name}.ts`;
     await writeFile(program, resolvePath(vDir, relPath), content);
@@ -731,9 +732,10 @@ function buildEndpointsFile(
   doc: string | undefined,
   routePrefix: string,
   renderer: Renderer,
+  program: Program,
 ): string {
   const methods: EndpointMethodView[] = ops.map((op) =>
-    buildEndpointMethodView(op, routePrefix),
+    buildEndpointMethodView(op, routePrefix, program),
   );
   const endpointsView: EndpointsView = {
     doc: doc ?? undefined,
@@ -748,6 +750,7 @@ function buildEndpointsFile(
 function buildEndpointMethodView(
   op: HttpOperation,
   routePrefix: string,
+  program: Program,
 ): EndpointMethodView {
   const pathParams = op.parameters.parameters
     .filter((p) => p.type === "path")
@@ -760,6 +763,7 @@ function buildEndpointMethodView(
   );
 
   return {
+    doc: getDoc(program, op.operation) ?? undefined,
     name: op.operation.name,
     functionText,
   };

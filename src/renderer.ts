@@ -142,6 +142,16 @@ function createHandlebarsEnv(): typeof Handlebars {
     return doc.split("\n").join(sep);
   });
 
+  env.registerHelper("renderDoc", (doc: unknown, indent: unknown) => {
+    if (typeof doc !== "string" || !doc) return "";
+    const ind = typeof indent === "string" ? indent : "";
+    if (!doc.includes("\n")) return `${ind}/** ${doc} */\n`;
+    const lines = [`${ind}/**`];
+    for (const line of doc.split("\n")) lines.push(`${ind} * ${line}`);
+    lines.push(`${ind} */`);
+    return lines.join("\n") + "\n";
+  });
+
   env.registerHelper("isDefined", (value: unknown) => value !== undefined);
   env.registerHelper("eq", (a: unknown, b: unknown) => a === b);
 
@@ -156,62 +166,6 @@ function loadTemplate(
   const path = override ?? resolve(TEMPLATES_DIR, `${name}.hbs`);
   const source = readFileSync(path, "utf-8");
   return env.compile(source, { noEscape: true });
-}
-
-// ---------------------------------------------------------------------------
-// Per-element text renderers
-// ---------------------------------------------------------------------------
-
-function renderDocBlock(doc: string | undefined, indent: string): string {
-  if (!doc) return "";
-  if (!doc.includes("\n")) return `${indent}/** ${doc} */\n`;
-  const lines = [`${indent}/**`];
-  for (const line of doc.split("\n")) lines.push(`${indent} * ${line}`);
-  lines.push(`${indent} */`);
-  return lines.join("\n") + "\n";
-}
-
-function renderPropertyBlock(p: PropertyView): string {
-  const lines: string[] = [];
-  if (p.doc) {
-    if (!p.doc.includes("\n")) {
-      lines.push(`  /** ${p.doc} */`);
-    } else {
-      lines.push("  /**");
-      for (const docLine of p.doc.split("\n")) lines.push(`   * ${docLine}`);
-      lines.push("   */");
-    }
-  }
-  lines.push(`  ${p.name}${p.optional ? "?" : ""}: ${p.type};`);
-  return lines.join("\n");
-}
-
-function renderEnumMemberBlock(m: EnumMemberView): string {
-  const lines: string[] = [];
-  if (m.doc) {
-    if (!m.doc.includes("\n")) {
-      lines.push(`  /** ${m.doc} */`);
-    } else {
-      lines.push("  /**");
-      for (const docLine of m.doc.split("\n")) lines.push(`   * ${docLine}`);
-      lines.push("   */");
-    }
-  }
-  lines.push(`  ${m.name} = "${m.memberValue}",`);
-  return lines.join("\n");
-}
-
-function renderEndpointMethodBlock(m: EndpointMethodView): string {
-  const lines: string[] = [];
-  if (m.doc) {
-    lines.push("  /**");
-    for (const docLine of m.doc.split("\n")) {
-      lines.push(`   * ${docLine}`);
-    }
-    lines.push("   */");
-  }
-  lines.push(`  ${m.name}: ${m.functionText},`);
-  return lines.join("\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -239,36 +193,15 @@ export function createRenderer(overrides: TemplateOverrides = {}): Renderer {
     },
 
     renderInterface(view) {
-      const docBlock = renderDocBlock(view.doc, "");
-      const blocks = view.properties.map(renderPropertyBlock);
-      const propertiesBlock =
-        blocks.length > 0 ? blocks.join("\n") + "\n}" : "}";
-      return interfaceTemplate({
-        docBlock,
-        interfaceName: view.interfaceName,
-        genericSuffix: view.genericSuffix,
-        propertiesBlock,
-      });
+      return interfaceTemplate(view);
     },
 
     renderEnum(view) {
-      const docBlock = renderDocBlock(view.doc, "");
-      const blocks = view.members.map(renderEnumMemberBlock);
-      const membersBlock = blocks.length > 0 ? blocks.join("\n") + "\n}" : "}";
-      return enumTemplate({ docBlock, enumName: view.enumName, membersBlock });
+      return enumTemplate(view);
     },
 
     renderEndpoints(view) {
-      const blocks = view.methods.map(renderEndpointMethodBlock);
-      // Closing `} as const;` is embedded in methodsBlock so the template can use
-      // safe `{{{methodsBlock}}}` (3 braces) — 4 braces would be CLOSE_RAW_BLOCK.
-      const methodsBlock =
-        blocks.length > 0 ? blocks.join("\n") + "\n} as const;" : "} as const;";
-      return endpointsTemplate({
-        doc: view.doc,
-        className: view.className,
-        methodsBlock,
-      });
+      return endpointsTemplate(view);
     },
 
     renderIndex(view) {
