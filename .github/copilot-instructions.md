@@ -99,9 +99,9 @@ After making any change to the codebase:
    ```
    Run this for every subdirectory under `example/` that contains a `build.ps1`.
 
-Both steps must pass before a change is considered complete.
+3. **Update documentation and changelog**
 
-Update documentation and changelog
+All steps must pass before a change is considered complete.
 
 ## Maintenance
 

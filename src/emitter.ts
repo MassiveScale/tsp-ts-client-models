@@ -371,9 +371,19 @@ async function emitService(
     );
   }
 
-  // Emit package.json once at the root output dir
-  const packageJson = buildPackageJson(nsFullName, allVersions, options);
+  // Emit package.json and tsconfig.json once at the root output dir
+  const packageJson = buildPackageJson(
+    nsFullName,
+    versionsToEmit,
+    allVersions,
+    options,
+  );
   await writeFile(program, resolvePath(outputDir, "package.json"), packageJson);
+  await writeFile(
+    program,
+    resolvePath(outputDir, "tsconfig.json"),
+    buildTsConfig(),
+  );
 }
 
 async function emitVersion(
@@ -809,23 +819,76 @@ function buildEndpointFunctionText(
 
 // ─── package.json generation ─────────────────────────────────────────────────
 
+function nsToPackageName(nsFullName: string): string {
+  return nsFullName
+    .split(".")
+    .map((part) =>
+      part
+        .replace(/([a-z])([A-Z])/g, "$1-$2")
+        .replace(/([A-Z]+)([A-Z][a-z])/g, "$1-$2")
+        .toLowerCase(),
+    )
+    .join("-");
+}
+
 function buildPackageJson(
   nsFullName: string,
+  versionsToEmit: Version[],
   allVersions: Version[],
   options: EmitterOptions,
 ): string {
   const version = deriveNpmVersion(allVersions, options);
   const description =
     options["npm-description"] ?? `Client models for the ${nsFullName} API`;
+  const useVersionedFolders = options["all-versions"] === true;
 
   const pkg: Record<string, unknown> = {};
-  if (options["npm-package-name"]) pkg.name = options["npm-package-name"];
+  pkg.name = options["npm-package-name"] ?? nsToPackageName(nsFullName);
   pkg.version = version;
   pkg.description = description;
   pkg.type = "module";
   pkg.sideEffects = false;
 
+  if (useVersionedFolders && versionsToEmit.length > 0) {
+    const exports: Record<string, Record<string, string>> = {};
+    for (const v of versionsToEmit) {
+      exports[`./${v.value}`] = {
+        import: `./dist/${v.value}/index.js`,
+        types: `./dist/${v.value}/index.d.ts`,
+      };
+    }
+    pkg.exports = exports;
+  } else {
+    pkg.exports = {
+      ".": { import: "./dist/index.js", types: "./dist/index.d.ts" },
+    };
+    pkg.main = "./dist/index.js";
+    pkg.types = "./dist/index.d.ts";
+  }
+
+  pkg.files = ["dist"];
+  pkg.scripts = { build: "tsc" };
+  pkg.devDependencies = { typescript: "latest" };
+
   return JSON.stringify(pkg, null, 2) + "\n";
+}
+
+function buildTsConfig(): string {
+  const config = {
+    compilerOptions: {
+      target: "ES2020",
+      module: "NodeNext",
+      moduleResolution: "NodeNext",
+      declaration: true,
+      declarationMap: true,
+      sourceMap: true,
+      outDir: "./dist",
+      strict: true,
+    },
+    include: ["./**/*.ts"],
+    exclude: ["dist", "node_modules"],
+  };
+  return JSON.stringify(config, null, 2) + "\n";
 }
 
 // ─── Type mapping ────────────────────────────────────────────────────────────
