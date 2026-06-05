@@ -104,7 +104,7 @@ After being asked to cleanup the codebase, or making any change to the codebase:
 3. **Update documentation and changelog**
    - Update `README.md`
    - Update `CHANGELOG.md`
-   - When `READNE.md` exceeds reasonable size for readability, break into multiple files under `/docs`
+   - When `README.md` exceeds reasonable size for readability, break into multiple files under `/docs`
 4. **Lint and format**
 
    ```powershell
