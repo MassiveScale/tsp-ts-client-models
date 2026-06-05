@@ -1,2 +1,6 @@
-{{{docBlock}}}export interface {{interfaceName}}{{genericSuffix}} {
-{{{propertiesBlock}}}
+{{{renderDoc doc ""}}}export interface {{interfaceName}}{{genericSuffix}} {
+{{#each properties}}
+
+{{{renderDoc doc "  "}}}  {{name}}{{#if optional}}?{{/if}}: {{type}};
+{{/each}}
+}
