@@ -84,7 +84,7 @@ ESLint uses the flat config format (`eslint.config.js`) with `typescript-eslint`
 
 ## After Every Change
 
-After making any change to the codebase:
+After being asked to cleanup the codebase, or making any change to the codebase:
 
 1. **Rebuild and test the package:**
 
@@ -93,13 +93,23 @@ After making any change to the codebase:
    ```
 
 2. **Rebuild all TypeSpec examples:**
+
    ```powershell
    cd example/simple-api && npm install && tsp compile .
    cd example/versioned-api && npm install && ./build.ps1
    ```
+
    Run this for every subdirectory under `example/` that contains a `build.ps1`.
 
 3. **Update documentation and changelog**
+   - Update `README.md`
+   - Update `CHANGELOG.md`
+   - When `READNE.md` exceeds reasonable size for readability, break into multiple files under `/docs`
+4. **Lint and format**
+
+   ```powershell
+   npm run format
+   ```
 
 All steps must pass before a change is considered complete.
 

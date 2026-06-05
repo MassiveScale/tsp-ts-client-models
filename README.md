@@ -35,7 +35,7 @@ options:
 | `target-version`   | `string`  | Latest declared version                 | Emit only this API version. Ignored when `all-versions` is `true`.                                                                                                        |
 | `all-versions`     | `boolean` | `false`                                 | When `true`, generate clients for every declared API version in separate subfolders.                                                                                      |
 | `route-prefix`     | `string`  | `api/{version}`                         | Prefix prepended to every endpoint path. Use `{version}` as a placeholder for the API version (e.g. `api/{version}` → `/api/v1.0/items`). Set to `""` to emit bare paths. |
-| `npm-package-name` | `string`  | Derived from TypeSpec namespace         | The name given to the generated package. When omitted, the namespace is converted to kebab-case (e.g. `MyOrg.PetApi` → `my-org-pet-api`).                                |
+| `npm-package-name` | `string`  | Derived from TypeSpec namespace         | The name given to the generated package. When omitted, the namespace is converted to kebab-case (e.g. `MyOrg.PetApi` → `my-org-pet-api`).                                 |
 | `npm-version`      | `string`  | —                                       | The version assigned to the generated package.                                                                                                                            |
 | `npm-description`  | `string`  | `Client models for the {namespace} API` | Description applied to the generated package.                                                                                                                             |
 | `templates`        | `object`  | —                                       | Override individual built-in Handlebars templates. See [Customizing templates](#customizing-templates).                                                                   |
@@ -143,7 +143,7 @@ Consumers install and import it as a normal ESM package:
 import { Widget, WidgetCreateRequest } from "your-package-name";
 import { WidgetsEndpoints } from "your-package-name";
 
-const url = WidgetsEndpoints.list();  // "/api/v2.0/widgets"
+const url = WidgetsEndpoints.list(); // "/api/v2.0/widgets"
 ```
 
 For multi-version output (`all-versions: true`), each version is a separate subpath export:
