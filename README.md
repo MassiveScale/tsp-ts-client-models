@@ -149,8 +149,8 @@ const url = WidgetsEndpoints.list(); // "/api/v2.0/widgets"
 For multi-version output (`all-versions: true`), each version is a separate subpath export:
 
 ```typescript
-import { WidgetsEndpoints } from "your-package-name/v1.0";
-import { WidgetsEndpoints } from "your-package-name/v2.0";
+import { WidgetsEndpoints as WidgetsV1Endpoints } from "your-package-name/v1.0";
+import { WidgetsEndpoints as WidgetsV2Endpoints } from "your-package-name/v2.0";
 ```
 
 ## Development
