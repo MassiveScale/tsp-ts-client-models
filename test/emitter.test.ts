@@ -1,4 +1,4 @@
-import { strictEqual, ok, match } from "node:assert";
+import { strictEqual, ok, match, deepStrictEqual } from "node:assert";
 import { describe, it } from "node:test";
 import { emit, emitWithDiagnostics } from "./test-host.js";
 import {
@@ -251,8 +251,8 @@ describe("emitter", () => {
     ok(modelsFile, "Expected models.ts");
     const content = results[modelsFile];
     ok(content.includes("export enum Color"), "Expected enum declaration");
-    ok(content.includes('Red = "red"'), "Expected Red member");
-    ok(content.includes('Green = "green"'), "Expected Green member");
+    ok(content.includes("Red = 'red'"), "Expected Red member");
+    ok(content.includes("Green = 'green'"), "Expected Green member");
     ok(content.includes("/** Widget colours. */"), "Expected enum JSDoc");
     ok(content.includes("/** Red. */"), "Expected member JSDoc");
   });
@@ -604,6 +604,123 @@ describe("emitter", () => {
       JSON.parse(results[pkgFile]).description,
       "My custom description.",
     );
+  });
+
+  it("derives package name from namespace when npm-package-name is not set", async () => {
+    const results = await emit(`
+      import "@typespec/http";
+      using Http;
+
+      @service(#{ title: "Test API" })
+      namespace MyOrg.MyApi;
+
+      @route("/items")
+      interface Items {
+        @get list(): string[];
+      }
+    `);
+
+    const pkgFile = Object.keys(results).find((k) =>
+      k.endsWith("package.json"),
+    );
+    ok(pkgFile, "Expected package.json");
+    strictEqual(JSON.parse(results[pkgFile]).name, "my-org-my-api");
+  });
+
+  it("emits package.json with exports, scripts, files, and devDependencies", async () => {
+    const results = await emit(`
+      import "@typespec/http";
+      using Http;
+
+      @service(#{ title: "Test API" })
+      namespace TestApi;
+
+      @route("/items")
+      interface Items {
+        @get list(): string[];
+      }
+    `);
+
+    const pkgFile = Object.keys(results).find((k) =>
+      k.endsWith("package.json"),
+    );
+    ok(pkgFile, "Expected package.json");
+    const pkg = JSON.parse(results[pkgFile]);
+
+    deepStrictEqual(pkg.exports, {
+      ".": { import: "./dist/index.js", types: "./dist/index.d.ts" },
+    });
+    strictEqual(pkg.main, "./dist/index.js");
+    strictEqual(pkg.types, "./dist/index.d.ts");
+    deepStrictEqual(pkg.files, ["dist"]);
+    deepStrictEqual(pkg.scripts, { build: "tsc" });
+    ok(pkg.devDependencies?.typescript, "Expected typescript devDependency");
+  });
+
+  it("emits versioned exports when all-versions is true", async () => {
+    const results = await emit(
+      `
+      import "@typespec/http";
+      import "@typespec/versioning";
+      using Http;
+      using Versioning;
+
+      @service(#{ title: "Test API" })
+      @versioned(Versions)
+      namespace TestApi;
+
+      enum Versions { v1: "v1.0", v2: "v2.0" }
+
+      model Item { id: string; }
+
+      @route("/items")
+      interface Items {
+        @get list(): Item[];
+      }
+    `,
+      { "all-versions": true },
+    );
+
+    const pkgFile = Object.keys(results).find((k) =>
+      k.endsWith("package.json"),
+    );
+    ok(pkgFile, "Expected package.json");
+    const pkg = JSON.parse(results[pkgFile]);
+
+    ok(pkg.exports?.["./v1.0"], "Expected v1.0 export");
+    ok(pkg.exports?.["./v2.0"], "Expected v2.0 export");
+    strictEqual(pkg.exports["./v1.0"].import, "./dist/v1.0/index.js");
+    strictEqual(pkg.exports["./v1.0"].types, "./dist/v1.0/index.d.ts");
+    strictEqual(pkg.exports["./v2.0"].import, "./dist/v2.0/index.js");
+    strictEqual(pkg.exports["./v2.0"].types, "./dist/v2.0/index.d.ts");
+    strictEqual(pkg.main, undefined, "No main for versioned output");
+    deepStrictEqual(pkg.files, ["dist"]);
+    deepStrictEqual(pkg.scripts, { build: "tsc" });
+  });
+
+  it("emits a tsconfig.json alongside package.json", async () => {
+    const results = await emit(`
+      import "@typespec/http";
+      using Http;
+
+      @service(#{ title: "Test API" })
+      namespace TestApi;
+
+      @route("/items")
+      interface Items {
+        @get list(): string[];
+      }
+    `);
+
+    const tsConfigFile = Object.keys(results).find((k) =>
+      k.endsWith("tsconfig.json"),
+    );
+    ok(tsConfigFile, "Expected tsconfig.json");
+    const tsConfig = JSON.parse(results[tsConfigFile]);
+    strictEqual(tsConfig.compilerOptions?.outDir, "./dist");
+    strictEqual(tsConfig.compilerOptions?.declaration, true);
+    ok(Array.isArray(tsConfig.include), "Expected include array");
+    ok(Array.isArray(tsConfig.exclude), "Expected exclude array");
   });
 
   // ─── Versioning ──────────────────────────────────────────────────────────────

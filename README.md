@@ -35,10 +35,10 @@ options:
 | `target-version`   | `string`  | Latest declared version                 | Emit only this API version. Ignored when `all-versions` is `true`.                                                                                                        |
 | `all-versions`     | `boolean` | `false`                                 | When `true`, generate clients for every declared API version in separate subfolders.                                                                                      |
 | `route-prefix`     | `string`  | `api/{version}`                         | Prefix prepended to every endpoint path. Use `{version}` as a placeholder for the API version (e.g. `api/{version}` → `/api/v1.0/items`). Set to `""` to emit bare paths. |
-| `npm-package-name` | `string`  | —                                       | The name given to the generated package.                                                                                                                                  |
+| `npm-package-name` | `string`  | Derived from TypeSpec namespace         | The name given to the generated package. When omitted, the namespace is converted to kebab-case (e.g. `MyOrg.PetApi` → `my-org-pet-api`).                                 |
 | `npm-version`      | `string`  | —                                       | The version assigned to the generated package.                                                                                                                            |
 | `npm-description`  | `string`  | `Client models for the {namespace} API` | Description applied to the generated package.                                                                                                                             |
-| `templates`        | `object`  | —                                       | Override individual built-in Handlebars templates.                                                                                                                        |
+| `templates`        | `object`  | —                                       | Override individual built-in Handlebars templates. See [Customizing templates](#customizing-templates).                                                                   |
 
 Then compile your TypeSpec definition:
 
@@ -46,9 +46,112 @@ Then compile your TypeSpec definition:
 tsp compile .
 ```
 
+## Customizing templates
+
+Any of the five built-in [Handlebars](https://handlebarsjs.com/) templates can be replaced with your own `.hbs` file. Specify overrides in `tspconfig.yaml`:
+
+```yaml
+options:
+  "@massivescale/tsp-ts-client-models":
+    templates:
+      enum: "./templates/enum.hbs"
+      interface: "./templates/interface.hbs"
+      endpoints: "./templates/endpoints.hbs"
+```
+
+### Template view models
+
+Each template receives the corresponding view model as its Handlebars context.
+
+**`enum`** — `EnumView`
+
+| Field                   | Type                  | Description              |
+| ----------------------- | --------------------- | ------------------------ |
+| `doc`                   | `string \| undefined` | JSDoc text from `@doc`.  |
+| `enumName`              | `string`              | Enum name.               |
+| `members[]`             | `EnumMemberView[]`    | Ordered list of members. |
+| `members[].doc`         | `string \| undefined` | Per-member `@doc` text.  |
+| `members[].name`        | `string`              | Member name.             |
+| `members[].memberValue` | `string`              | Wire string value.       |
+
+**`interface`** — `InterfaceView`
+
+| Field                   | Type                  | Description                                    |
+| ----------------------- | --------------------- | ---------------------------------------------- |
+| `doc`                   | `string \| undefined` | JSDoc text from `@doc`.                        |
+| `interfaceName`         | `string`              | PascalCase interface name.                     |
+| `genericSuffix`         | `string`              | Generic parameter string, e.g. `<T>`, or `""`. |
+| `properties[]`          | `PropertyView[]`      | Ordered list of properties.                    |
+| `properties[].doc`      | `string \| undefined` | Per-property `@doc` text.                      |
+| `properties[].name`     | `string`              | Property name.                                 |
+| `properties[].type`     | `string`              | TypeScript type string.                        |
+| `properties[].optional` | `boolean`             | When `true`, emit `name?`.                     |
+
+**`endpoints`** — `EndpointsView`
+
+| Field                    | Type                   | Description                                                                      |
+| ------------------------ | ---------------------- | -------------------------------------------------------------------------------- |
+| `doc`                    | `string \| undefined`  | JSDoc text from `@doc`.                                                          |
+| `className`              | `string`               | Exported `const` name, e.g. `WidgetsEndpoints`.                                  |
+| `methods[]`              | `EndpointMethodView[]` | Ordered list of endpoint methods.                                                |
+| `methods[].doc`          | `string \| undefined`  | Per-operation `@doc` text.                                                       |
+| `methods[].name`         | `string`               | camelCase method name.                                                           |
+| `methods[].functionText` | `string`               | Pre-rendered arrow function, e.g. `(id: string) => \`/api/v1.0/widgets/${id}\``. |
+
+**`file`** — `FileView`
+
+| Field      | Type     | Description                                              |
+| ---------- | -------- | -------------------------------------------------------- |
+| `body`     | `string` | Pre-rendered inner content to wrap with the file header. |
+| `fileName` | `string` | Basename of the file being emitted.                      |
+
+**`index`** — `IndexView`
+
+| Field       | Type       | Description                                                   |
+| ----------- | ---------- | ------------------------------------------------------------- |
+| `exports[]` | `string[]` | Ordered list of relative import paths (with `.js` extension). |
+
+### Built-in Handlebars helpers
+
+| Helper      | Signature              | Description                                                                                                                                           |
+| ----------- | ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `renderDoc` | `renderDoc doc indent` | Formats `doc` as a JSDoc comment indented by `indent`. Single-line: `/** text */`. Multi-line: full `/**…*/` block. Returns `""` when `doc` is falsy. |
+| `docLines`  | `docLines doc prefix`  | Joins `doc` lines with `\n{prefix}`. Useful for embedding multi-line text inside a comment block.                                                     |
+| `isDefined` | `isDefined value`      | Returns `true` when `value` is not `undefined`.                                                                                                       |
+| `eq`        | `eq a b`               | Returns `true` when `a === b`.                                                                                                                        |
+
 ## Using the generated client
 
-TODO: Replace with basic usage example
+After running `tsp compile .`, the emitter writes a complete, buildable npm package to the configured output directory. It includes:
+
+- TypeScript source files (`models.ts`, `endpoints/*.ts`, `index.ts`)
+- A `package.json` with `exports`, `scripts`, `files`, and `devDependencies` pre-filled
+- A `tsconfig.json` configured for `NodeNext` modules with `declaration` output
+
+To build and publish the generated package:
+
+```bash
+cd tsp-output/client   # wherever emitter-output-dir points
+npm install
+npm run build          # compiles TypeScript → dist/
+npm publish
+```
+
+Consumers install and import it as a normal ESM package:
+
+```typescript
+import { Widget, WidgetCreateRequest } from "your-package-name";
+import { WidgetsEndpoints } from "your-package-name";
+
+const url = WidgetsEndpoints.list(); // "/api/v2.0/widgets"
+```
+
+For multi-version output (`all-versions: true`), each version is a separate subpath export:
+
+```typescript
+import { WidgetsEndpoints as WidgetsV1Endpoints } from "your-package-name/v1.0";
+import { WidgetsEndpoints as WidgetsV2Endpoints } from "your-package-name/v2.0";
+```
 
 ## Development
 

@@ -1,2 +1,6 @@
-{{{docBlock}}}export enum {{enumName}} {
-{{{membersBlock}}}
+{{{renderDoc doc ""}}}export enum {{enumName}} {
+{{#each members}}
+
+{{{renderDoc doc "  "}}}  {{name}} = '{{memberValue}}',
+{{/each}}
+}
