@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-06-06
+
 ### Added
 
 - `@clientName` decorator — override the emitted TypeScript name of a model, enum, enum member, or model property without changing the API wire contract. Import `@massivescale/tsp-ts-client-models` in your TypeSpec file to use it.
