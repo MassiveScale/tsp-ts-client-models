@@ -38,7 +38,8 @@ import {
   Availability,
   Version,
 } from "@typespec/versioning";
-import { resolve } from "node:path";
+import { resolve, join } from "node:path";
+import { readdir, rm } from "node:fs/promises";
 import {
   createRenderer,
   Renderer,
@@ -53,6 +54,7 @@ import {
   TemplateOverrides,
 } from "./renderer.js";
 import { EmitterOptions, createDiagnostic } from "./lib.js";
+import { getClientName } from "./decorators.js";
 
 // ─── Entry point ────────────────────────────────────────────────────────────
 
@@ -61,6 +63,10 @@ export async function $onEmit(
 ): Promise<void> {
   const { program, emitterOutputDir, options } = context;
   if (program.compilerOptions.noEmit) return;
+
+  if (options["clean-output-dir"]) {
+    await cleanOutputDir(emitterOutputDir);
+  }
 
   const renderer = buildRenderer(program, options);
 
@@ -121,6 +127,27 @@ async function writeFile(
   const dir = filePath.substring(0, filePath.lastIndexOf("/"));
   if (dir) await program.host.mkdirp(dir);
   await program.host.writeFile(filePath, content);
+}
+
+// ─── Output directory cleanup ────────────────────────────────────────────────
+
+/**
+ * Deletes every entry inside `outputDir` before the emitter writes new files.
+ * Silently succeeds when the directory does not exist (e.g. first run or
+ * test environments with virtual file systems).
+ */
+async function cleanOutputDir(outputDir: string): Promise<void> {
+  let entries: string[];
+  try {
+    entries = await readdir(outputDir);
+  } catch {
+    return;
+  }
+  await Promise.all(
+    entries.map((entry) =>
+      rm(join(outputDir, entry), { recursive: true, force: true }),
+    ),
+  );
 }
 
 // ─── npm version derivation ───────────────────────────────────────────────────
@@ -536,7 +563,8 @@ function collectRequestType(
   if (!hasHiddenProperties(bodyModel, visibility, program)) return;
 
   const suffix = requestTypeSuffix(op.verb);
-  const requestTypeName = `${bodyModel.name}${suffix}Request`;
+  const clientModelName = getClientName(program, bodyModel) ?? bodyModel.name;
+  const requestTypeName = `${clientModelName}${suffix}Request`;
   if (!requestTypes.has(requestTypeName)) {
     requestTypes.set(requestTypeName, {
       name: requestTypeName,
@@ -671,7 +699,7 @@ function buildInterfaceView(
   const doc = getDoc(program, model);
   return {
     doc: doc ?? undefined,
-    interfaceName: model.name!,
+    interfaceName: getClientName(program, model) ?? model.name!,
     genericSuffix,
     properties: buildPropertyViews(
       flattenProperties(model),
@@ -710,7 +738,7 @@ function buildPropertyViews(
     const tsType = mapTsType(prop.type, program, models, enums);
     result.push({
       doc: doc ?? undefined,
-      name: prop.name,
+      name: getClientName(program, prop) ?? prop.name,
       type: tsType,
       optional: prop.optional,
     });
@@ -727,11 +755,15 @@ function buildEnumView(e: Enum, program: Program): EnumView {
       typeof member.value === "string" ? member.value : member.name;
     members.push({
       doc: memberDoc ?? undefined,
-      name: member.name,
+      name: getClientName(program, member) ?? member.name,
       memberValue: stringValue,
     });
   }
-  return { doc: doc ?? undefined, enumName: e.name, members };
+  return {
+    doc: doc ?? undefined,
+    enumName: getClientName(program, e) ?? e.name,
+    members,
+  };
 }
 
 // ─── endpoints/*.ts generation ────────────────────────────────────────────────
@@ -926,17 +958,20 @@ function mapTsType(
         if (m.name === "Array" && args.length === 1) return `${args[0]}[]`;
         const decl = m.namespace?.models.get(m.name);
         models.set(m.name, decl ?? m);
-        return args.length > 0 ? `${m.name}<${args.join(", ")}>` : m.name;
+        const templateClientName = getClientName(program, decl ?? m) ?? m.name;
+        return args.length > 0
+          ? `${templateClientName}<${args.join(", ")}>`
+          : templateClientName;
       }
 
       models.set(m.name, m);
-      return m.name;
+      return getClientName(program, m) ?? m.name;
     }
 
     case "Enum": {
       const e = type as Enum;
       if (e.name) enums.set(e.name, e);
-      return e.name || "string";
+      return getClientName(program, e) ?? e.name ?? "string";
     }
 
     case "Union": {

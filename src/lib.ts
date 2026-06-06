@@ -12,6 +12,7 @@ export interface EmitterOptions {
   "npm-version"?: string;
   "npm-description"?: string;
   "route-prefix"?: string;
+  "clean-output-dir"?: boolean;
   templates?: TemplateOverrides;
 }
 
@@ -52,6 +53,12 @@ const EmitterOptionsSchema: JSONSchemaType<EmitterOptions> = {
       type: "string",
       description:
         "Route prefix prepended to all endpoint paths. Use {version} as a placeholder for the API version (e.g. 'api/{version}'). Defaults to 'api/{version}'.",
+      nullable: true,
+    },
+    "clean-output-dir": {
+      type: "boolean",
+      description:
+        "When true, all files and directories inside emitter-output-dir are deleted before emitting. Defaults to false.",
       nullable: true,
     },
     templates: {

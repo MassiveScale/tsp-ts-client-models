@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- `@clientName` decorator — override the emitted TypeScript name of a model, enum, enum member, or model property without changing the API wire contract. Import `@massivescale/tsp-ts-client-models` in your TypeSpec file to use it.
+- `clean-output-dir` emitter option (`boolean`, default `false`) — when `true`, all files and directories inside `emitter-output-dir` are deleted before the emitter writes new output, ensuring no stale files remain between runs.
+
 ## [0.2.0] — 2026-06-05
 
 ### Added

@@ -1,5 +1,6 @@
 {
   "name": "@massivescale/tsp-ts-client-models",
+  "tspMain": "lib/main.tsp",
   "version": "0.2.0",
   "type": "module",
   "main": "dist/src/index.js",

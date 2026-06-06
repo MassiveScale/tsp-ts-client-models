@@ -1273,6 +1273,259 @@ describe("emitter", () => {
       ));
   });
 
+  // ─── @clientName decorator ───────────────────────────────────────────────────
+
+  describe("@clientName", () => {
+    it("renames a model (interface)", async () => {
+      const results = await emit(`
+        import "@typespec/http";
+        import "@massivescale/tsp-ts-client-models";
+        using Http;
+
+        @service(#{ title: "Test API" })
+        namespace TestApi;
+
+        @clientName("AnimalModel")
+        model Pet {
+          id: string;
+        }
+
+        @route("/pets")
+        interface Pets {
+          @get list(): Pet[];
+        }
+      `);
+
+      const models = results["models.ts"];
+      ok(models, "Expected models.ts to be emitted");
+      ok(
+        models.includes("export interface AnimalModel"),
+        "Expected interface renamed to AnimalModel",
+      );
+      ok(
+        !models.includes("export interface Pet"),
+        "Expected original name Pet to be absent",
+      );
+    });
+
+    it("uses renamed model name as property type reference", async () => {
+      const results = await emit(`
+        import "@typespec/http";
+        import "@massivescale/tsp-ts-client-models";
+        using Http;
+
+        @service(#{ title: "Test API" })
+        namespace TestApi;
+
+        @clientName("TagModel")
+        model Tag { value: string; }
+
+        model Item { tag: Tag; }
+
+        @route("/items")
+        interface Items {
+          @get list(): Item[];
+        }
+      `);
+
+      const models = results["models.ts"];
+      ok(models, "Expected models.ts to be emitted");
+      ok(
+        models.includes("tag: TagModel"),
+        "Expected property type to use renamed name TagModel",
+      );
+    });
+
+    it("renames an enum", async () => {
+      const results = await emit(`
+        import "@typespec/http";
+        import "@massivescale/tsp-ts-client-models";
+        using Http;
+
+        @service(#{ title: "Test API" })
+        namespace TestApi;
+
+        @clientName("Direction")
+        enum Heading { North, South, East, West }
+
+        model Item { heading: Heading; }
+
+        @route("/items")
+        interface Items {
+          @get list(): Item[];
+        }
+      `);
+
+      const models = results["models.ts"];
+      ok(models, "Expected models.ts to be emitted");
+      ok(
+        models.includes("export enum Direction"),
+        "Expected enum renamed to Direction",
+      );
+      ok(
+        !models.includes("export enum Heading"),
+        "Expected original enum name Heading to be absent",
+      );
+      ok(
+        models.includes("heading: Direction"),
+        "Expected property type reference to use renamed enum name",
+      );
+    });
+
+    it("renames an enum member", async () => {
+      const results = await emit(`
+        import "@typespec/http";
+        import "@massivescale/tsp-ts-client-models";
+        using Http;
+
+        @service(#{ title: "Test API" })
+        namespace TestApi;
+
+        enum Status {
+          @clientName("active")
+          Active,
+          Inactive,
+        }
+
+        model Item { status: Status; }
+
+        @route("/items")
+        interface Items {
+          @get list(): Item[];
+        }
+      `);
+
+      const models = results["models.ts"];
+      ok(models, "Expected models.ts to be emitted");
+      ok(
+        models.includes("active = 'Active'"),
+        "Expected enum member renamed to 'active'",
+      );
+      ok(
+        !models.includes("Active = 'Active'"),
+        "Expected original member name 'Active' to be absent",
+      );
+    });
+
+    it("renames a model property", async () => {
+      const results = await emit(`
+        import "@typespec/http";
+        import "@massivescale/tsp-ts-client-models";
+        using Http;
+
+        @service(#{ title: "Test API" })
+        namespace TestApi;
+
+        model Widget {
+          @clientName("identifier")
+          id: string;
+
+          name: string;
+        }
+
+        @route("/widgets")
+        interface Widgets {
+          @get list(): Widget[];
+        }
+      `);
+
+      const models = results["models.ts"];
+      ok(models, "Expected models.ts to be emitted");
+      ok(
+        models.includes("identifier: string"),
+        "Expected property renamed to 'identifier'",
+      );
+      ok(
+        !models.includes("  id: string"),
+        "Expected original property name 'id' to be absent",
+      );
+    });
+
+    it("uses renamed model name for request type", async () => {
+      const results = await emit(`
+        import "@typespec/http";
+        import "@massivescale/tsp-ts-client-models";
+        using Http;
+
+        @service(#{ title: "Test API" })
+        namespace TestApi;
+
+        @clientName("AnimalModel")
+        model Pet {
+          @visibility(TypeSpec.Lifecycle.Read)
+          id: string;
+          name: string;
+        }
+
+        @route("/pets")
+        interface Pets {
+          @post create(@body body: Pet): Pet;
+        }
+      `);
+
+      const models = results["models.ts"];
+      ok(models, "Expected models.ts to be emitted");
+      ok(
+        models.includes("AnimalModelCreateRequest"),
+        "Expected request type to follow renamed model name",
+      );
+      ok(
+        !models.includes("PetCreateRequest"),
+        "Expected original request type name to be absent",
+      );
+    });
+  });
+
+  // ─── clean-output-dir option ─────────────────────────────────────────────────
+
+  describe("clean-output-dir", () => {
+    it("emits normally when clean-output-dir is false (default)", async () => {
+      const results = await emit(
+        `
+        import "@typespec/http";
+        using Http;
+
+        @service(#{ title: "Test API" })
+        namespace TestApi;
+
+        @route("/items")
+        interface Items {
+          @get list(): string[];
+        }
+      `,
+        { "clean-output-dir": false },
+      );
+
+      ok(
+        Object.keys(results).some((k) => k.includes("Items.ts")),
+        "Expected endpoint file to be emitted",
+      );
+    });
+
+    it("emits normally when clean-output-dir is true", async () => {
+      const results = await emit(
+        `
+        import "@typespec/http";
+        using Http;
+
+        @service(#{ title: "Test API" })
+        namespace TestApi;
+
+        @route("/items")
+        interface Items {
+          @get list(): string[];
+        }
+      `,
+        { "clean-output-dir": true },
+      );
+
+      ok(
+        Object.keys(results).some((k) => k.includes("Items.ts")),
+        "Expected endpoint file to be emitted even with clean-output-dir: true",
+      );
+    });
+  });
+
   // ─── deriveNpmVersion unit tests ─────────────────────────────────────────────
 
   describe("deriveNpmVersion", () => {

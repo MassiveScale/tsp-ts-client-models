@@ -38,12 +38,52 @@ options:
 | `npm-package-name` | `string`  | Derived from TypeSpec namespace         | The name given to the generated package. When omitted, the namespace is converted to kebab-case (e.g. `MyOrg.PetApi` → `my-org-pet-api`).                                 |
 | `npm-version`      | `string`  | —                                       | The version assigned to the generated package.                                                                                                                            |
 | `npm-description`  | `string`  | `Client models for the {namespace} API` | Description applied to the generated package.                                                                                                                             |
+| `clean-output-dir` | `boolean` | `false`                                 | When `true`, all files and directories inside `emitter-output-dir` are deleted before emitting.                                                                           |
 | `templates`        | `object`  | —                                       | Override individual built-in Handlebars templates. See [Customizing templates](#customizing-templates).                                                                   |
 
 Then compile your TypeSpec definition:
 
 ```bash
 tsp compile .
+```
+
+## Decorators
+
+Import the library in your TypeSpec file to access the decorators:
+
+```typespec
+import "@massivescale/tsp-ts-client-models";
+```
+
+### `@clientName`
+
+Override the name of any element in the emitted TypeScript library without changing the API surface.
+
+```typespec
+@clientName(name: string)
+```
+
+Applicable to: **models** (emitted as interfaces), **enums**, **enum members**, and **model properties**.
+
+```typespec
+import "@massivescale/tsp-ts-client-models";
+
+/** Renamed from 'Pet' to 'AnimalModel' in the emitted TypeScript. */
+@clientName("AnimalModel")
+model Pet {
+  id: string;
+  name: string;
+}
+
+/** Enum renamed from 'Heading' to 'Direction'. */
+@clientName("Direction")
+enum Heading { North, South, East, West }
+
+model Widget {
+  /** Property renamed from 'id' to 'identifier'. */
+  @clientName("identifier")
+  id: string;
+}
 ```
 
 ## Customizing templates
