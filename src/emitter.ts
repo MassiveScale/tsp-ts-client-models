@@ -229,11 +229,11 @@ function samePath(a: string, b: string): boolean {
 
 function isFilesystemRootPath(path: string): boolean {
   const parsed = parse(path);
-  const normalized = path.replace(/[\\/]+$/g, "");
-  const normalizedRoot = parsed.root.replace(/[\\/]+$/g, "");
-  return (
-    normalized !== "" && normalizedRoot !== "" && normalized === normalizedRoot
-  );
+  const root = parsed.root;
+  if (!root) return false;
+  const stripTrailingSeps = (p: string) =>
+    p.replace(/[\\/]+$/g, "") || p;
+  return stripTrailingSeps(path) === stripTrailingSeps(root);
 }
 
 type ClientNameKind =
