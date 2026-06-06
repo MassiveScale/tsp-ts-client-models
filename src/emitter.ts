@@ -231,8 +231,7 @@ function isFilesystemRootPath(path: string): boolean {
   const parsed = parse(path);
   const root = parsed.root;
   if (!root) return false;
-  const stripTrailingSeps = (p: string) =>
-    p.replace(/[\\/]+$/g, "") || p;
+  const stripTrailingSeps = (p: string) => p.replace(/[\\/]+$/g, "") || p;
   return stripTrailingSeps(path) === stripTrailingSeps(root);
 }
 
