@@ -1276,6 +1276,47 @@ describe("emitter", () => {
   // ─── @clientName decorator ───────────────────────────────────────────────────
 
   describe("@clientName", () => {
+    it("reports a diagnostic for an invalid model override identifier", async () => {
+      const [results, diags] = await emitWithDiagnostics(`
+        import "@typespec/http";
+        import "@massivescale/tsp-ts-client-models";
+        using Http;
+
+        @service(#{ title: "Test API" })
+        namespace TestApi;
+
+        @clientName("foo-bar")
+        model Pet {
+          id: string;
+        }
+
+        @route("/pets")
+        interface Pets {
+          @get list(): Pet[];
+        }
+      `);
+
+      ok(
+        diags.some(
+          (d) =>
+            d.code ===
+            "@massivescale/tsp-ts-client-models/invalid-client-name-override",
+        ),
+        "Expected invalid-client-name-override diagnostic",
+      );
+
+      const models = results["models.ts"];
+      ok(models, "Expected models.ts to be emitted");
+      ok(
+        models.includes("export interface Pet"),
+        "Expected fallback to original model name",
+      );
+      ok(
+        !models.includes("export interface foo-bar"),
+        "Expected invalid override name to be rejected",
+      );
+    });
+
     it("renames a model (interface)", async () => {
       const results = await emit(`
         import "@typespec/http";
@@ -1441,6 +1482,87 @@ describe("emitter", () => {
       );
     });
 
+    it("reports a diagnostic for colliding model overrides", async () => {
+      const [results, diags] = await emitWithDiagnostics(`
+        import "@typespec/http";
+        import "@massivescale/tsp-ts-client-models";
+        using Http;
+
+        @service(#{ title: "Test API" })
+        namespace TestApi;
+
+        @clientName("Animal")
+        model Cat { id: string; }
+
+        @clientName("Animal")
+        model Dog { id: string; }
+
+        model Zoo {
+          cat: Cat;
+          dog: Dog;
+        }
+
+        @route("/zoo")
+        interface Zoos {
+          @get list(): Zoo[];
+        }
+      `);
+
+      ok(
+        diags.some(
+          (d) =>
+            d.code ===
+            "@massivescale/tsp-ts-client-models/client-name-collision",
+        ),
+        "Expected client-name-collision diagnostic",
+      );
+
+      const models = results["models.ts"];
+      ok(models, "Expected models.ts to be emitted");
+      ok(models.includes("export interface Animal"));
+      ok(models.includes("export interface Dog"));
+      ok(models.includes("cat: Animal"));
+      ok(models.includes("dog: Dog"));
+    });
+
+    it("reports a diagnostic for colliding property overrides", async () => {
+      const [results, diags] = await emitWithDiagnostics(`
+        import "@typespec/http";
+        import "@massivescale/tsp-ts-client-models";
+        using Http;
+
+        @service(#{ title: "Test API" })
+        namespace TestApi;
+
+        model Widget {
+          @clientName("value")
+          first: string;
+
+          @clientName("value")
+          second: string;
+        }
+
+        @route("/widgets")
+        interface Widgets {
+          @get list(): Widget[];
+        }
+      `);
+
+      ok(
+        diags.some(
+          (d) =>
+            d.code ===
+            "@massivescale/tsp-ts-client-models/client-name-collision",
+        ),
+        "Expected client-name-collision diagnostic",
+      );
+
+      const models = results["models.ts"];
+      ok(models, "Expected models.ts to be emitted");
+      ok(models.includes("value: string;"));
+      ok(models.includes("second: string;"));
+    });
+
     it("uses renamed model name for request type", async () => {
       const results = await emit(`
         import "@typespec/http";
@@ -1522,6 +1644,41 @@ describe("emitter", () => {
       ok(
         Object.keys(results).some((k) => k.includes("Items.ts")),
         "Expected endpoint file to be emitted even with clean-output-dir: true",
+      );
+    });
+
+    it("refuses to clean when emitter-output-dir resolves to current working directory", async () => {
+      const [results, diags] = await emitWithDiagnostics(
+        `
+        import "@typespec/http";
+        using Http;
+
+        @service(#{ title: "Test API" })
+        namespace TestApi;
+
+        @route("/items")
+        interface Items {
+          @get list(): string[];
+        }
+      `,
+        {
+          "clean-output-dir": true,
+          "emitter-output-dir": ".",
+        },
+      );
+
+      ok(
+        diags.some(
+          (d) =>
+            d.code ===
+            "@massivescale/tsp-ts-client-models/unsafe-clean-output-dir",
+        ),
+        "Expected unsafe-clean-output-dir diagnostic",
+      );
+      strictEqual(
+        Object.keys(results).length,
+        0,
+        "Expected emission to stop when clean-output-dir is unsafe",
       );
     });
   });

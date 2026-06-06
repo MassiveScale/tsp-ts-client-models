@@ -11,6 +11,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `@clientName` decorator — override the emitted TypeScript name of a model, enum, enum member, or model property without changing the API wire contract. Import `@massivescale/tsp-ts-client-models` in your TypeSpec file to use it.
 - `clean-output-dir` emitter option (`boolean`, default `false`) — when `true`, all files and directories inside `emitter-output-dir` are deleted before the emitter writes new output, ensuring no stale files remain between runs.
 
+### Fixed
+
+- Hardened `@clientName` handling: invalid overrides (empty/invalid identifiers, reserved words) now report diagnostics and fall back to safe names instead of producing invalid TypeScript output.
+- Added collision detection for `@clientName` overrides that would generate duplicate declarations or duplicate members, with diagnostics and safe fallback behavior.
+- Hardened `clean-output-dir`: the emitter now refuses to clean when `emitter-output-dir` resolves to the current working directory or a filesystem root.
+- Reworked `clean-output-dir` cleanup to use TypeSpec `program.host` filesystem APIs (`readDir`/`rm`) for consistent behavior across Node and virtual TypeSpec hosts.
+
 ## [0.2.0] — 2026-06-05
 
 ### Added

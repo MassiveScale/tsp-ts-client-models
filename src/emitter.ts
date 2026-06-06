@@ -38,8 +38,7 @@ import {
   Availability,
   Version,
 } from "@typespec/versioning";
-import { resolve, join } from "node:path";
-import { readdir, rm } from "node:fs/promises";
+import { parse, resolve } from "node:path";
 import {
   createRenderer,
   Renderer,
@@ -65,7 +64,8 @@ export async function $onEmit(
   if (program.compilerOptions.noEmit) return;
 
   if (options["clean-output-dir"]) {
-    await cleanOutputDir(emitterOutputDir);
+    const cleaned = await cleanOutputDir(program, emitterOutputDir);
+    if (!cleaned) return;
   }
 
   const renderer = buildRenderer(program, options);
@@ -136,18 +136,281 @@ async function writeFile(
  * Silently succeeds when the directory does not exist (e.g. first run or
  * test environments with virtual file systems).
  */
-async function cleanOutputDir(outputDir: string): Promise<void> {
+async function cleanOutputDir(
+  program: Program,
+  outputDir: string,
+): Promise<boolean> {
+  const resolvedOutputDir = resolve(outputDir);
+  const resolvedCwd = resolve(process.cwd());
+
+  if (samePath(resolvedOutputDir, resolvedCwd)) {
+    program.reportDiagnostic(
+      createDiagnostic({
+        code: "unsafe-clean-output-dir",
+        target: NoTarget,
+        format: { outputDir, reason: "the current working directory" },
+      }),
+    );
+    return false;
+  }
+
+  if (isFilesystemRootPath(resolvedOutputDir)) {
+    program.reportDiagnostic(
+      createDiagnostic({
+        code: "unsafe-clean-output-dir",
+        target: NoTarget,
+        format: { outputDir, reason: "a filesystem root" },
+      }),
+    );
+    return false;
+  }
+
+  try {
+    const realOutputDir = await program.host.realpath(outputDir);
+    if (isFilesystemRootPath(realOutputDir)) {
+      program.reportDiagnostic(
+        createDiagnostic({
+          code: "unsafe-clean-output-dir",
+          target: NoTarget,
+          format: { outputDir: realOutputDir, reason: "a filesystem root" },
+        }),
+      );
+      return false;
+    }
+    const realCwd = await program.host.realpath(process.cwd());
+    if (samePath(realOutputDir, realCwd)) {
+      program.reportDiagnostic(
+        createDiagnostic({
+          code: "unsafe-clean-output-dir",
+          target: NoTarget,
+          format: {
+            outputDir: realOutputDir,
+            reason: "the current working directory",
+          },
+        }),
+      );
+      return false;
+    }
+  } catch {
+    // Realpath checks are best-effort for virtual hosts.
+  }
+
   let entries: string[];
   try {
-    entries = await readdir(outputDir);
+    entries = await program.host.readDir(outputDir);
   } catch {
-    return;
+    return true;
   }
-  await Promise.all(
-    entries.map((entry) =>
-      rm(join(outputDir, entry), { recursive: true, force: true }),
-    ),
+
+  try {
+    await Promise.all(
+      entries.map((entry) =>
+        program.host.rm(resolvePath(outputDir, entry), { recursive: true }),
+      ),
+    );
+    return true;
+  } catch (e) {
+    program.reportDiagnostic(
+      createDiagnostic({
+        code: "clean-output-dir-failed",
+        target: NoTarget,
+        format: { outputDir, message: String(e) },
+      }),
+    );
+    return false;
+  }
+}
+
+function samePath(a: string, b: string): boolean {
+  const normalizeForCompare = (value: string) =>
+    value.replace(/[\\/]+$/g, "").toLowerCase();
+  return normalizeForCompare(a) === normalizeForCompare(b);
+}
+
+function isFilesystemRootPath(path: string): boolean {
+  const parsed = parse(path);
+  const normalized = path.replace(/[\\/]+$/g, "");
+  const normalizedRoot = parsed.root.replace(/[\\/]+$/g, "");
+  return (
+    normalized !== "" && normalizedRoot !== "" && normalized === normalizedRoot
   );
+}
+
+type ClientNameKind =
+  | "model"
+  | "enum"
+  | "enum member"
+  | "property"
+  | "request type";
+
+interface NameResolutionContext {
+  declarationNames: Map<string, Type>;
+  modelNames: WeakMap<Model, string>;
+  enumNames: WeakMap<Enum, string>;
+}
+
+function createNameResolutionContext(): NameResolutionContext {
+  return {
+    declarationNames: new Map<string, Type>(),
+    modelNames: new WeakMap<Model, string>(),
+    enumNames: new WeakMap<Enum, string>(),
+  };
+}
+
+const TS_RESERVED_WORDS = new Set([
+  "await",
+  "break",
+  "case",
+  "catch",
+  "class",
+  "const",
+  "continue",
+  "debugger",
+  "default",
+  "delete",
+  "do",
+  "else",
+  "enum",
+  "export",
+  "extends",
+  "false",
+  "finally",
+  "for",
+  "function",
+  "if",
+  "implements",
+  "import",
+  "in",
+  "instanceof",
+  "interface",
+  "let",
+  "new",
+  "null",
+  "package",
+  "private",
+  "protected",
+  "public",
+  "return",
+  "static",
+  "super",
+  "switch",
+  "this",
+  "throw",
+  "true",
+  "try",
+  "typeof",
+  "var",
+  "void",
+  "while",
+  "with",
+  "yield",
+]);
+
+function validateTsIdentifier(name: string): string | undefined {
+  if (name.length === 0) return "name cannot be empty";
+  if (!/^[$A-Z_a-z][$\w]*$/u.test(name)) {
+    return "name must be a valid TypeScript identifier";
+  }
+  if (TS_RESERVED_WORDS.has(name)) {
+    return "reserved words are not allowed";
+  }
+  return undefined;
+}
+
+function resolveOverrideIdentifier(
+  program: Program,
+  target: Type,
+  kind: ClientNameKind,
+  fallbackName: string,
+): string {
+  const override = getClientName(program, target);
+  if (!override) return fallbackName;
+
+  const reason = validateTsIdentifier(override);
+  if (!reason) return override;
+
+  program.reportDiagnostic(
+    createDiagnostic({
+      code: "invalid-client-name-override",
+      target,
+      format: { name: override, kind, reason },
+    }),
+  );
+  return fallbackName;
+}
+
+function reserveDeclarationName(
+  program: Program,
+  names: Map<string, Type>,
+  candidate: string,
+  target: Type,
+  kind: ClientNameKind,
+  fallbackName: string,
+): string {
+  const existing = names.get(candidate);
+  if (!existing || existing === target) {
+    names.set(candidate, target);
+    return candidate;
+  }
+
+  if (candidate !== fallbackName) {
+    program.reportDiagnostic(
+      createDiagnostic({
+        code: "client-name-collision",
+        target,
+        format: { name: candidate, kind, scope: "declaration" },
+      }),
+    );
+    const fallbackExisting = names.get(fallbackName);
+    if (!fallbackExisting || fallbackExisting === target) {
+      names.set(fallbackName, target);
+      return fallbackName;
+    }
+  }
+
+  return candidate;
+}
+
+function resolveModelName(
+  program: Program,
+  model: Model,
+  names: NameResolutionContext,
+): string {
+  const cached = names.modelNames.get(model);
+  if (cached) return cached;
+
+  const fallback = model.name ?? "unknown";
+  const resolved = reserveDeclarationName(
+    program,
+    names.declarationNames,
+    resolveOverrideIdentifier(program, model, "model", fallback),
+    model,
+    "model",
+    fallback,
+  );
+  names.modelNames.set(model, resolved);
+  return resolved;
+}
+
+function resolveEnumName(
+  program: Program,
+  e: Enum,
+  names: NameResolutionContext,
+): string {
+  const cached = names.enumNames.get(e);
+  if (cached) return cached;
+
+  const fallback = e.name ?? "string";
+  const resolved = reserveDeclarationName(
+    program,
+    names.declarationNames,
+    resolveOverrideIdentifier(program, e, "enum", fallback),
+    e,
+    "enum",
+    fallback,
+  );
+  names.enumNames.set(e, resolved);
+  return resolved;
 }
 
 // ─── npm version derivation ───────────────────────────────────────────────────
@@ -276,6 +539,8 @@ interface RequestType {
   name: string;
   doc: string | undefined;
   props: Map<string, ModelProperty>;
+  baseModel: Model;
+  suffix: string;
 }
 
 function requestTypeSuffix(verb: string): string {
@@ -429,6 +694,7 @@ async function emitVersion(
   const enums = new Map<string, Enum>();
   const requestTypes = new Map<string, RequestType>();
   const requestTypeBaseModels = new Set<string>();
+  const names = createNameResolutionContext();
 
   // Determine which model names are needed for GET/HEAD responses BEFORE the
   // full collection pass. Models that only appear as write-operation bodies (and
@@ -446,7 +712,7 @@ async function emitVersion(
       ? ops.filter((op) => isOpInVersion(program, op, version))
       : ops;
     for (const op of vOps) {
-      collectTypesFromOp(op, program, models, enums);
+      collectTypesFromOp(op, program, models, enums, names);
       collectRequestType(
         op,
         program,
@@ -455,6 +721,7 @@ async function emitVersion(
         version,
         requestTypes,
         requestTypeBaseModels,
+        names,
       );
     }
   }
@@ -462,7 +729,7 @@ async function emitVersion(
   // Recursively collect enum/model types referenced inside model properties.
   // mapTsType for named models only adds the model itself without traversing its
   // properties, so types like enums first discovered via a property would be missed.
-  deepCollectTypes(models, enums, program);
+  deepCollectTypes(models, enums, program, names);
 
   // Emit endpoint files and collect their relative paths for the index
   const endpointExports: string[] = [];
@@ -503,6 +770,7 @@ async function emitVersion(
       readResponseModelNames,
       program,
       renderer,
+      names,
     );
     await writeFile(program, resolvePath(vDir, "models.ts"), content);
   }
@@ -526,17 +794,18 @@ function collectTypesFromOp(
   program: Program,
   models: Map<string, Model>,
   enums: Map<string, Enum>,
+  names: NameResolutionContext,
 ): void {
   for (const param of op.parameters.parameters) {
-    mapTsType(param.param.type, program, models, enums);
+    mapTsType(param.param.type, program, models, enums, names);
   }
   if (op.parameters.body) {
-    mapTsType(op.parameters.body.type, program, models, enums);
+    mapTsType(op.parameters.body.type, program, models, enums, names);
   }
   for (const resp of op.responses) {
     for (const content of resp.responses) {
       if (content.body) {
-        mapTsType(content.body.type, program, models, enums);
+        mapTsType(content.body.type, program, models, enums, names);
       }
     }
   }
@@ -550,6 +819,7 @@ function collectRequestType(
   version: Version | undefined,
   requestTypes: Map<string, RequestType>,
   requestTypeBaseModels: Set<string>,
+  names: NameResolutionContext,
 ): void {
   if (!op.parameters.body) return;
   const body = op.parameters.body;
@@ -563,20 +833,22 @@ function collectRequestType(
   if (!hasHiddenProperties(bodyModel, visibility, program)) return;
 
   const suffix = requestTypeSuffix(op.verb);
-  const clientModelName = getClientName(program, bodyModel) ?? bodyModel.name;
+  const clientModelName = resolveModelName(program, bodyModel, names);
   const requestTypeName = `${clientModelName}${suffix}Request`;
   if (!requestTypes.has(requestTypeName)) {
     requestTypes.set(requestTypeName, {
       name: requestTypeName,
       doc: getDoc(program, bodyModel),
       props: filterPropsForRequest(bodyModel, visibility, version, program),
+      baseModel: bodyModel,
+      suffix,
     });
     requestTypeBaseModels.add(bodyModel.name);
   }
 
   // Register types from the filtered props too
   for (const [, prop] of requestTypes.get(requestTypeName)!.props) {
-    mapTsType(prop.type, program, models, enums);
+    mapTsType(prop.type, program, models, enums, names);
   }
 }
 
@@ -592,6 +864,7 @@ function collectReadResponseModelNames(
 ): Set<string> {
   const tmpModels = new Map<string, Model>();
   const tmpEnums = new Map<string, Enum>();
+  const names = createNameResolutionContext();
   for (const { ops } of byContainer.values()) {
     const vOps = version
       ? ops.filter((op) => isOpInVersion(program, op, version))
@@ -601,12 +874,12 @@ function collectReadResponseModelNames(
       for (const resp of op.responses) {
         for (const content of resp.responses) {
           if (content.body)
-            mapTsType(content.body.type, program, tmpModels, tmpEnums);
+            mapTsType(content.body.type, program, tmpModels, tmpEnums, names);
         }
       }
     }
   }
-  deepCollectTypes(tmpModels, tmpEnums, program);
+  deepCollectTypes(tmpModels, tmpEnums, program, names);
   return new Set(tmpModels.keys());
 }
 
@@ -616,6 +889,7 @@ function deepCollectTypes(
   models: Map<string, Model>,
   enums: Map<string, Enum>,
   program: Program,
+  names: NameResolutionContext,
 ): void {
   let changed = true;
   while (changed) {
@@ -624,7 +898,7 @@ function deepCollectTypes(
       for (const [, prop] of flattenProperties(model)) {
         const prevModels = models.size;
         const prevEnums = enums.size;
-        mapTsType(prop.type, program, models, enums);
+        mapTsType(prop.type, program, models, enums, names);
         if (models.size !== prevModels || enums.size !== prevEnums)
           changed = true;
       }
@@ -643,12 +917,13 @@ function buildModelsFile(
   readResponseModelNames: Set<string>,
   program: Program,
   renderer: Renderer,
+  names: NameResolutionContext,
 ): string {
   const parts: string[] = [];
 
   for (const [, e] of enums) {
     if (!isEmittableEnum(e, nsFullName)) continue;
-    parts.push(renderer.renderEnum(buildEnumView(e, program)));
+    parts.push(renderer.renderEnum(buildEnumView(e, program, names)));
   }
 
   for (const [, model] of models) {
@@ -662,21 +937,30 @@ function buildModelsFile(
       continue;
     parts.push(
       renderer.renderInterface(
-        buildInterfaceView(model, program, models, enums),
+        buildInterfaceView(model, program, models, enums, names),
       ),
     );
   }
 
   for (const [, rt] of requestTypes) {
+    const resolvedRequestTypeName = reserveDeclarationName(
+      program,
+      names.declarationNames,
+      rt.name,
+      rt.baseModel,
+      "request type",
+      `${rt.baseModel.name}${rt.suffix}Request`,
+    );
     parts.push(
       renderer.renderInterface(
         buildFilteredInterfaceView(
-          rt.name,
+          resolvedRequestTypeName,
           rt.doc,
           rt.props,
           program,
           models,
           enums,
+          names,
         ),
       ),
     );
@@ -692,6 +976,7 @@ function buildInterfaceView(
   program: Program,
   models: Map<string, Model>,
   enums: Map<string, Enum>,
+  names: NameResolutionContext,
 ): InterfaceView {
   const typeParams = collectTypeParams(model);
   const genericSuffix =
@@ -699,13 +984,14 @@ function buildInterfaceView(
   const doc = getDoc(program, model);
   return {
     doc: doc ?? undefined,
-    interfaceName: getClientName(program, model) ?? model.name!,
+    interfaceName: resolveModelName(program, model, names),
     genericSuffix,
     properties: buildPropertyViews(
       flattenProperties(model),
       program,
       models,
       enums,
+      names,
     ),
   };
 }
@@ -717,12 +1003,13 @@ function buildFilteredInterfaceView(
   program: Program,
   models: Map<string, Model>,
   enums: Map<string, Enum>,
+  names: NameResolutionContext,
 ): InterfaceView {
   return {
     doc: doc ?? undefined,
     interfaceName: name,
     genericSuffix: "",
-    properties: buildPropertyViews(props, program, models, enums),
+    properties: buildPropertyViews(props, program, models, enums, names),
   };
 }
 
@@ -731,14 +1018,37 @@ function buildPropertyViews(
   program: Program,
   models: Map<string, Model>,
   enums: Map<string, Enum>,
+  names: NameResolutionContext,
 ): PropertyView[] {
   const result: PropertyView[] = [];
+  const seenPropertyNames = new Set<string>();
   for (const [, prop] of props) {
     const doc = getDoc(program, prop);
-    const tsType = mapTsType(prop.type, program, models, enums);
+    const tsType = mapTsType(prop.type, program, models, enums, names);
+    let propName = resolveOverrideIdentifier(
+      program,
+      prop,
+      "property",
+      prop.name,
+    );
+    if (seenPropertyNames.has(propName) && propName !== prop.name) {
+      program.reportDiagnostic(
+        createDiagnostic({
+          code: "client-name-collision",
+          target: prop,
+          format: {
+            name: propName,
+            kind: "property",
+            scope: "interface member",
+          },
+        }),
+      );
+      propName = prop.name;
+    }
+    seenPropertyNames.add(propName);
     result.push({
       doc: doc ?? undefined,
-      name: getClientName(program, prop) ?? prop.name,
+      name: propName,
       type: tsType,
       optional: prop.optional,
     });
@@ -746,22 +1056,48 @@ function buildPropertyViews(
   return result;
 }
 
-function buildEnumView(e: Enum, program: Program): EnumView {
+function buildEnumView(
+  e: Enum,
+  program: Program,
+  names: NameResolutionContext,
+): EnumView {
   const doc = getDoc(program, e);
   const members: EnumMemberView[] = [];
+  const seenMemberNames = new Set<string>();
   for (const [, member] of e.members) {
     const memberDoc = getDoc(program, member);
     const stringValue =
       typeof member.value === "string" ? member.value : member.name;
+    let memberName = resolveOverrideIdentifier(
+      program,
+      member,
+      "enum member",
+      member.name,
+    );
+    if (seenMemberNames.has(memberName) && memberName !== member.name) {
+      program.reportDiagnostic(
+        createDiagnostic({
+          code: "client-name-collision",
+          target: member,
+          format: {
+            name: memberName,
+            kind: "enum member",
+            scope: "enum member",
+          },
+        }),
+      );
+      memberName = member.name;
+    }
+    seenMemberNames.add(memberName);
     members.push({
       doc: memberDoc ?? undefined,
-      name: getClientName(program, member) ?? member.name,
+      name: memberName,
       memberValue: stringValue,
     });
   }
   return {
     doc: doc ?? undefined,
-    enumName: getClientName(program, e) ?? e.name,
+    enumName: resolveEnumName(program, e, names),
     members,
   };
 }
@@ -930,6 +1266,7 @@ function mapTsType(
   program: Program,
   models: Map<string, Model>,
   enums: Map<string, Enum>,
+  names: NameResolutionContext,
 ): string {
   switch (type.kind) {
     case "Scalar":
@@ -938,10 +1275,10 @@ function mapTsType(
     case "Model": {
       const m = type as Model;
       if (isArrayModelType(m)) {
-        return `${mapTsType(m.indexer!.value, program, models, enums)}[]`;
+        return `${mapTsType(m.indexer!.value, program, models, enums, names)}[]`;
       }
       if (isRecordModelType(m)) {
-        return `Record<string, ${mapTsType(m.indexer!.value, program, models, enums)}>`;
+        return `Record<string, ${mapTsType(m.indexer!.value, program, models, enums, names)}>`;
       }
       if (isErrorModel(program, m)) {
         // Emit error models — just note them
@@ -954,31 +1291,31 @@ function mapTsType(
             (a): a is Type =>
               (a as { entityKind?: string }).entityKind === "Type",
           )
-          .map((a) => mapTsType(a, program, models, enums));
+          .map((a) => mapTsType(a, program, models, enums, names));
         if (m.name === "Array" && args.length === 1) return `${args[0]}[]`;
         const decl = m.namespace?.models.get(m.name);
         models.set(m.name, decl ?? m);
-        const templateClientName = getClientName(program, decl ?? m) ?? m.name;
+        const templateClientName = resolveModelName(program, decl ?? m, names);
         return args.length > 0
           ? `${templateClientName}<${args.join(", ")}>`
           : templateClientName;
       }
 
       models.set(m.name, m);
-      return getClientName(program, m) ?? m.name;
+      return resolveModelName(program, m, names);
     }
 
     case "Enum": {
       const e = type as Enum;
       if (e.name) enums.set(e.name, e);
-      return getClientName(program, e) ?? e.name ?? "string";
+      return resolveEnumName(program, e, names);
     }
 
     case "Union": {
       const u = type as Union;
       const parts: string[] = [];
       for (const [, variant] of u.variants) {
-        parts.push(mapTsType(variant.type, program, models, enums));
+        parts.push(mapTsType(variant.type, program, models, enums, names));
       }
       const unique = [...new Set(parts)].filter((p) => p !== "never");
       return unique.length > 0 ? unique.join(" | ") : "unknown";

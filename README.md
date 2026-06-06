@@ -30,16 +30,16 @@ options:
 
 ### Emitter options
 
-| Option             | Type      | Default                                 | Description                                                                                                                                                               |
-| ------------------ | --------- | --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `target-version`   | `string`  | Latest declared version                 | Emit only this API version. Ignored when `all-versions` is `true`.                                                                                                        |
-| `all-versions`     | `boolean` | `false`                                 | When `true`, generate clients for every declared API version in separate subfolders.                                                                                      |
-| `route-prefix`     | `string`  | `api/{version}`                         | Prefix prepended to every endpoint path. Use `{version}` as a placeholder for the API version (e.g. `api/{version}` → `/api/v1.0/items`). Set to `""` to emit bare paths. |
-| `npm-package-name` | `string`  | Derived from TypeSpec namespace         | The name given to the generated package. When omitted, the namespace is converted to kebab-case (e.g. `MyOrg.PetApi` → `my-org-pet-api`).                                 |
-| `npm-version`      | `string`  | —                                       | The version assigned to the generated package.                                                                                                                            |
-| `npm-description`  | `string`  | `Client models for the {namespace} API` | Description applied to the generated package.                                                                                                                             |
-| `clean-output-dir` | `boolean` | `false`                                 | When `true`, all files and directories inside `emitter-output-dir` are deleted before emitting.                                                                           |
-| `templates`        | `object`  | —                                       | Override individual built-in Handlebars templates. See [Customizing templates](#customizing-templates).                                                                   |
+| Option             | Type      | Default                                 | Description                                                                                                                                                                                                                                                 |
+| ------------------ | --------- | --------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `target-version`   | `string`  | Latest declared version                 | Emit only this API version. Ignored when `all-versions` is `true`.                                                                                                                                                                                          |
+| `all-versions`     | `boolean` | `false`                                 | When `true`, generate clients for every declared API version in separate subfolders.                                                                                                                                                                        |
+| `route-prefix`     | `string`  | `api/{version}`                         | Prefix prepended to every endpoint path. Use `{version}` as a placeholder for the API version (e.g. `api/{version}` → `/api/v1.0/items`). Set to `""` to emit bare paths.                                                                                   |
+| `npm-package-name` | `string`  | Derived from TypeSpec namespace         | The name given to the generated package. When omitted, the namespace is converted to kebab-case (e.g. `MyOrg.PetApi` → `my-org-pet-api`).                                                                                                                   |
+| `npm-version`      | `string`  | —                                       | The version assigned to the generated package.                                                                                                                                                                                                              |
+| `npm-description`  | `string`  | `Client models for the {namespace} API` | Description applied to the generated package.                                                                                                                                                                                                               |
+| `clean-output-dir` | `boolean` | `false`                                 | When `true`, all files and directories inside `emitter-output-dir` are deleted before emitting. Cleanup uses the TypeSpec host filesystem APIs and refuses to run when the output directory resolves to the current working directory or a filesystem root. |
+| `templates`        | `object`  | —                                       | Override individual built-in Handlebars templates. See [Customizing templates](#customizing-templates).                                                                                                                                                     |
 
 Then compile your TypeSpec definition:
 
@@ -64,6 +64,12 @@ Override the name of any element in the emitted TypeScript library without chang
 ```
 
 Applicable to: **models** (emitted as interfaces), **enums**, **enum members**, and **model properties**.
+
+Validation rules for overrides:
+
+- Overrides must be non-empty valid TypeScript identifiers.
+- Reserved words are rejected.
+- Collisions that would produce duplicate emitted declarations or duplicate members report diagnostics and fall back to safe names.
 
 ```typespec
 import "@massivescale/tsp-ts-client-models";

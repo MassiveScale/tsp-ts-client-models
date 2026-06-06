@@ -5,6 +5,8 @@ import {
 } from "@typespec/compiler/testing";
 import type { EmitterOptions } from "../src/lib.js";
 
+type TestEmitterOptions = EmitterOptions & Record<string, unknown>;
+
 const BaseTester = createTester(resolvePath(import.meta.dirname, "../.."), {
   libraries: [
     "@massivescale/tsp-ts-client-models",
@@ -13,7 +15,7 @@ const BaseTester = createTester(resolvePath(import.meta.dirname, "../.."), {
   ],
 });
 
-function testerFor(options?: EmitterOptions) {
+function testerFor(options?: TestEmitterOptions) {
   return BaseTester.emit(
     "@massivescale/tsp-ts-client-models",
     (options ?? {}) as Record<string, unknown>,
@@ -22,7 +24,7 @@ function testerFor(options?: EmitterOptions) {
 
 export async function emitWithDiagnostics(
   code: string,
-  options?: EmitterOptions,
+  options?: TestEmitterOptions,
 ): Promise<[Record<string, string>, readonly Diagnostic[]]> {
   const [{ outputs }, diagnostics] =
     await testerFor(options).compileAndDiagnose(code);
@@ -31,7 +33,7 @@ export async function emitWithDiagnostics(
 
 export async function emit(
   code: string,
-  options?: EmitterOptions,
+  options?: TestEmitterOptions,
 ): Promise<Record<string, string>> {
   const [result, diagnostics] = await emitWithDiagnostics(code, options);
   expectDiagnosticEmpty(diagnostics);

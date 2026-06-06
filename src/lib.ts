@@ -109,6 +109,30 @@ export const $lib = createTypeSpecLibrary({
         default: paramMessage`Failed to load Handlebars template: ${"message"}`,
       },
     },
+    "invalid-client-name-override": {
+      severity: "error",
+      messages: {
+        default: paramMessage`Invalid @clientName override "${"name"}" on ${"kind"}: ${"reason"}.`,
+      },
+    },
+    "client-name-collision": {
+      severity: "error",
+      messages: {
+        default: paramMessage`@clientName override "${"name"}" on ${"kind"} collides with another emitted ${"scope"}.`,
+      },
+    },
+    "unsafe-clean-output-dir": {
+      severity: "error",
+      messages: {
+        default: paramMessage`Refusing to clean emitter-output-dir "${"outputDir"}" because it resolves to ${"reason"}.`,
+      },
+    },
+    "clean-output-dir-failed": {
+      severity: "error",
+      messages: {
+        default: paramMessage`Failed to clean emitter-output-dir "${"outputDir"}": ${"message"}`,
+      },
+    },
     "version-not-found": {
       severity: "error",
       messages: {
