@@ -352,18 +352,21 @@ function reserveDeclarationName(
     return candidate;
   }
 
-  if (candidate !== fallbackName) {
-    program.reportDiagnostic(
-      createDiagnostic({
-        code: "client-name-collision",
-        target,
-        format: { name: candidate, kind, scope: "declaration" },
-      }),
-    );
-    const fallbackExisting = names.get(fallbackName);
-    if (!fallbackExisting || fallbackExisting === target) {
-      names.set(fallbackName, target);
-      return fallbackName;
+  program.reportDiagnostic(
+    createDiagnostic({
+      code: "client-name-collision",
+      target,
+      format: { name: candidate, kind, scope: "declaration" },
+    }),
+  );
+
+  const base = fallbackName || candidate;
+  for (let i = 0; i < 1000; i++) {
+    const next = i === 0 ? base : `${base}_${i + 1}`;
+    const nextExisting = names.get(next);
+    if (!nextExisting || nextExisting === target) {
+      names.set(next, target);
+      return next;
     }
   }
 
