@@ -1,12 +1,17 @@
 # @massivescale/tsp-ts-client-models
 
-[TypeSpec](https://typespec.io) emitter for generating C# API clients using [Refit](https://www.nuget.org/packages/Refit).
+[TypeSpec](https://typespec.io) emitter that generates a fully-typed, publishable npm package from your API definition.
 
 ## Summary
 
-This emitter produces an npm package with client-facing models for each `GET`, `POST`, `PATCH`, and `DELETE` operation in your TypeSpec definition. The generated client contains the models for each resource, request, and enumeration needed to call the API. The MVP does not implement an actual client, this is currently left up to the consuming application. It does however produce a utility for retriving the reletive path to each endpoints and models associated with it, allowing you to easily fetch the correct endpoint at build and runtime.
+This emitter produces:
 
-It is also version-aware, allowing you to call any endpoint version from a package.
+- **TypeScript models** — `export interface` and `export enum` for every model and enum in your TypeSpec definition.
+- **Request types** — visibility-filtered interfaces (e.g. `WidgetPostRequest`, `WidgetPatchRequest`) that strip server-managed fields like `id` from write operations. MergePatch operations are also supported.
+- **Endpoint utilities** — `*Endpoints` `as const` objects with typed path-building functions per interface.
+- **Typed HTTP client** _(optional, on by default)_ — one `*Client` class per TypeSpec interface using native `fetch`, with retry, `AbortSignal`, and timeout support.
+
+The output is a complete, buildable npm package (`package.json`, `tsconfig.json`, `index.ts`) ready to publish or consume locally.
 
 > **Status:** Early development. Core code generation is implemented; some edge cases and advanced TypeSpec features may not yet be handled.
 
@@ -30,15 +35,16 @@ options:
 
 ### Emitter options
 
-| Option             | Type      | Default                                 | Description                                                                                                                                                               |
-| ------------------ | --------- | --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `target-version`   | `string`  | Latest declared version                 | Emit only this API version. Ignored when `all-versions` is `true`.                                                                                                        |
-| `all-versions`     | `boolean` | `false`                                 | When `true`, generate clients for every declared API version in separate subfolders.                                                                                      |
-| `route-prefix`     | `string`  | `api/{version}`                         | Prefix prepended to every endpoint path. Use `{version}` as a placeholder for the API version (e.g. `api/{version}` → `/api/v1.0/items`). Set to `""` to emit bare paths. |
-| `npm-package-name` | `string`  | Derived from TypeSpec namespace         | The name given to the generated package. When omitted, the namespace is converted to kebab-case (e.g. `MyOrg.PetApi` → `my-org-pet-api`).                                 |
-| `npm-version`      | `string`  | —                                       | The version assigned to the generated package.                                                                                                                            |
-| `npm-description`  | `string`  | `Client models for the {namespace} API` | Description applied to the generated package.                                                                                                                             |
-| `templates`        | `object`  | —                                       | Override individual built-in Handlebars templates. See [Customizing templates](#customizing-templates).                                                                   |
+| Option                 | Type      | Default                                 | Description                                                                                                                                                               |
+| ---------------------- | --------- | --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `target-version`       | `string`  | Latest declared version                 | Emit only this API version. Ignored when `all-versions` is `true`.                                                                                                        |
+| `all-versions`         | `boolean` | `false`                                 | When `true`, generate clients for every declared API version in separate subfolders.                                                                                      |
+| `route-prefix`         | `string`  | `api/{version}`                         | Prefix prepended to every endpoint path. Use `{version}` as a placeholder for the API version (e.g. `api/{version}` → `/api/v1.0/items`). Set to `""` to emit bare paths. |
+| `npm-package-name`     | `string`  | Derived from TypeSpec namespace         | The name given to the generated package. When omitted, the namespace is converted to kebab-case (e.g. `MyOrg.PetApi` → `my-org-pet-api`).                                 |
+| `npm-version`          | `string`  | —                                       | The version assigned to the generated package.                                                                                                                            |
+| `npm-description`      | `string`  | `Client models for the {namespace} API` | Description applied to the generated package.                                                                                                                             |
+| `generate-http-client` | `boolean` | `true`                                  | Generate typed HTTP client classes. Set to `false` to emit models and endpoint utilities only.                                                                            |
+| `templates`            | `object`  | —                                       | Override individual built-in Handlebars templates. See [Customizing templates](#customizing-templates).                                                                   |
 
 Then compile your TypeSpec definition:
 
@@ -124,9 +130,12 @@ Each template receives the corresponding view model as its Handlebars context.
 
 After running `tsp compile .`, the emitter writes a complete, buildable npm package to the configured output directory. It includes:
 
-- TypeScript source files (`models.ts`, `endpoints/*.ts`, `index.ts`)
-- A `package.json` with `exports`, `scripts`, `files`, and `devDependencies` pre-filled
-- A `tsconfig.json` configured for `NodeNext` modules with `declaration` output
+- `models.ts` — TypeScript interfaces, enums, and request types
+- `endpoints/*.ts` — path utility `as const` objects per TypeSpec interface
+- `client/ApiClient.ts` — base `HttpClient`, `ClientConfig`, `ApiError`, retry logic (requires Node.js 18+ or a modern browser)
+- `client/*Client.ts` — one typed client class per TypeSpec interface
+- `index.ts` — barrel export
+- `package.json` and `tsconfig.json` — ready to build and publish
 
 To build and publish the generated package:
 
@@ -137,13 +146,33 @@ npm run build          # compiles TypeScript → dist/
 npm publish
 ```
 
-Consumers install and import it as a normal ESM package:
+### HTTP client
 
 ```typescript
-import { Widget, WidgetCreateRequest } from "your-package-name";
-import { WidgetsEndpoints } from "your-package-name";
+import { WidgetsClient } from "your-package-name";
+
+const client = new WidgetsClient({
+  baseUrl: "https://api.example.com",
+  defaultHeaders: { Authorization: "Bearer …" },
+  retry: { maxAttempts: 3 },
+});
+
+const widgets = await client.list();
+const widget = await client.read("abc123");
+await client.create({ name: "New Widget" }); // body typed as WidgetPostRequest
+```
+
+See [docs/http-client.md](docs/http-client.md) for the full `ClientConfig`, error types, and extension patterns.
+
+### Endpoint utilities only
+
+If you prefer to manage HTTP calls yourself (or set `generate-http-client: false`), the endpoint utilities are still generated:
+
+```typescript
+import { Widget, WidgetPostRequest, WidgetsEndpoints } from "your-package-name";
 
 const url = WidgetsEndpoints.list(); // "/api/v2.0/widgets"
+const url = WidgetsEndpoints.read("id"); // "/api/v2.0/widgets/id"
 ```
 
 For multi-version output (`all-versions: true`), each version is a separate subpath export:
@@ -152,6 +181,20 @@ For multi-version output (`all-versions: true`), each version is a separate subp
 import { WidgetsEndpoints as WidgetsV1Endpoints } from "your-package-name/v1.0";
 import { WidgetsEndpoints as WidgetsV2Endpoints } from "your-package-name/v2.0";
 ```
+
+### Request type naming
+
+Request types use the HTTP verb as the suffix (since 0.3.0):
+
+| TypeSpec operation | Generated request type |
+| ------------------ | ---------------------- |
+| `@post create(…)`  | `WidgetPostRequest`    |
+| `@patch update(…)` | `WidgetPatchRequest`   |
+| `@put replace(…)`  | `WidgetPutRequest`     |
+
+> **Migrating from 0.2.x:** Rename `*CreateRequest` → `*PostRequest`, `*UpdateRequest` → `*PatchRequest`, `*ReplaceRequest` → `*PutRequest`.
+
+See [docs/request-models.md](docs/request-models.md) for visibility filtering, MergePatch support, and collision detection.
 
 ## Development
 

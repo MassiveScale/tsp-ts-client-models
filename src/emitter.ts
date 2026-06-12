@@ -14,6 +14,7 @@ import {
   BooleanLiteral,
   getDoc,
   getFormat,
+  getTags,
   isArrayModelType,
   isRecordModelType,
   isNullType,
@@ -28,6 +29,7 @@ import {
 import {
   getAllHttpServices,
   HttpOperation,
+  HttpStatusCodeRange,
   Visibility,
   isVisible,
   resolveRequestVisibility,
@@ -50,9 +52,10 @@ import {
   EndpointMethodView,
   FileView,
   IndexView,
+  ClientView,
   TemplateOverrides,
 } from "./renderer.js";
-import { EmitterOptions, createDiagnostic } from "./lib.js";
+import { EmitterOptions, createDiagnostic, reportDiagnostic } from "./lib.js";
 
 // ─── Entry point ────────────────────────────────────────────────────────────
 
@@ -249,31 +252,61 @@ interface RequestType {
   name: string;
   doc: string | undefined;
   props: Map<string, ModelProperty>;
+  sourceOp: HttpOperation;
 }
 
 function requestTypeSuffix(verb: string): string {
-  switch (verb) {
-    case "post":
-      return "Create";
-    case "patch":
-      return "Update";
-    case "put":
-      return "Replace";
-    default:
-      return capitalize(verb);
-  }
+  return capitalize(verb);
 }
 
-const MERGE_PATCH_SUFFIXES = [
+// TypeSpec synthesizes these model name suffixes internally for PATCH/MergePatch bodies.
+// They are never valid output names — all detected models are renamed to {Base}PatchRequest.
+const TYPESPEC_MERGE_PATCH_INTERNAL_SUFFIXES = [
   "MergePatchUpdate",
   "MergePatchUpdateReplaceOnly",
   "MergePatchCreateOrUpdate",
 ];
 
+function getMergePatchBaseName(modelName: string): string | undefined {
+  for (const suffix of TYPESPEC_MERGE_PATCH_INTERNAL_SUFFIXES) {
+    if (modelName.endsWith(suffix)) return modelName.slice(0, -suffix.length);
+  }
+  return undefined;
+}
+
 function isSynthesizedMergePatchModel(model: Model): boolean {
-  return model.name
-    ? MERGE_PATCH_SUFFIXES.some((s) => model.name!.endsWith(s))
-    : false;
+  return model.name ? getMergePatchBaseName(model.name) !== undefined : false;
+}
+
+// Build a rename map for all synthesized MergePatch model names found in the
+// collected models. Each synthesized name maps to:
+//   - "{Base}PatchRequest" when the base model has its own endpoint (appears in
+//     requestTypeBaseModels), meaning it already has a generated request type.
+//   - "{Base}" (the plain model name) when the base is a complex value type with
+//     no endpoint (e.g. Tag), so we simply reference the original model.
+function buildMergePatchRenameMap(
+  models: Map<string, Model>,
+  requestTypeBaseModels: Set<string>,
+): Map<string, string> {
+  const renameMap = new Map<string, string>();
+  for (const [name] of models) {
+    const base = getMergePatchBaseName(name);
+    if (base === undefined) continue;
+    renameMap.set(
+      name,
+      requestTypeBaseModels.has(base) ? `${base}PatchRequest` : base,
+    );
+  }
+  return renameMap;
+}
+
+function propsHaveSameKeys(
+  a: Map<string, ModelProperty>,
+  b: Map<string, ModelProperty>,
+): boolean {
+  if (a.size !== b.size) return false;
+  for (const key of a.keys()) if (!b.has(key)) return false;
+  return true;
 }
 
 function hasHiddenProperties(
@@ -355,6 +388,7 @@ async function emitService(
         vDir,
         version,
         routePrefix,
+        options,
         renderer,
       );
     }
@@ -367,6 +401,7 @@ async function emitService(
       outputDir,
       undefined,
       routePrefix,
+      options,
       renderer,
     );
   }
@@ -396,6 +431,7 @@ async function emitVersion(
   vDir: string,
   version: Version | undefined,
   routePrefix: string,
+  options: EmitterOptions,
   renderer: Renderer,
 ): Promise<void> {
   const models = new Map<string, Model>();
@@ -437,8 +473,20 @@ async function emitVersion(
   // properties, so types like enums first discovered via a property would be missed.
   deepCollectTypes(models, enums, program);
 
-  // Emit endpoint files and collect their relative paths for the index
+  // Build a rename map so synthesized MergePatch type names are rewritten to
+  // their canonical output names during rendering (e.g. PetMergePatchUpdateReplaceOnly
+  // → PetPatchRequest, TagMergePatchUpdateReplaceOnly → Tag).
+  const mergePatchRenameMap = buildMergePatchRenameMap(
+    models,
+    requestTypeBaseModels,
+  );
+
+  const generateClient = options["generate-http-client"] !== false;
+
+  // Emit endpoint files and (optionally) client files; collect exports for index
   const endpointExports: string[] = [];
+  const clientExports: string[] = [];
+
   for (const { name, container, ops } of byContainer.values()) {
     const vOps = version
       ? ops.filter((op) => isOpInVersion(program, op, version))
@@ -458,6 +506,36 @@ async function emitVersion(
     const relPath = `endpoints/${name}.ts`;
     await writeFile(program, resolvePath(vDir, relPath), content);
     endpointExports.push(`./endpoints/${name}.js`);
+
+    if (generateClient) {
+      const clientContent = buildClientFile(
+        name,
+        vOps,
+        requestTypes,
+        program,
+        models,
+        enums,
+        renderer,
+        mergePatchRenameMap,
+      );
+      await writeFile(
+        program,
+        resolvePath(vDir, `client/${name}Client.ts`),
+        clientContent,
+      );
+      clientExports.push(`./client/${name}Client.js`);
+    }
+  }
+
+  // Emit the static base client infrastructure
+  if (generateClient && clientExports.length > 0) {
+    const fileContent = `// AUTO-GENERATED. Do not edit this file directly.\n\n${API_CLIENT_CONTENT}`;
+    await writeFile(
+      program,
+      resolvePath(vDir, "client/ApiClient.ts"),
+      fileContent,
+    );
+    clientExports.unshift("./client/ApiClient.js");
   }
 
   // Emit models.ts if there's anything to export
@@ -476,6 +554,7 @@ async function emitVersion(
       readResponseModelNames,
       program,
       renderer,
+      mergePatchRenameMap,
     );
     await writeFile(program, resolvePath(vDir, "models.ts"), content);
   }
@@ -484,6 +563,7 @@ async function emitVersion(
   const exports: string[] = [];
   if (hasModels) exports.push("./models.js");
   exports.push(...endpointExports);
+  exports.push(...clientExports);
 
   if (exports.length > 0) {
     const indexView: IndexView = { exports };
@@ -515,6 +595,61 @@ function collectTypesFromOp(
   }
 }
 
+function storeRequestType(
+  requestTypeName: string,
+  baseName: string,
+  newEntry: RequestType,
+  op: HttpOperation,
+  program: Program,
+  models: Map<string, Model>,
+  enums: Map<string, Enum>,
+  requestTypes: Map<string, RequestType>,
+  requestTypeBaseModels: Set<string>,
+): void {
+  if (requestTypes.has(requestTypeName)) {
+    const existing = requestTypes.get(requestTypeName)!;
+    if (!propsHaveSameKeys(existing.props, newEntry.props)) {
+      // Collision: same name, different shapes — rename both with their @tag prefix.
+      const existingTags = getTags(program, existing.sourceOp.operation);
+      const newTags = getTags(program, op.operation);
+      if (!existingTags.length || !newTags.length) {
+        reportDiagnostic(program, {
+          code: "request-type-collision",
+          messageId: !existingTags.length ? "missingTag" : "default",
+          format: { name: requestTypeName, op: op.operation.name },
+          target: op.operation,
+        });
+        return;
+      }
+      const existingPrefix = capitalize(existingTags[0]);
+      const newPrefix = capitalize(newTags[0]);
+      requestTypes.delete(requestTypeName);
+      requestTypeBaseModels.delete(baseName);
+      requestTypes.set(`${existingPrefix}${requestTypeName}`, {
+        ...existing,
+        name: `${existingPrefix}${requestTypeName}`,
+      });
+      requestTypeBaseModels.add(`${existingPrefix}${baseName}`);
+      requestTypes.set(`${newPrefix}${requestTypeName}`, {
+        ...newEntry,
+        name: `${newPrefix}${requestTypeName}`,
+      });
+      requestTypeBaseModels.add(`${newPrefix}${baseName}`);
+      for (const [, prop] of newEntry.props) {
+        mapTsType(prop.type, program, models, enums);
+      }
+    }
+    // Identical shape — deduplicate silently.
+    return;
+  }
+
+  requestTypes.set(requestTypeName, newEntry);
+  requestTypeBaseModels.add(baseName);
+  for (const [, prop] of newEntry.props) {
+    mapTsType(prop.type, program, models, enums);
+  }
+}
+
 function collectRequestType(
   op: HttpOperation,
   program: Program,
@@ -530,26 +665,61 @@ function collectRequestType(
   if (op.verb !== "post" && op.verb !== "patch" && op.verb !== "put") return;
 
   const bodyModel = body.type as Model;
-  if (!bodyModel.name || isSynthesizedMergePatchModel(bodyModel)) return;
+  if (!bodyModel.name) return;
+
+  const mergePatchBase = getMergePatchBaseName(bodyModel.name);
+
+  if (mergePatchBase !== undefined) {
+    // MergePatch body: emit {BaseName}PatchRequest using the synthesized model's
+    // properties directly — they are already correctly nullable for partial updates.
+    const requestTypeName = `${mergePatchBase}PatchRequest`;
+    storeRequestType(
+      requestTypeName,
+      mergePatchBase,
+      {
+        name: requestTypeName,
+        doc: getDoc(program, bodyModel),
+        props: new Map(bodyModel.properties),
+        sourceOp: op,
+      },
+      op,
+      program,
+      models,
+      enums,
+      requestTypes,
+      requestTypeBaseModels,
+    );
+    return;
+  }
 
   const visibility = resolveRequestVisibility(program, op.operation, op.verb);
   if (!hasHiddenProperties(bodyModel, visibility, program)) return;
 
   const suffix = requestTypeSuffix(op.verb);
   const requestTypeName = `${bodyModel.name}${suffix}Request`;
-  if (!requestTypes.has(requestTypeName)) {
-    requestTypes.set(requestTypeName, {
+  const newProps = filterPropsForRequest(
+    bodyModel,
+    visibility,
+    version,
+    program,
+  );
+
+  storeRequestType(
+    requestTypeName,
+    bodyModel.name,
+    {
       name: requestTypeName,
       doc: getDoc(program, bodyModel),
-      props: filterPropsForRequest(bodyModel, visibility, version, program),
-    });
-    requestTypeBaseModels.add(bodyModel.name);
-  }
-
-  // Register types from the filtered props too
-  for (const [, prop] of requestTypes.get(requestTypeName)!.props) {
-    mapTsType(prop.type, program, models, enums);
-  }
+      props: newProps,
+      sourceOp: op,
+    },
+    op,
+    program,
+    models,
+    enums,
+    requestTypes,
+    requestTypeBaseModels,
+  );
 }
 
 // ─── Read-response model name collection ─────────────────────────────────────
@@ -615,6 +785,7 @@ function buildModelsFile(
   readResponseModelNames: Set<string>,
   program: Program,
   renderer: Renderer,
+  renameMap: Map<string, string>,
 ): string {
   const parts: string[] = [];
 
@@ -625,6 +796,9 @@ function buildModelsFile(
 
   for (const [, model] of models) {
     if (!isEmittable(model, nsFullName)) continue;
+    // Never emit synthesized MergePatch types — they are replaced by *PatchRequest
+    // types or by references to the plain base model.
+    if (isSynthesizedMergePatchModel(model)) continue;
     // Suppress models that have a request type and are NOT needed for any
     // GET/HEAD response — they'll appear only via their filtered request type.
     if (
@@ -634,7 +808,7 @@ function buildModelsFile(
       continue;
     parts.push(
       renderer.renderInterface(
-        buildInterfaceView(model, program, models, enums),
+        buildInterfaceView(model, program, models, enums, renameMap),
       ),
     );
   }
@@ -649,6 +823,7 @@ function buildModelsFile(
           program,
           models,
           enums,
+          renameMap,
         ),
       ),
     );
@@ -664,6 +839,7 @@ function buildInterfaceView(
   program: Program,
   models: Map<string, Model>,
   enums: Map<string, Enum>,
+  renameMap?: Map<string, string>,
 ): InterfaceView {
   const typeParams = collectTypeParams(model);
   const genericSuffix =
@@ -678,6 +854,7 @@ function buildInterfaceView(
       program,
       models,
       enums,
+      renameMap,
     ),
   };
 }
@@ -689,12 +866,13 @@ function buildFilteredInterfaceView(
   program: Program,
   models: Map<string, Model>,
   enums: Map<string, Enum>,
+  renameMap?: Map<string, string>,
 ): InterfaceView {
   return {
     doc: doc ?? undefined,
     interfaceName: name,
     genericSuffix: "",
-    properties: buildPropertyViews(props, program, models, enums),
+    properties: buildPropertyViews(props, program, models, enums, renameMap),
   };
 }
 
@@ -703,11 +881,12 @@ function buildPropertyViews(
   program: Program,
   models: Map<string, Model>,
   enums: Map<string, Enum>,
+  renameMap?: Map<string, string>,
 ): PropertyView[] {
   const result: PropertyView[] = [];
   for (const [, prop] of props) {
     const doc = getDoc(program, prop);
-    const tsType = mapTsType(prop.type, program, models, enums);
+    const tsType = mapTsType(prop.type, program, models, enums, renameMap);
     result.push({
       doc: doc ?? undefined,
       name: prop.name,
@@ -817,6 +996,374 @@ function buildEndpointFunctionText(
   return `(${params}) => ${pathExpr}`;
 }
 
+// ─── client/ApiClient.ts — static base infrastructure ────────────────────────
+
+const API_CLIENT_CONTENT = `export interface RetryConfig {
+  /** Maximum number of attempts before giving up. Default: 3. */
+  maxAttempts?: number;
+  /** Base delay in milliseconds for exponential backoff. Default: 1000. */
+  baseDelayMs?: number;
+  /** HTTP status codes that trigger a retry. Default: [429, 503]. */
+  retryOn?: number[];
+}
+
+export interface ClientConfig {
+  /** Base URL of the API, e.g. "https://api.example.com". Trailing slash is trimmed automatically. */
+  baseUrl: string;
+  /** Headers merged into every request. */
+  defaultHeaders?: Record<string, string>;
+  /** Request timeout in milliseconds (passed as AbortSignal). */
+  timeout?: number;
+  /** Retry configuration. */
+  retry?: RetryConfig;
+}
+
+export interface RequestOptions {
+  /** Per-request headers merged on top of defaultHeaders. */
+  headers?: Record<string, string>;
+  /** Abort signal for cancellation. */
+  signal?: AbortSignal;
+}
+
+export class ApiError extends Error {
+  constructor(
+    public readonly status: number,
+    public readonly statusText: string,
+    public readonly body?: unknown,
+  ) {
+    super(\`HTTP \${status}: \${statusText}\`);
+    this.name = "ApiError";
+  }
+}
+
+export class RateLimitError extends ApiError {
+  constructor(public readonly retryAfterMs?: number) {
+    super(429, "Too Many Requests");
+    this.name = "RateLimitError";
+  }
+}
+
+export class ServiceUnavailableError extends ApiError {
+  constructor() {
+    super(503, "Service Unavailable");
+    this.name = "ServiceUnavailableError";
+  }
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export class HttpClient {
+  constructor(protected readonly config: ClientConfig) {}
+
+  protected async request<T>(
+    method: string,
+    path: string,
+    options?: RequestOptions & {
+      body?: unknown;
+      query?: Record<string, unknown>;
+    },
+  ): Promise<T> {
+    const { maxAttempts = 3, baseDelayMs = 1000, retryOn = [429, 503] } =
+      this.config.retry ?? {};
+
+    let url = \`\${this.config.baseUrl.replace(/\\/$/, "")}\${path}\`;
+    if (options?.query) {
+      const qs = new URLSearchParams(
+        Object.entries(options.query)
+          .filter(([, v]) => v !== undefined && v !== null)
+          .map(([k, v]) => [k, String(v)]),
+      ).toString();
+      if (qs) url = \`\${url}?\${qs}\`;
+    }
+
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+      ...this.config.defaultHeaders,
+      ...options?.headers,
+    };
+
+    let signal = options?.signal;
+    if (this.config.timeout && !signal) {
+      signal = AbortSignal.timeout(this.config.timeout);
+    }
+
+    let lastError: unknown;
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      if (attempt > 0) await delay(baseDelayMs * Math.pow(2, attempt - 1));
+      try {
+        const resp = await fetch(url, {
+          method,
+          headers,
+          body:
+            options?.body !== undefined
+              ? JSON.stringify(options.body)
+              : undefined,
+          signal,
+        });
+        if (!resp.ok) {
+          if (retryOn.includes(resp.status) && attempt < maxAttempts - 1) {
+            if (resp.status === 429) {
+              const after = resp.headers.get("Retry-After");
+              if (after) await delay(parseFloat(after) * 1000);
+            }
+            lastError = new ApiError(resp.status, resp.statusText);
+            continue;
+          }
+          const body = await resp.json().catch(() => undefined);
+          throw new ApiError(resp.status, resp.statusText, body);
+        }
+        if (resp.status === 204) return undefined as T;
+        return resp.json() as Promise<T>;
+      } catch (err) {
+        if (err instanceof ApiError) throw err;
+        lastError = err;
+      }
+    }
+    throw lastError ?? new ApiError(0, "Unknown error");
+  }
+
+  protected get<T>(
+    path: string,
+    options?: RequestOptions & { query?: Record<string, unknown> },
+  ): Promise<T> {
+    return this.request<T>("GET", path, options);
+  }
+
+  protected post<T>(
+    path: string,
+    body?: unknown,
+    options?: RequestOptions,
+  ): Promise<T> {
+    return this.request<T>("POST", path, { ...options, body });
+  }
+
+  protected put<T>(
+    path: string,
+    body?: unknown,
+    options?: RequestOptions,
+  ): Promise<T> {
+    return this.request<T>("PUT", path, { ...options, body });
+  }
+
+  protected patch<T>(
+    path: string,
+    body?: unknown,
+    options?: RequestOptions,
+  ): Promise<T> {
+    return this.request<T>("PATCH", path, { ...options, body });
+  }
+
+  protected delete<T>(path: string, options?: RequestOptions): Promise<T> {
+    return this.request<T>("DELETE", path, options);
+  }
+
+  protected head(path: string, options?: RequestOptions): Promise<void> {
+    return this.request<void>("HEAD", path, options);
+  }
+}
+`;
+
+// ─── client/{Name}Client.ts generation ───────────────────────────────────────
+
+function buildClientFile(
+  name: string,
+  ops: HttpOperation[],
+  requestTypes: Map<string, RequestType>,
+  program: Program,
+  models: Map<string, Model>,
+  enums: Map<string, Enum>,
+  renderer: Renderer,
+  renameMap: Map<string, string>,
+): string {
+  const endpointsClassName = `${name}Endpoints`;
+  const modelImportSet = new Set<string>();
+  const methods: import("./renderer.js").ClientMethodView[] = ops.map((op) =>
+    buildClientMethodView(
+      op,
+      endpointsClassName,
+      requestTypes,
+      program,
+      models,
+      enums,
+      modelImportSet,
+      renameMap,
+    ),
+  );
+
+  const clientView: ClientView = {
+    className: `${name}Client`,
+    endpointsClassName,
+    methods,
+    modelImports: [...modelImportSet],
+  };
+  return renderer.renderClient(clientView);
+}
+
+function buildClientMethodView(
+  op: HttpOperation,
+  endpointsClassName: string,
+  requestTypes: Map<string, RequestType>,
+  program: Program,
+  models: Map<string, Model>,
+  enums: Map<string, Enum>,
+  modelImportSet: Set<string>,
+  renameMap: Map<string, string>,
+): import("./renderer.js").ClientMethodView {
+  const pathParams = op.parameters.parameters
+    .filter((p) => p.type === "path")
+    .map((p) => ({ name: p.param.name, tsType: "string" }));
+
+  const queryParams = op.parameters.parameters
+    .filter((p) => p.type === "query")
+    .map((p) => ({
+      name: p.param.name,
+      tsType: mapTsType(p.param.type, program, models, enums),
+      optional: p.param.optional,
+    }));
+
+  // Determine request body type
+  let bodyType: string | null = null;
+  if (
+    op.parameters.body?.bodyKind === "single" &&
+    op.parameters.body.type.kind === "Model"
+  ) {
+    const bodyModel = op.parameters.body.type as Model;
+    if (bodyModel.name) {
+      const mergePatchBase = getMergePatchBaseName(bodyModel.name);
+      const baseName = mergePatchBase ?? bodyModel.name;
+      const suffix = requestTypeSuffix(op.verb);
+      const requestTypeName = `${baseName}${suffix}Request`;
+      if (requestTypes.has(requestTypeName)) {
+        bodyType = requestTypeName;
+        modelImportSet.add(requestTypeName);
+      } else if (bodyModel.name && !isSynthesizedMergePatchModel(bodyModel)) {
+        bodyType = bodyModel.name;
+        modelImportSet.add(bodyModel.name);
+      }
+    }
+  }
+
+  // Determine response type from first 2xx response body
+  const responseType = resolveResponseType(
+    op,
+    program,
+    models,
+    enums,
+    modelImportSet,
+    renameMap,
+  );
+
+  // Build method parameters string
+  const paramParts: string[] = [];
+  for (const { name, tsType } of pathParams) {
+    paramParts.push(`${name}: ${tsType}`);
+  }
+  if (bodyType) {
+    paramParts.push(`body: ${bodyType}`);
+  }
+  if (queryParams.length > 0) {
+    const queryFields = queryParams
+      .map((q) => `${q.name}${q.optional ? "?" : ""}: ${q.tsType}`)
+      .join("; ");
+    paramParts.push(`query?: { ${queryFields} }`);
+  }
+  paramParts.push(`options?: RequestOptions`);
+  const methodParams = paramParts.join(", ");
+
+  // Build endpoint call expression
+  const pathParamArgs = pathParams.map((p) => p.name).join(", ");
+  const endpointCall = `${endpointsClassName}.${op.operation.name}(${pathParamArgs})`;
+
+  // Build method body
+  const httpMethod = op.verb.toLowerCase();
+  let methodBody: string;
+  if (op.verb === "get" || op.verb === "head" || op.verb === "delete") {
+    if (queryParams.length > 0) {
+      methodBody = `return this.${httpMethod}<${responseType}>(${endpointCall}, { ...options, query });`;
+    } else {
+      methodBody = `return this.${httpMethod}<${responseType}>(${endpointCall}, options);`;
+    }
+  } else {
+    methodBody = `return this.${httpMethod}<${responseType}>(${endpointCall}, ${bodyType ? "body" : "undefined"}, options);`;
+  }
+
+  return {
+    doc: getDoc(program, op.operation) ?? undefined,
+    name: op.operation.name,
+    methodParams,
+    methodBody,
+    responseType,
+  };
+}
+
+function is2xxStatusCode(code: HttpStatusCodeRange | number | "*"): boolean {
+  if (code === "*") return true;
+  if (typeof code === "number") return code >= 200 && code < 300;
+  // HttpStatusCodeRange: { start, end }
+  return code.start >= 200 && code.start < 300;
+}
+
+function resolveResponseType(
+  op: HttpOperation,
+  program: Program,
+  models: Map<string, Model>,
+  enums: Map<string, Enum>,
+  modelImportSet: Set<string>,
+  renameMap: Map<string, string>,
+): string {
+  for (const resp of op.responses) {
+    if (!is2xxStatusCode(resp.statusCodes)) continue;
+    for (const content of resp.responses) {
+      if (content.body) {
+        const tsType = mapTsType(
+          content.body.type,
+          program,
+          models,
+          enums,
+          renameMap,
+        );
+        if (tsType !== "void" && tsType !== "unknown") {
+          collectModelNamesFromType(content.body.type, modelImportSet);
+          return tsType;
+        }
+      }
+    }
+  }
+  return "void";
+}
+
+function collectModelNamesFromType(type: Type, into: Set<string>): void {
+  if (type.kind === "Model") {
+    const m = type as Model;
+    if (isArrayModelType(m) && m.indexer) {
+      collectModelNamesFromType(m.indexer.value, into);
+      return;
+    }
+    if (isRecordModelType(m) && m.indexer) {
+      collectModelNamesFromType(m.indexer.value, into);
+      return;
+    }
+    if (m.name && !m.templateMapper?.args) {
+      into.add(m.name);
+    } else if (m.name && m.templateMapper?.args) {
+      into.add(m.name);
+      for (const arg of m.templateMapper.args) {
+        if ((arg as { entityKind?: string }).entityKind === "Type") {
+          collectModelNamesFromType(arg as Type, into);
+        }
+      }
+    }
+  } else if (type.kind === "Union") {
+    const u = type as Union;
+    for (const [, variant] of u.variants) {
+      collectModelNamesFromType(variant.type, into);
+    }
+  }
+}
+
 // ─── package.json generation ─────────────────────────────────────────────────
 
 function nsToPackageName(nsFullName: string): string {
@@ -898,6 +1445,7 @@ function mapTsType(
   program: Program,
   models: Map<string, Model>,
   enums: Map<string, Enum>,
+  renameMap?: Map<string, string>,
 ): string {
   switch (type.kind) {
     case "Scalar":
@@ -906,15 +1454,20 @@ function mapTsType(
     case "Model": {
       const m = type as Model;
       if (isArrayModelType(m)) {
-        return `${mapTsType(m.indexer!.value, program, models, enums)}[]`;
+        return `${mapTsType(m.indexer!.value, program, models, enums, renameMap)}[]`;
       }
       if (isRecordModelType(m)) {
-        return `Record<string, ${mapTsType(m.indexer!.value, program, models, enums)}>`;
+        return `Record<string, ${mapTsType(m.indexer!.value, program, models, enums, renameMap)}>`;
       }
       if (isErrorModel(program, m)) {
         // Emit error models — just note them
       }
       if (!m.name) return "unknown";
+
+      // During the rendering phase, synthesized MergePatch model names are
+      // rewritten to their canonical output names (e.g. PetPatchRequest or Tag).
+      const renamed = renameMap?.get(m.name);
+      if (renamed !== undefined) return renamed;
 
       if (m.templateMapper?.args) {
         const args = m.templateMapper.args
@@ -922,7 +1475,7 @@ function mapTsType(
             (a): a is Type =>
               (a as { entityKind?: string }).entityKind === "Type",
           )
-          .map((a) => mapTsType(a, program, models, enums));
+          .map((a) => mapTsType(a, program, models, enums, renameMap));
         if (m.name === "Array" && args.length === 1) return `${args[0]}[]`;
         const decl = m.namespace?.models.get(m.name);
         models.set(m.name, decl ?? m);
@@ -943,7 +1496,7 @@ function mapTsType(
       const u = type as Union;
       const parts: string[] = [];
       for (const [, variant] of u.variants) {
-        parts.push(mapTsType(variant.type, program, models, enums));
+        parts.push(mapTsType(variant.type, program, models, enums, renameMap));
       }
       const unique = [...new Set(parts)].filter((p) => p !== "never");
       return unique.length > 0 ? unique.join(" | ") : "unknown";

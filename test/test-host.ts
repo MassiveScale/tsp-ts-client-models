@@ -9,6 +9,7 @@ const BaseTester = createTester(resolvePath(import.meta.dirname, "../.."), {
   libraries: [
     "@massivescale/tsp-ts-client-models",
     "@typespec/http",
+    "@typespec/rest",
     "@typespec/versioning",
   ],
 });

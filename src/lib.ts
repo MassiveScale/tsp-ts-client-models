@@ -12,6 +12,7 @@ export interface EmitterOptions {
   "npm-version"?: string;
   "npm-description"?: string;
   "route-prefix"?: string;
+  "generate-http-client"?: boolean;
   templates?: TemplateOverrides;
 }
 
@@ -54,6 +55,12 @@ const EmitterOptionsSchema: JSONSchemaType<EmitterOptions> = {
         "Route prefix prepended to all endpoint paths. Use {version} as a placeholder for the API version (e.g. 'api/{version}'). Defaults to 'api/{version}'.",
       nullable: true,
     },
+    "generate-http-client": {
+      type: "boolean",
+      description:
+        "When true (default), generates a typed HTTP client class for each interface alongside the models and endpoint utilities.",
+      nullable: true,
+    },
     templates: {
       type: "object",
       description:
@@ -86,6 +93,11 @@ const EmitterOptionsSchema: JSONSchemaType<EmitterOptions> = {
           nullable: true,
           description: "Barrel index template.",
         },
+        client: {
+          type: "string",
+          nullable: true,
+          description: "HTTP client class template.",
+        },
       },
       required: [],
     },
@@ -106,6 +118,13 @@ export const $lib = createTypeSpecLibrary({
       severity: "error",
       messages: {
         default: paramMessage`Version "${"version"}" was not found. Available versions: ${"available"}.`,
+      },
+    },
+    "request-type-collision": {
+      severity: "error",
+      messages: {
+        default: paramMessage`Request type "${"name"}" is produced by two operations with different shapes. Add @tag to both operations to disambiguate.`,
+        missingTag: paramMessage`Request type "${"name"}" collision: operation "${"op"}" has no @tag for disambiguation. Add @tag to all conflicting operations.`,
       },
     },
   },

@@ -15,7 +15,8 @@ export type TemplateName =
   | "interface"
   | "enum"
   | "endpoints"
-  | "index";
+  | "index"
+  | "client";
 
 /**
  * Partial map of template names to absolute file paths used to override the
@@ -109,6 +110,32 @@ export interface IndexView {
   exports: string[];
 }
 
+/** View model for a single HTTP client method. */
+export interface ClientMethodView {
+  /** Optional JSDoc text. */
+  doc?: string;
+  /** camelCase method name, e.g. `"list"`, `"create"`. */
+  name: string;
+  /** Pre-rendered method signature arguments string, e.g. `"id: string, body: WidgetPostRequest"`. */
+  methodParams: string;
+  /** Pre-rendered method body, e.g. `"return this.post<Widget>(WidgetsEndpoints.create(), body);"`. */
+  methodBody: string;
+  /** TypeScript return type, e.g. `"Widget[]"` or `"void"`. */
+  responseType: string;
+}
+
+/** View model for a typed HTTP client class bound to one TypeSpec Interface. */
+export interface ClientView {
+  /** PascalCase class name, e.g. `"WidgetsClient"`. */
+  className: string;
+  /** Name of the endpoints object, e.g. `"WidgetsEndpoints"`. */
+  endpointsClassName: string;
+  /** Ordered list of client method view models. */
+  methods: ClientMethodView[];
+  /** Deduplicated model type names imported from `"../models.js"`. */
+  modelImports: string[];
+}
+
 // ---------------------------------------------------------------------------
 // Renderer interface
 // ---------------------------------------------------------------------------
@@ -125,6 +152,8 @@ export interface Renderer {
   renderEndpoints(view: EndpointsView): string;
   /** Renders the barrel `index.ts` (file header + export * lines). */
   renderIndex(view: IndexView): string;
+  /** Renders a typed HTTP client class for one TypeSpec Interface. */
+  renderClient(view: ClientView): string;
 }
 
 // ---------------------------------------------------------------------------
@@ -186,6 +215,7 @@ export function createRenderer(overrides: TemplateOverrides = {}): Renderer {
   const enumTemplate = loadTemplate(env, "enum", overrides.enum);
   const endpointsTemplate = loadTemplate(env, "endpoints", overrides.endpoints);
   const indexTemplate = loadTemplate(env, "index", overrides.index);
+  const clientTemplate = loadTemplate(env, "client", overrides.client);
 
   return {
     renderFile(view) {
@@ -207,6 +237,11 @@ export function createRenderer(overrides: TemplateOverrides = {}): Renderer {
     renderIndex(view) {
       const body = indexTemplate(view);
       return fileTemplate({ body, fileName: "index.ts" });
+    },
+
+    renderClient(view) {
+      const body = clientTemplate(view);
+      return fileTemplate({ body, fileName: `${view.className}.ts` });
     },
   };
 }

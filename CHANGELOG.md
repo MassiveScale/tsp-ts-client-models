@@ -6,6 +6,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-06-11
+
+### Breaking changes
+
+- **Request type naming convention changed.** Generated request types now use the HTTP verb as the suffix instead of a semantic word.
+
+  | Old (≤ 0.2.x)          | New (0.3.0+)         |
+  | ---------------------- | -------------------- |
+  | `WidgetCreateRequest`  | `WidgetPostRequest`  |
+  | `WidgetUpdateRequest`  | `WidgetPatchRequest` |
+  | `WidgetReplaceRequest` | `WidgetPutRequest`   |
+
+  **Migration:** rename all usages of `*CreateRequest`, `*UpdateRequest`, and `*ReplaceRequest` to `*PostRequest`, `*PatchRequest`, and `*PutRequest` respectively.
+
+### Added
+
+- **MergePatch request models.** When an operation body is `MergePatchUpdate<T>`, `MergePatchUpdateReplaceOnly<T>`, or `MergePatchCreateOrUpdate<T>` from `@typespec/rest`, the emitter now generates a `{BaseName}PatchRequest` using the synthesized model's properties (all optional, read-only properties excluded).
+- **Collision detection and `@tag`-based disambiguation.** When two operations produce a request type with the same name but different property shapes, the emitter automatically prefixes both with their `@tag` value (e.g. `StandardWidgetPatchRequest`, `AdminWidgetPatchRequest`). If any conflicting operation has no `@tag`, a `request-type-collision` compiler diagnostic error is raised.
+- **HTTP client generation.** The emitter now generates a complete, typed HTTP client per TypeSpec interface when `generate-http-client` is not `false` (default: `true`).
+  - `client/ApiClient.ts` — base `HttpClient` class, `ClientConfig`, `RetryConfig`, `RequestOptions`, `ApiError`, `RateLimitError`, `ServiceUnavailableError`. Uses native `fetch`.
+  - `client/{Interface}Client.ts` — one typed class per TypeSpec interface, with methods for each operation. Path params become positional arguments; body params use the corresponding request type when one was generated.
+  - Automatic retry for `429`/`503` responses with exponential backoff. Honors `Retry-After` header.
+  - `AbortSignal` support for per-request cancellation and timeout.
+  - All client files exported from `index.ts`.
+- **New emitter option `generate-http-client`** (`boolean`, default `true`). Set to `false` to emit models and endpoint utilities only, skipping the `client/` directory.
+- **Documentation.** Added `docs/` directory with guides for getting started, request models, the HTTP client, and integration with Node.js, React, Angular, SvelteKit, Vue, and Nx monorepos.
+
 ## [0.2.0] — 2026-06-05
 
 ### Added
