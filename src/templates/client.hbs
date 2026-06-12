@@ -1,0 +1,12 @@
+import { HttpClient, type RequestOptions } from "./ApiClient.js";
+import { {{endpointsClassName}} } from "../endpoints/{{endpointsClassName}}.js";
+{{#if modelImports.length}}
+import type { {{#each modelImports}}{{this}}{{#unless @last}}, {{/unless}}{{/each}} } from "../models.js";
+{{/if}}
+export class {{className}} extends HttpClient {
+{{#each methods}}
+{{renderDoc doc "  "}}  async {{name}}({{methodParams}}): Promise<{{responseType}}> {
+    {{methodBody}}
+  }
+{{/each}}
+}

@@ -4,6 +4,14 @@ This file is the **single source of truth** for AI assistant guidance in this re
 
 ---
 
+Always ask clarifying questions.
+
+There should be at least 90% code coverage.
+
+Every method, property, and enum should include a valid `JSDOC`
+
+---
+
 ## Project Overview
 
 `@massivescale/tsp-ts-client-models` is a [TypeSpec](https://typespec.io) emitter that generates TypeScript API client models. Given a TypeSpec definition, it produces an npm package with models for each HTTP operation (`GET`, `POST`, `PATCH`, `DELETE`), including version-aware client generation.

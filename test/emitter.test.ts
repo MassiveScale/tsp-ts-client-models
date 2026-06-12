@@ -388,7 +388,7 @@ describe("emitter", () => {
 
   // ─── Request types ────────────────────────────────────────────────────────────
 
-  it("generates a CreateRequest interface excluding read-only properties for POST", async () => {
+  it("generates a PostRequest interface excluding read-only properties for POST", async () => {
     const results = await emit(`
       import "@typespec/http";
       using Http;
@@ -417,8 +417,8 @@ describe("emitter", () => {
     ok(modelsFile, "Expected models.ts with request type");
     const content = results[modelsFile];
     ok(
-      content.includes("export interface ItemCreateRequest"),
-      "Expected ItemCreateRequest interface",
+      content.includes("export interface ItemPostRequest"),
+      "Expected ItemPostRequest interface",
     );
     ok(content.includes("name: string;"), "Expected name property");
     ok(content.includes("count: number;"), "Expected count property");
@@ -429,7 +429,7 @@ describe("emitter", () => {
     );
   });
 
-  it("generates an UpdateRequest interface excluding read-only and create-only properties for PATCH", async () => {
+  it("generates a PatchRequest interface excluding read-only and create-only properties for PATCH", async () => {
     const results = await emit(`
       import "@typespec/http";
       using Http;
@@ -457,14 +457,14 @@ describe("emitter", () => {
     ok(modelsFile, "Expected models.ts");
     const content = results[modelsFile];
     ok(
-      content.includes("export interface ItemUpdateRequest"),
-      "Expected ItemUpdateRequest",
+      content.includes("export interface ItemPatchRequest"),
+      "Expected ItemPatchRequest",
     );
     ok(content.includes("name: string;"), "Expected name");
     ok(!content.includes("id: string"), "id should be excluded");
     ok(
       !content.includes("tenantId"),
-      "create-only tenantId should be excluded from update",
+      "create-only tenantId should be excluded from patch",
     );
   });
 
@@ -489,8 +489,8 @@ describe("emitter", () => {
     );
     if (modelsFile) {
       ok(
-        !results[modelsFile].includes("ItemCreateRequest"),
-        "Should not emit ItemCreateRequest when all properties are writable",
+        !results[modelsFile].includes("ItemPostRequest"),
+        "Should not emit ItemPostRequest when all properties are writable",
       );
     }
   });
@@ -1271,6 +1271,275 @@ describe("emitter", () => {
         resolveRoutePrefix("api/{version}/rest", undefined),
         "api/rest",
       ));
+  });
+
+  // ─── MergePatch request models ───────────────────────────────────────────────
+
+  it("generates a PatchRequest for MergePatch operations", async () => {
+    const results = await emit(`
+      import "@typespec/http";
+      import "@typespec/rest";
+      using Http;
+      using Rest;
+
+      @service(#{ title: "Test API" })
+      namespace TestApi;
+
+      model Widget {
+        id: string;
+        name: string;
+        count?: int32;
+      }
+
+      @route("/widgets")
+      interface Widgets {
+        @patch update(@path id: string, @body body: MergePatchUpdate<Widget>): Widget;
+      }
+    `);
+
+    const modelsFile = Object.keys(results).find((k) =>
+      k.endsWith("models.ts"),
+    );
+    ok(modelsFile, "Expected models.ts");
+    const content = results[modelsFile];
+    ok(
+      content.includes("export interface WidgetPatchRequest"),
+      "Expected WidgetPatchRequest from MergePatch",
+    );
+  });
+
+  // ─── Collision detection ─────────────────────────────────────────────────────
+
+  it("disambiguates colliding request types using @tag prefix", async () => {
+    // Two @patch operations on the same model but with different @parameterVisibility
+    // both produce "WidgetPatchRequest" with different property shapes.
+    // The @tag on each operation resolves the collision with a name prefix.
+    const results = await emit(`
+      import "@typespec/http";
+      using Http;
+
+      @service(#{ title: "Test API" })
+      namespace TestApi;
+
+      model Widget {
+        @visibility(TypeSpec.Lifecycle.Read)
+        id: string;
+        name: string;
+        @visibility(TypeSpec.Lifecycle.Create)
+        tenantId: string;
+      }
+
+      @route("/widgets")
+      interface Widgets {
+        @tag("Standard")
+        @patch update(@path id: string, @body body: Widget): Widget;
+      }
+
+      @route("/admin/widgets")
+      interface AdminWidgets {
+        @tag("Admin")
+        @patch
+        @parameterVisibility(TypeSpec.Lifecycle.Create, TypeSpec.Lifecycle.Update)
+        update(@path id: string, @body body: Widget): Widget;
+      }
+    `);
+
+    const modelsFile = Object.keys(results).find((k) =>
+      k.endsWith("models.ts"),
+    );
+    ok(modelsFile, "Expected models.ts");
+    const content = results[modelsFile];
+    ok(
+      content.includes("StandardWidgetPatchRequest") ||
+        content.includes("AdminWidgetPatchRequest"),
+      "Expected tag-prefixed request types for collision",
+    );
+  });
+
+  it("reports request-type-collision diagnostic when @tag is missing", async () => {
+    const [, diags] = await emitWithDiagnostics(`
+      import "@typespec/http";
+      using Http;
+
+      @service(#{ title: "Test API" })
+      namespace TestApi;
+
+      model Widget {
+        @visibility(TypeSpec.Lifecycle.Read)
+        id: string;
+        name: string;
+        @visibility(TypeSpec.Lifecycle.Create)
+        tenantId: string;
+      }
+
+      @route("/widgets")
+      interface Widgets {
+        @patch update(@path id: string, @body body: Widget): Widget;
+      }
+
+      @route("/admin/widgets")
+      interface AdminWidgets {
+        @patch
+        @parameterVisibility(TypeSpec.Lifecycle.Create, TypeSpec.Lifecycle.Update)
+        update(@path id: string, @body body: Widget): Widget;
+      }
+    `);
+
+    ok(
+      diags.some((d) => d.code.includes("request-type-collision")),
+      "Expected request-type-collision diagnostic",
+    );
+  });
+
+  // ─── HTTP client generation ───────────────────────────────────────────────────
+
+  it("generates client/ApiClient.ts with HttpClient base class", async () => {
+    const results = await emit(`
+      import "@typespec/http";
+      using Http;
+
+      @service(#{ title: "Test API" })
+      namespace TestApi;
+
+      model Widget { id: string; name: string; }
+
+      @route("/widgets")
+      interface Widgets {
+        @get list(): Widget[];
+        @get read(@path id: string): Widget;
+      }
+    `);
+
+    const apiClientFile = Object.keys(results).find((k) =>
+      k.includes("client/ApiClient.ts"),
+    );
+    ok(apiClientFile, "Expected client/ApiClient.ts");
+    const content = results[apiClientFile];
+    ok(content.includes("class HttpClient"), "Expected HttpClient class");
+    ok(content.includes("ClientConfig"), "Expected ClientConfig interface");
+    ok(content.includes("ApiError"), "Expected ApiError class");
+    ok(content.includes("RetryConfig"), "Expected RetryConfig interface");
+  });
+
+  it("generates a typed client class per interface", async () => {
+    const results = await emit(`
+      import "@typespec/http";
+      using Http;
+
+      @service(#{ title: "Test API" })
+      namespace TestApi;
+
+      model Widget { id: string; name: string; }
+
+      @route("/widgets")
+      interface Widgets {
+        @get list(): Widget[];
+        @get read(@path id: string): Widget;
+        @post create(@body body: Widget): Widget;
+        @delete remove(@path id: string): void;
+      }
+    `);
+
+    const clientFile = Object.keys(results).find((k) =>
+      k.includes("client/WidgetsClient.ts"),
+    );
+    ok(clientFile, "Expected client/WidgetsClient.ts");
+    const content = results[clientFile];
+    ok(
+      content.includes("class WidgetsClient extends HttpClient"),
+      "Expected WidgetsClient extending HttpClient",
+    );
+    ok(content.includes("async list("), "Expected list method");
+    ok(content.includes("async read("), "Expected read method");
+    ok(content.includes("async create("), "Expected create method");
+    ok(content.includes("async remove("), "Expected remove method");
+    ok(
+      content.includes("WidgetsEndpoints"),
+      "Expected WidgetsEndpoints import",
+    );
+  });
+
+  it("client method uses request type when one was generated", async () => {
+    const results = await emit(`
+      import "@typespec/http";
+      using Http;
+
+      @service(#{ title: "Test API" })
+      namespace TestApi;
+
+      model Widget {
+        @visibility(TypeSpec.Lifecycle.Read) id: string;
+        name: string;
+      }
+
+      @route("/widgets")
+      interface Widgets {
+        @post create(@body body: Widget): Widget;
+      }
+    `);
+
+    const clientFile = Object.keys(results).find((k) =>
+      k.includes("client/WidgetsClient.ts"),
+    );
+    ok(clientFile, "Expected client/WidgetsClient.ts");
+    ok(
+      results[clientFile].includes("WidgetPostRequest"),
+      "Expected WidgetPostRequest used in client method",
+    );
+  });
+
+  it("client is exported from index.ts", async () => {
+    const results = await emit(`
+      import "@typespec/http";
+      using Http;
+
+      @service(#{ title: "Test API" })
+      namespace TestApi;
+
+      @route("/widgets")
+      interface Widgets {
+        @get list(): string[];
+      }
+    `);
+
+    const indexFile = Object.keys(results).find((k) => k.endsWith("index.ts"));
+    ok(indexFile, "Expected index.ts");
+    const content = results[indexFile];
+    ok(
+      content.includes("./client/ApiClient.js"),
+      "Expected ApiClient.js export",
+    );
+    ok(
+      content.includes("./client/WidgetsClient.js"),
+      "Expected WidgetsClient.js export",
+    );
+  });
+
+  it("does not emit client files when generate-http-client is false", async () => {
+    const results = await emit(
+      `
+      import "@typespec/http";
+      using Http;
+
+      @service(#{ title: "Test API" })
+      namespace TestApi;
+
+      @route("/widgets")
+      interface Widgets {
+        @get list(): string[];
+      }
+    `,
+      { "generate-http-client": false },
+    );
+
+    const clientFiles = Object.keys(results).filter((k) =>
+      k.includes("client/"),
+    );
+    strictEqual(
+      clientFiles.length,
+      0,
+      "No client files should be emitted when generate-http-client is false",
+    );
   });
 
   // ─── deriveNpmVersion unit tests ─────────────────────────────────────────────
