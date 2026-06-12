@@ -503,9 +503,9 @@ async function emitVersion(
       renderer,
       program,
     );
-    const relPath = `endpoints/${name}.ts`;
+    const relPath = `endpoints/${name}Endpoints.ts`;
     await writeFile(program, resolvePath(vDir, relPath), content);
-    endpointExports.push(`./endpoints/${name}.js`);
+    endpointExports.push(`./endpoints/${name}Endpoints.js`);
 
     if (generateClient) {
       const clientContent = buildClientFile(
@@ -1611,7 +1611,10 @@ function isEmittable(model: Model, serviceNsName: string): boolean {
   if (!model.name) return false;
   const ns = model.namespace ? getNamespaceFullName(model.namespace) : "";
   return (
-    ns === serviceNsName || ns.startsWith(`${serviceNsName}.`) || ns === ""
+    ns === serviceNsName ||
+    ns.startsWith(`${serviceNsName}.`) ||
+    ns === "" ||
+    serviceNsName.startsWith(`${ns}.`)
   );
 }
 
@@ -1619,7 +1622,10 @@ function isEmittableEnum(e: Enum, serviceNsName: string): boolean {
   if (!e.name) return false;
   const ns = e.namespace ? getNamespaceFullName(e.namespace) : "";
   return (
-    ns === serviceNsName || ns.startsWith(`${serviceNsName}.`) || ns === ""
+    ns === serviceNsName ||
+    ns.startsWith(`${serviceNsName}.`) ||
+    ns === "" ||
+    serviceNsName.startsWith(`${ns}.`)
   );
 }
 

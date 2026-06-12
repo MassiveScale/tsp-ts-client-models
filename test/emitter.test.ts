@@ -43,9 +43,9 @@ describe("emitter", () => {
     `);
 
     const endpointsFile = Object.keys(results).find(
-      (k) => k.endsWith("Items.ts") && k.includes("endpoints"),
+      (k) => k.endsWith("ItemsEndpoints.ts") && k.includes("endpoints"),
     );
-    ok(endpointsFile, "Expected endpoints/Items.ts to be emitted");
+    ok(endpointsFile, "Expected endpoints/ItemsEndpoints.ts to be emitted");
     const content = results[endpointsFile];
     ok(
       content.includes("export const ItemsEndpoints"),
@@ -77,9 +77,9 @@ describe("emitter", () => {
     `);
 
     const endpointsFile = Object.keys(results).find(
-      (k) => k.endsWith("Widgets.ts") && k.includes("endpoints"),
+      (k) => k.endsWith("WidgetsEndpoints.ts") && k.includes("endpoints"),
     );
-    ok(endpointsFile, "Expected endpoints/Widgets.ts");
+    ok(endpointsFile, "Expected endpoints/WidgetsEndpoints.ts");
     const content = results[endpointsFile];
     ok(
       content.includes("(id: string)"),
@@ -110,9 +110,9 @@ describe("emitter", () => {
     `);
 
     const endpointsFile = Object.keys(results).find(
-      (k) => k.endsWith("Items.ts") && k.includes("endpoints"),
+      (k) => k.endsWith("ItemsEndpoints.ts") && k.includes("endpoints"),
     );
-    ok(endpointsFile, "Expected endpoints/Items.ts");
+    ok(endpointsFile, "Expected endpoints/ItemsEndpoints.ts");
     const content = results[endpointsFile];
     ok(content.includes("create:"), "Expected create method");
     ok(content.includes("update:"), "Expected update method");
@@ -135,7 +135,7 @@ describe("emitter", () => {
     `);
 
     const endpointsFile = Object.keys(results).find(
-      (k) => k.endsWith("Items.ts") && k.includes("endpoints"),
+      (k) => k.endsWith("ItemsEndpoints.ts") && k.includes("endpoints"),
     );
     ok(endpointsFile);
     const content = results[endpointsFile];
@@ -521,7 +521,7 @@ describe("emitter", () => {
       "Expected models export",
     );
     ok(
-      content.includes('export * from "./endpoints/Widgets.js"'),
+      content.includes('export * from "./endpoints/WidgetsEndpoints.js"'),
       "Expected endpoints export",
     );
     ok(content.includes("AUTO-GENERATED"), "Expected auto-generated header");
@@ -752,13 +752,13 @@ describe("emitter", () => {
       (k) => k.includes("v1.0") && k.endsWith("Items.ts"),
     );
     const endpointsFile = Object.keys(results).find(
-      (k) => k.endsWith("Items.ts") && k.includes("endpoints"),
+      (k) => k.endsWith("ItemsEndpoints.ts") && k.includes("endpoints"),
     );
 
     ok(!v1File, "v1.0 folder should not be emitted by default");
     ok(
       endpointsFile,
-      "Expected endpoints/Items.ts at root (no version folder in single-version mode)",
+      "Expected endpoints/ItemsEndpoints.ts at root (no version folder in single-version mode)",
     );
     ok(results[endpointsFile].includes("list:"), "v2 should have list");
     ok(results[endpointsFile].includes("create:"), "v2 should have create");
@@ -791,9 +791,9 @@ describe("emitter", () => {
     );
 
     const endpointsFile = Object.keys(results).find(
-      (k) => k.endsWith("Items.ts") && k.includes("endpoints"),
+      (k) => k.endsWith("ItemsEndpoints.ts") && k.includes("endpoints"),
     );
-    ok(endpointsFile, "Expected endpoints/Items.ts");
+    ok(endpointsFile, "Expected endpoints/ItemsEndpoints.ts");
     ok(results[endpointsFile].includes("list:"), "v1 should have list");
     ok(
       !results[endpointsFile].includes("create:"),
@@ -828,14 +828,14 @@ describe("emitter", () => {
     );
 
     const v1File = Object.keys(results).find(
-      (k) => k.includes("v1.0") && k.endsWith("Items.ts"),
+      (k) => k.includes("v1.0") && k.endsWith("ItemsEndpoints.ts"),
     );
     const v2File = Object.keys(results).find(
-      (k) => k.includes("v2.0") && k.endsWith("Items.ts"),
+      (k) => k.includes("v2.0") && k.endsWith("ItemsEndpoints.ts"),
     );
 
-    ok(v1File, "Expected v1.0/endpoints/Items.ts");
-    ok(v2File, "Expected v2.0/endpoints/Items.ts");
+    ok(v1File, "Expected v1.0/endpoints/ItemsEndpoints.ts");
+    ok(v2File, "Expected v2.0/endpoints/ItemsEndpoints.ts");
     ok(results[v1File].includes("list:"), "v1 should have list");
     ok(!results[v1File].includes("create:"), "v1 should not have create");
     ok(results[v2File].includes("list:"), "v2 should have list");
@@ -1123,9 +1123,9 @@ describe("emitter", () => {
     `);
 
     const endpointsFile = Object.keys(results).find(
-      (k) => k.endsWith("Items.ts") && k.includes("endpoints"),
+      (k) => k.endsWith("ItemsEndpoints.ts") && k.includes("endpoints"),
     );
-    ok(endpointsFile, "Expected endpoints/Items.ts");
+    ok(endpointsFile, "Expected endpoints/ItemsEndpoints.ts");
     ok(
       results[endpointsFile].includes("`/api/v1.0/items`"),
       "Expected default prefix with version value",
@@ -1155,7 +1155,7 @@ describe("emitter", () => {
     );
 
     const endpointsFile = Object.keys(results).find(
-      (k) => k.endsWith("Items.ts") && k.includes("endpoints"),
+      (k) => k.endsWith("ItemsEndpoints.ts") && k.includes("endpoints"),
     );
     ok(endpointsFile);
     ok(
@@ -1182,7 +1182,7 @@ describe("emitter", () => {
     );
 
     const endpointsFile = Object.keys(results).find(
-      (k) => k.endsWith("Items.ts") && k.includes("endpoints"),
+      (k) => k.endsWith("ItemsEndpoints.ts") && k.includes("endpoints"),
     );
     ok(endpointsFile);
     ok(
@@ -1209,7 +1209,7 @@ describe("emitter", () => {
     );
 
     const endpointsFile = Object.keys(results).find(
-      (k) => k.endsWith("Items.ts") && k.includes("endpoints"),
+      (k) => k.endsWith("ItemsEndpoints.ts") && k.includes("endpoints"),
     );
     ok(endpointsFile);
     ok(
@@ -1240,7 +1240,7 @@ describe("emitter", () => {
     );
 
     const endpointsFile = Object.keys(results).find(
-      (k) => k.endsWith("Widgets.ts") && k.includes("endpoints"),
+      (k) => k.endsWith("WidgetsEndpoints.ts") && k.includes("endpoints"),
     );
     ok(endpointsFile);
     ok(
