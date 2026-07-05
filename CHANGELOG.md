@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-07-05
+
+### Added
+
+- **`@discriminator` support.** A model annotated with `@discriminator` is now emitted as a TypeScript discriminated union of its concrete variants (e.g. `export type Pet = Dog | Cat;`) instead of a flat interface. Variant interfaces have their discriminator property narrowed to its literal wire value (e.g. `petKind: "dog"`), and are automatically discovered from the TypeSpec inheritance graph even when no operation references them directly. Every reference to the base model (properties, response types, etc.) now resolves to the precise union. Multi-level hierarchies are flattened to their concrete leaf variants. See [docs/discriminated-models.md](docs/discriminated-models.md).
+- **Custom query parameters on any client method.** Every generated HTTP client method now accepts an optional `query` parameter, regardless of HTTP verb (`GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `HEAD`) and even when the TypeSpec operation declares no `@query` parameters. Declared query params keep their specific types; an index signature (or, when none are declared, `Record<string, unknown>`) allows arbitrary additional keys to be passed through on any call. See [docs/http-client.md](docs/http-client.md#query-parameters).
+- Property types set to a specific enum member (e.g. `petKind: PetKind.Dog`) now map to the correct TypeScript string literal type (e.g. `"dog"`) instead of `unknown`.
+
+### Fixed
+
+- `client/ApiClient.ts`'s `post`/`put`/`patch`/`delete`/`head` helper methods now accept a `query` option — previously only `get` did, and passing `query` through `delete`/`head` would fail to type-check.
+
 ## [0.3.0] — 2026-06-11
 
 ### Breaking changes

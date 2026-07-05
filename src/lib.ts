@@ -83,6 +83,11 @@ const EmitterOptionsSchema: JSONSchemaType<EmitterOptions> = {
           nullable: true,
           description: "TypeScript enum template.",
         },
+        union: {
+          type: "string",
+          nullable: true,
+          description: "TypeScript discriminated union type alias template.",
+        },
         endpoints: {
           type: "string",
           nullable: true,

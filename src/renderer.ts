@@ -16,7 +16,8 @@ export type TemplateName =
   | "enum"
   | "endpoints"
   | "index"
-  | "client";
+  | "client"
+  | "union";
 
 /**
  * Partial map of template names to absolute file paths used to override the
@@ -50,6 +51,21 @@ export interface InterfaceView {
   genericSuffix: string;
   /** Ordered list of property view models. */
   properties: PropertyView[];
+}
+
+/**
+ * View model for a TypeScript discriminated union type alias, generated from a
+ * TypeSpec model marked with `@discriminator`. The base model itself is not
+ * emitted as an interface — this alias takes its name instead, so every
+ * reference to the base model resolves to the precise union of its variants.
+ */
+export interface UnionView {
+  /** Optional JSDoc text. */
+  doc?: string;
+  /** PascalCase name of the base (discriminated) model. */
+  unionName: string;
+  /** Ordered, deduplicated interface names of the concrete discriminated variants. */
+  memberNames: string[];
 }
 
 /** View model for a single TypeScript enum member. */
@@ -148,6 +164,8 @@ export interface Renderer {
   renderInterface(view: InterfaceView): string;
   /** Renders a single `export enum` declaration. */
   renderEnum(view: EnumView): string;
+  /** Renders a discriminated union `export type` alias. */
+  renderUnion(view: UnionView): string;
   /** Renders the endpoint path utility `as const` object. */
   renderEndpoints(view: EndpointsView): string;
   /** Renders the barrel `index.ts` (file header + export * lines). */
@@ -213,6 +231,7 @@ export function createRenderer(overrides: TemplateOverrides = {}): Renderer {
   const fileTemplate = loadTemplate(env, "file", overrides.file);
   const interfaceTemplate = loadTemplate(env, "interface", overrides.interface);
   const enumTemplate = loadTemplate(env, "enum", overrides.enum);
+  const unionTemplate = loadTemplate(env, "union", overrides.union);
   const endpointsTemplate = loadTemplate(env, "endpoints", overrides.endpoints);
   const indexTemplate = loadTemplate(env, "index", overrides.index);
   const clientTemplate = loadTemplate(env, "client", overrides.client);
@@ -228,6 +247,10 @@ export function createRenderer(overrides: TemplateOverrides = {}): Renderer {
 
     renderEnum(view) {
       return enumTemplate(view);
+    },
+
+    renderUnion(view) {
+      return unionTemplate(view);
     },
 
     renderEndpoints(view) {

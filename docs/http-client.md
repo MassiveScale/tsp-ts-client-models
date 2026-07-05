@@ -91,17 +91,49 @@ interface Widgets {
 
 // Generated
 export class WidgetsClient extends HttpClient {
-  async list(options?: RequestOptions): Promise<Widget[]> { … }
-  async read(id: string, options?: RequestOptions): Promise<Widget> { … }
-  async create(body: WidgetPostRequest, options?: RequestOptions): Promise<Widget> { … }
-  async update(id: string, body: WidgetPatchRequest, options?: RequestOptions): Promise<Widget> { … }
-  async remove(id: string, options?: RequestOptions): Promise<void> { … }
+  async list(query?: Record<string, unknown>, options?: RequestOptions): Promise<Widget[]> { … }
+  async read(id: string, query?: Record<string, unknown>, options?: RequestOptions): Promise<Widget> { … }
+  async create(body: WidgetPostRequest, query?: Record<string, unknown>, options?: RequestOptions): Promise<Widget> { … }
+  async update(id: string, body: WidgetPatchRequest, query?: Record<string, unknown>, options?: RequestOptions): Promise<Widget> { … }
+  async remove(id: string, query?: Record<string, unknown>, options?: RequestOptions): Promise<void> { … }
 }
 ```
 
 - Path parameters become leading positional arguments.
 - If a request type was generated for the body model, the body parameter uses that type (e.g. `WidgetPostRequest`). Otherwise the raw model is used.
 - The response type is the TypeScript equivalent of the first 2xx response body. Operations with no body response use `void`.
+- Every method accepts an optional `query` parameter, regardless of HTTP verb — see [Query parameters](#query-parameters).
+
+## Query parameters
+
+Every generated client method accepts an optional `query` object, whether or not the TypeSpec operation declares any `@query` parameters, and regardless of HTTP verb (`GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `HEAD` all support it).
+
+If the operation declares `@query` parameters, they keep their specific types and the object also accepts arbitrary additional keys:
+
+```typespec
+@get list(@query status?: string): Widget[];
+```
+
+```typescript
+// Generated
+async list(
+  query?: { status?: string; [key: string]: unknown },
+  options?: RequestOptions,
+): Promise<Widget[]>;
+
+// Usage — declared param plus an ad-hoc custom one
+await client.list({ status: "active", debug: "true" });
+```
+
+If the operation declares no `@query` parameters at all, `query` is still available, typed as an open bag:
+
+```typescript
+async create(body: WidgetPostRequest, query?: Record<string, unknown>, options?: RequestOptions): Promise<Widget>;
+
+await client.create(newWidget, { dryRun: "true" });
+```
+
+Values passed in `query` are appended to the URL as a query string (via `URLSearchParams`); `undefined`/`null` values are omitted.
 
 ## Instantiation
 

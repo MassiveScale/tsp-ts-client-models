@@ -12,9 +12,13 @@ import {
   StringLiteral,
   NumericLiteral,
   BooleanLiteral,
+  EnumMember,
+  Discriminator,
   getDoc,
   getFormat,
   getTags,
+  getDiscriminator,
+  getDiscriminatedUnionFromInheritance,
   isArrayModelType,
   isRecordModelType,
   isNullType,
@@ -53,6 +57,7 @@ import {
   FileView,
   IndexView,
   ClientView,
+  UnionView,
   TemplateOverrides,
 } from "./renderer.js";
 import { EmitterOptions, createDiagnostic, reportDiagnostic } from "./lib.js";
@@ -468,10 +473,12 @@ async function emitVersion(
     }
   }
 
-  // Recursively collect enum/model types referenced inside model properties.
-  // mapTsType for named models only adds the model itself without traversing its
-  // properties, so types like enums first discovered via a property would be missed.
-  deepCollectTypes(models, enums, program);
+  // Recursively collect enum/model types referenced inside model properties, and
+  // resolve @discriminator base models to their concrete leaf variants so those
+  // derived models (which are never referenced directly by an operation) are
+  // still discovered and emitted.
+  const discriminatedUnions = new Map<string, string[]>();
+  deepCollectTypes(models, enums, program, discriminatedUnions);
 
   // Build a rename map so synthesized MergePatch type names are rewritten to
   // their canonical output names during rendering (e.g. PetMergePatchUpdateReplaceOnly
@@ -552,6 +559,7 @@ async function emitVersion(
       requestTypes,
       requestTypeBaseModels,
       readResponseModelNames,
+      discriminatedUnions,
       program,
       renderer,
       mergePatchRenameMap,
@@ -748,8 +756,33 @@ function collectReadResponseModelNames(
       }
     }
   }
-  deepCollectTypes(tmpModels, tmpEnums, program);
+  deepCollectTypes(tmpModels, tmpEnums, program, new Map());
   return new Set(tmpModels.keys());
+}
+
+// ─── Discriminated union collection ──────────────────────────────────────────
+
+/**
+ * Resolves the concrete (leaf) derived models for a `@discriminator`-annotated
+ * base model, registering any not already present in `models` so they get
+ * their own emitted interface. Returns the ordered, deduplicated variant names
+ * used to build the base model's union type alias.
+ */
+function collectDiscriminatedVariants(
+  model: Model,
+  discriminator: Discriminator,
+  models: Map<string, Model>,
+): string[] {
+  const [union] = getDiscriminatedUnionFromInheritance(model, discriminator);
+  const variantNames: string[] = [];
+  const seen = new Set<Model>();
+  for (const variant of union.variants.values()) {
+    if (seen.has(variant) || !variant.name) continue;
+    seen.add(variant);
+    if (!models.has(variant.name)) models.set(variant.name, variant);
+    variantNames.push(variant.name);
+  }
+  return variantNames;
 }
 
 // ─── Deep type collection ─────────────────────────────────────────────────────
@@ -758,11 +791,22 @@ function deepCollectTypes(
   models: Map<string, Model>,
   enums: Map<string, Enum>,
   program: Program,
+  discriminatedUnions: Map<string, string[]>,
 ): void {
   let changed = true;
   while (changed) {
     changed = false;
     for (const model of [...models.values()]) {
+      if (model.name && !discriminatedUnions.has(model.name)) {
+        const discriminator = getDiscriminator(program, model);
+        if (discriminator) {
+          discriminatedUnions.set(
+            model.name,
+            collectDiscriminatedVariants(model, discriminator, models),
+          );
+          changed = true;
+        }
+      }
       for (const [, prop] of flattenProperties(model)) {
         const prevModels = models.size;
         const prevEnums = enums.size;
@@ -783,6 +827,7 @@ function buildModelsFile(
   requestTypes: Map<string, RequestType>,
   requestTypeBaseModels: Set<string>,
   readResponseModelNames: Set<string>,
+  discriminatedUnions: Map<string, string[]>,
   program: Program,
   renderer: Renderer,
   renameMap: Map<string, string>,
@@ -806,6 +851,19 @@ function buildModelsFile(
       !readResponseModelNames.has(model.name!)
     )
       continue;
+    // A @discriminator base model is emitted as a union type alias of its
+    // concrete variants instead of a plain interface, so every reference to it
+    // resolves to the precise discriminated union (e.g. `Dog | Cat`).
+    const variantNames = discriminatedUnions.get(model.name!);
+    if (variantNames) {
+      const unionView: UnionView = {
+        doc: getDoc(program, model) ?? undefined,
+        unionName: model.name!,
+        memberNames: variantNames,
+      };
+      parts.push(renderer.renderUnion(unionView));
+      continue;
+    }
     parts.push(
       renderer.renderInterface(
         buildInterfaceView(model, program, models, enums, renameMap),
@@ -1135,7 +1193,7 @@ export class HttpClient {
   protected post<T>(
     path: string,
     body?: unknown,
-    options?: RequestOptions,
+    options?: RequestOptions & { query?: Record<string, unknown> },
   ): Promise<T> {
     return this.request<T>("POST", path, { ...options, body });
   }
@@ -1143,7 +1201,7 @@ export class HttpClient {
   protected put<T>(
     path: string,
     body?: unknown,
-    options?: RequestOptions,
+    options?: RequestOptions & { query?: Record<string, unknown> },
   ): Promise<T> {
     return this.request<T>("PUT", path, { ...options, body });
   }
@@ -1151,16 +1209,22 @@ export class HttpClient {
   protected patch<T>(
     path: string,
     body?: unknown,
-    options?: RequestOptions,
+    options?: RequestOptions & { query?: Record<string, unknown> },
   ): Promise<T> {
     return this.request<T>("PATCH", path, { ...options, body });
   }
 
-  protected delete<T>(path: string, options?: RequestOptions): Promise<T> {
+  protected delete<T>(
+    path: string,
+    options?: RequestOptions & { query?: Record<string, unknown> },
+  ): Promise<T> {
     return this.request<T>("DELETE", path, options);
   }
 
-  protected head(path: string, options?: RequestOptions): Promise<void> {
+  protected head(
+    path: string,
+    options?: RequestOptions & { query?: Record<string, unknown> },
+  ): Promise<void> {
     return this.request<void>("HEAD", path, options);
   }
 }
@@ -1264,12 +1328,17 @@ function buildClientMethodView(
   if (bodyType) {
     paramParts.push(`body: ${bodyType}`);
   }
-  if (queryParams.length > 0) {
-    const queryFields = queryParams
-      .map((q) => `${q.name}${q.optional ? "?" : ""}: ${q.tsType}`)
-      .join("; ");
-    paramParts.push(`query?: { ${queryFields} }`);
-  }
+  // A `query` parameter is always available — regardless of HTTP verb or
+  // whether the TypeSpec operation declares any query params — so callers can
+  // pass ad-hoc custom query parameters on any call. Declared query params keep
+  // their specific types; the index signature allows any additional keys.
+  const queryFields = queryParams
+    .map((q) => `${q.name}${q.optional ? "?" : ""}: ${q.tsType}`)
+    .join("; ");
+  const queryType = queryFields
+    ? `{ ${queryFields}; [key: string]: unknown }`
+    : `Record<string, unknown>`;
+  paramParts.push(`query?: ${queryType}`);
   paramParts.push(`options?: RequestOptions`);
   const methodParams = paramParts.join(", ");
 
@@ -1281,13 +1350,9 @@ function buildClientMethodView(
   const httpMethod = op.verb.toLowerCase();
   let methodBody: string;
   if (op.verb === "get" || op.verb === "head" || op.verb === "delete") {
-    if (queryParams.length > 0) {
-      methodBody = `return this.${httpMethod}<${responseType}>(${endpointCall}, { ...options, query });`;
-    } else {
-      methodBody = `return this.${httpMethod}<${responseType}>(${endpointCall}, options);`;
-    }
+    methodBody = `return this.${httpMethod}<${responseType}>(${endpointCall}, { ...options, query });`;
   } else {
-    methodBody = `return this.${httpMethod}<${responseType}>(${endpointCall}, ${bodyType ? "body" : "undefined"}, options);`;
+    methodBody = `return this.${httpMethod}<${responseType}>(${endpointCall}, ${bodyType ? "body" : "undefined"}, { ...options, query });`;
   }
 
   return {
@@ -1490,6 +1555,15 @@ function mapTsType(
       const e = type as Enum;
       if (e.name) enums.set(e.name, e);
       return e.name || "string";
+    }
+
+    case "EnumMember": {
+      // A property typed to a specific member (e.g. `petKind: PetKind.Dog`) is
+      // narrowed to that member's wire literal value — critical for discriminated
+      // union variants to type-narrow correctly (e.g. `petKind: "dog"`).
+      const em = type as EnumMember;
+      const value = em.value ?? em.name;
+      return typeof value === "string" ? JSON.stringify(value) : String(value);
     }
 
     case "Union": {
