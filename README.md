@@ -7,9 +7,10 @@
 This emitter produces:
 
 - **TypeScript models** — `export interface` and `export enum` for every model and enum in your TypeSpec definition.
+- **Discriminated unions** — a model marked with `@discriminator` is emitted as a TypeScript union of its concrete variants (e.g. `type Pet = Dog | Cat`), with the discriminator property narrowed to its literal value on each variant. See [docs/discriminated-models.md](docs/discriminated-models.md).
 - **Request types** — visibility-filtered interfaces (e.g. `WidgetPostRequest`, `WidgetPatchRequest`) that strip server-managed fields like `id` from write operations. MergePatch operations are also supported.
 - **Endpoint utilities** — `*Endpoints` `as const` objects with typed path-building functions per interface.
-- **Typed HTTP client** _(optional, on by default)_ — one `*Client` class per TypeSpec interface using native `fetch`, with retry, `AbortSignal`, and timeout support.
+- **Typed HTTP client** _(optional, on by default)_ — one `*Client` class per TypeSpec interface using native `fetch`, with retry, `AbortSignal`, timeout support, and an always-available `query` parameter for custom query parameters on any call.
 
 The output is a complete, buildable npm package (`package.json`, `tsconfig.json`, `index.ts`) ready to publish or consume locally.
 
@@ -54,7 +55,7 @@ tsp compile .
 
 ## Customizing templates
 
-Any of the five built-in [Handlebars](https://handlebarsjs.com/) templates can be replaced with your own `.hbs` file. Specify overrides in `tspconfig.yaml`:
+Any of the six built-in [Handlebars](https://handlebarsjs.com/) templates can be replaced with your own `.hbs` file. Specify overrides in `tspconfig.yaml`:
 
 ```yaml
 options:
@@ -92,6 +93,14 @@ Each template receives the corresponding view model as its Handlebars context.
 | `properties[].name`     | `string`              | Property name.                                 |
 | `properties[].type`     | `string`              | TypeScript type string.                        |
 | `properties[].optional` | `boolean`             | When `true`, emit `name?`.                     |
+
+**`union`** — `UnionView`
+
+| Field           | Type                  | Description                                                     |
+| --------------- | --------------------- | --------------------------------------------------------------- |
+| `doc`           | `string \| undefined` | JSDoc text from `@doc` on the `@discriminator`-annotated model. |
+| `unionName`     | `string`              | PascalCase name of the base (discriminated) model.              |
+| `memberNames[]` | `string[]`            | Ordered, deduplicated interface names of the concrete variants. |
 
 **`endpoints`** — `EndpointsView`
 
@@ -160,9 +169,13 @@ const client = new WidgetsClient({
 const widgets = await client.list();
 const widget = await client.read("abc123");
 await client.create({ name: "New Widget" }); // body typed as WidgetPostRequest
+
+// Every method also accepts an optional `query` object — declared @query params
+// keep their types, and arbitrary extra keys are always allowed, on any verb.
+await client.list({ status: "active", debug: "true" });
 ```
 
-See [docs/http-client.md](docs/http-client.md) for the full `ClientConfig`, error types, and extension patterns.
+See [docs/http-client.md](docs/http-client.md) for the full `ClientConfig`, error types, query parameters, and extension patterns.
 
 ### Endpoint utilities only
 
@@ -195,6 +208,33 @@ Request types use the HTTP verb as the suffix (since 0.3.0):
 > **Migrating from 0.2.x:** Rename `*CreateRequest` → `*PostRequest`, `*UpdateRequest` → `*PatchRequest`, `*ReplaceRequest` → `*PutRequest`.
 
 See [docs/request-models.md](docs/request-models.md) for visibility filtering, MergePatch support, and collision detection.
+
+### Discriminated models
+
+A model annotated with `@discriminator` is emitted as a union type alias of its concrete variants rather than a flat interface:
+
+```typespec
+@discriminator("petKind")
+model Pet { petKind: PetKind; name: string; }
+model Dog extends Pet { petKind: PetKind.Dog; isBarker: boolean; }
+model Cat extends Pet { petKind: PetKind.Cat; isPurrer: boolean; }
+```
+
+```typescript
+export interface Dog {
+  petKind: "dog";
+  name: string;
+  isBarker: boolean;
+}
+export interface Cat {
+  petKind: "cat";
+  name: string;
+  isPurrer: boolean;
+}
+export type Pet = Dog | Cat;
+```
+
+Every reference to `Pet` (e.g. `pets: Pet[]`) resolves to the union, enabling standard TypeScript discriminated-union narrowing on `petKind`. See [docs/discriminated-models.md](docs/discriminated-models.md) for details, including multi-level hierarchies.
 
 ## Development
 

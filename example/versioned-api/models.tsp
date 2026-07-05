@@ -4,14 +4,21 @@ import "./versioning.tsp";
 using Versioning;
 namespace MassiveScale.Sandbox.Api;
 
-/**
- * This is a pet.
- * It is also an example of a multiple-line doc comment.
- */
+@doc("Represents the category of a pet, e.g. dog, cat, fish, etc.")
+enum PetKind {
+    Dog: "dog",
+    Cat: "cat",
+    Fish: "fish",
+    Bird: "bird",
+    Reptile: "reptile",
+}
+
+@doc("Represents a pet in the pet store.")
+@discriminator("petKind")
 model Pet is EntityBase {
-    @doc("The category of the pet, e.g. dog, cat, etc.")
+    @doc("The discriminator property for the pet type.")
     @visibility(Lifecycle.Read)
-    category?: PetCategory;
+    petKind: PetKind;
 
     @doc("The name of the pet.")
     name: string = "Unnamed Pet";
@@ -30,6 +37,26 @@ model Pet is EntityBase {
     status: "available" | "pending" | "sold" = "available";
 }
 
+@doc("Represents a dog in the pet store.")
+model Dog extends Pet {
+    @doc("The discriminator property for the pet type.")
+    @visibility(Lifecycle.Read)
+    petKind: PetKind.Dog;
+
+    @doc("Indicates whether the dog barks.")
+    isBarker: boolean;
+}
+
+@doc("Represents a cat in the pet store.")
+model Cat extends Pet {
+    @doc("The discriminator property for the pet type.")
+    @visibility(Lifecycle.Read)
+    petKind: PetKind.Cat;
+
+    @doc("Indicates whether the cat purrs.")
+    isPurrer: boolean;
+}
+
 @doc("Represents a store in the pet store API.")
 model Store extends EntityBase {
     @doc("The name of the store.")
@@ -41,7 +68,7 @@ model Store extends EntityBase {
     phoneNumber: string;
 
     @doc("The email address of the store.")
-    @added(Versions.v2_0) 
+    @added(Versions.v2_0)
     @format("email")
     @maxLength(255)
     email: string;
@@ -109,22 +136,4 @@ model Tag {
     @doc("The name of the tag.")
     @visibility(Lifecycle.Read, Lifecycle.Create, Lifecycle.Update)
     name: string;
-}
-
-@doc("Represents a paginated list of pets.")
-enum PetCategory {
-    @doc("A domesticated carnivorous mammal that typically has a long snout, an acute sense of smell, and a barking, howling, or whining voice.")
-    Dog: "dog",
-
-    @doc("A small domesticated carnivorous mammal with soft fur, a short snout, and retractable claws.")
-    Cat: "cat",
-
-    @doc("A small domesticated rodent that typically has a pointed snout, relatively large ears and eyes, and a long tail.")
-    Fish: "fish",
-
-    @doc("A warm-blooded egg-laying vertebrate animal distinguished by the possession of feathers, wings, and a beak and (typically) by being able to fly.")
-    Bird: "bird",
-
-    @doc("A reptile is a cold-blooded, air-breathing vertebrate that has scales or scutes and typically lays soft-shelled eggs on land.")
-    Reptile: "reptile",
 }

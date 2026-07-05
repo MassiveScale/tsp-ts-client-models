@@ -495,6 +495,123 @@ describe("emitter", () => {
     }
   });
 
+  // ─── @discriminator ─────────────────────────────────────────────────────────
+
+  it("emits a discriminated base model as a union type alias of its variants", async () => {
+    const results = await emit(`
+      import "@typespec/http";
+      using Http;
+
+      @service(#{ title: "Test API" })
+      namespace TestApi;
+
+      enum PetKind { Dog: "dog", Cat: "cat" }
+
+      @doc("A pet.")
+      @discriminator("petKind")
+      model Pet {
+        petKind: PetKind;
+        name: string;
+      }
+
+      model Dog extends Pet {
+        petKind: PetKind.Dog;
+        isBarker: boolean;
+      }
+
+      model Cat extends Pet {
+        petKind: PetKind.Cat;
+        isPurrer: boolean;
+      }
+
+      @route("/pets")
+      interface Pets {
+        @get list(): Pet[];
+      }
+    `);
+
+    const modelsFile = Object.keys(results).find((k) =>
+      k.endsWith("models.ts"),
+    );
+    ok(modelsFile, "Expected models.ts to be emitted");
+    const content = results[modelsFile];
+
+    ok(
+      content.includes("export type Pet = Dog | Cat;"),
+      "Expected Pet to be emitted as a union type alias",
+    );
+    ok(
+      !content.includes("export interface Pet "),
+      "Pet interface should not be emitted",
+    );
+    ok(content.includes("export interface Dog"), "Expected Dog interface");
+    ok(content.includes("export interface Cat"), "Expected Cat interface");
+    ok(
+      content.includes('petKind: "dog";'),
+      "Expected Dog.petKind narrowed to its literal value",
+    );
+    ok(
+      content.includes('petKind: "cat";'),
+      "Expected Cat.petKind narrowed to its literal value",
+    );
+    ok(content.includes("isBarker: boolean;"), "Expected Dog's own property");
+    ok(content.includes("isPurrer: boolean;"), "Expected Cat's own property");
+    ok(
+      content.includes("name: string;"),
+      "Expected inherited base property flattened into Dog/Cat",
+    );
+  });
+
+  it("propagates the discriminated union type to properties referencing the base model", async () => {
+    const results = await emit(`
+      import "@typespec/http";
+      using Http;
+
+      @service(#{ title: "Test API" })
+      namespace TestApi;
+
+      enum PetKind { Dog: "dog", Cat: "cat" }
+
+      @discriminator("petKind")
+      model Pet {
+        petKind: PetKind;
+      }
+
+      model Dog extends Pet {
+        petKind: PetKind.Dog;
+        isBarker: boolean;
+      }
+
+      model Cat extends Pet {
+        petKind: PetKind.Cat;
+        isPurrer: boolean;
+      }
+
+      model Store {
+        pets: Pet[];
+      }
+
+      @route("/stores")
+      interface Stores {
+        @get list(): Store[];
+      }
+    `);
+
+    const modelsFile = Object.keys(results).find((k) =>
+      k.endsWith("models.ts"),
+    );
+    ok(modelsFile, "Expected models.ts to be emitted");
+    const content = results[modelsFile];
+    ok(
+      content.includes("pets: Pet[];"),
+      "Expected Store.pets to reference the Pet union alias by name",
+    );
+    ok(
+      content.includes("export type Pet = Dog | Cat;"),
+      "Expected Pet union alias",
+    );
+  });
+
   // ─── index.ts and package.json ────────────────────────────────────────────────
 
   it("emits an index.ts that re-exports models and endpoints", async () => {
@@ -1539,6 +1656,66 @@ describe("emitter", () => {
       clientFiles.length,
       0,
       "No client files should be emitted when generate-http-client is false",
+    );
+  });
+
+  // ─── Custom query parameters ─────────────────────────────────────────────────
+
+  it("allows additional custom query parameters alongside declared ones", async () => {
+    const results = await emit(`
+      import "@typespec/http";
+      using Http;
+
+      @service(#{ title: "Test API" })
+      namespace TestApi;
+
+      @route("/widgets")
+      interface Widgets {
+        @get list(@query status?: string): string[];
+      }
+    `);
+
+    const clientFile = Object.keys(results).find((k) =>
+      k.includes("client/WidgetsClient.ts"),
+    );
+    ok(clientFile, "Expected client/WidgetsClient.ts");
+    const content = results[clientFile];
+    ok(
+      content.includes("query?: { status?: string; [key: string]: unknown }"),
+      "Expected declared query param plus an index signature for custom keys",
+    );
+    ok(
+      content.includes("{ ...options, query }"),
+      "Expected query to be merged into the request options",
+    );
+  });
+
+  it("always exposes a query parameter even when the operation declares none", async () => {
+    const results = await emit(`
+      import "@typespec/http";
+      using Http;
+
+      @service(#{ title: "Test API" })
+      namespace TestApi;
+
+      model Widget { id: string; name: string; }
+
+      @route("/widgets")
+      interface Widgets {
+        @get list(): Widget[];
+        @post create(@body body: Widget): Widget;
+      }
+    `);
+
+    const clientFile = Object.keys(results).find((k) =>
+      k.includes("client/WidgetsClient.ts"),
+    );
+    ok(clientFile, "Expected client/WidgetsClient.ts");
+    const content = results[clientFile];
+    const matches = content.match(/query\?: Record<string, unknown>/g);
+    ok(
+      matches && matches.length === 2,
+      "Expected both list (GET) and create (POST) to accept an untyped query bag",
     );
   });
 
