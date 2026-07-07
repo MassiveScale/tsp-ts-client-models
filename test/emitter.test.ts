@@ -612,6 +612,97 @@ describe("emitter", () => {
     );
   });
 
+  it("emits a per-variant union for a discriminated write body with read-only properties", async () => {
+    const results = await emit(`
+      import "@typespec/http";
+      using Http;
+
+      @service(#{ title: "Test API" })
+      namespace TestApi;
+
+      enum PetKind { Dog: "dog", Cat: "cat" }
+
+      @discriminator("petKind")
+      model Pet {
+        @visibility(Lifecycle.Read)
+        id: string;
+
+        petKind: PetKind;
+        name: string;
+      }
+
+      model Dog extends Pet {
+        petKind: PetKind.Dog;
+        isBarker: boolean;
+      }
+
+      model Cat extends Pet {
+        petKind: PetKind.Cat;
+        isPurrer: boolean;
+      }
+
+      @route("/pets")
+      interface Pets {
+        @post create(@body pet: Pet): Pet;
+        @get list(): Pet[];
+      }
+    `);
+
+    const modelsFile = Object.keys(results).find((k) =>
+      k.endsWith("models.ts"),
+    );
+    ok(modelsFile, "Expected models.ts to be emitted");
+    const content = results[modelsFile];
+
+    ok(
+      content.includes(
+        "export type PetPostRequest = DogPostRequest | CatPostRequest;",
+      ),
+      "Expected PetPostRequest to be a union of per-variant request types",
+    );
+    ok(
+      !content.includes("export interface PetPostRequest"),
+      "PetPostRequest should not be a flat interface",
+    );
+
+    const dogRequestMatch =
+      /export interface DogPostRequest \{([\s\S]*?)\}/.exec(content);
+    ok(dogRequestMatch, "Expected DogPostRequest interface");
+    ok(
+      dogRequestMatch[1].includes('petKind: "dog";'),
+      "Expected DogPostRequest.petKind narrowed to its literal value",
+    );
+    ok(
+      dogRequestMatch[1].includes("isBarker: boolean;"),
+      "Expected DogPostRequest to retain Dog's own property",
+    );
+    ok(
+      !dogRequestMatch[1].includes("id:"),
+      "Expected DogPostRequest to exclude the read-only id property",
+    );
+
+    const catRequestMatch =
+      /export interface CatPostRequest \{([\s\S]*?)\}/.exec(content);
+    ok(catRequestMatch, "Expected CatPostRequest interface");
+    ok(
+      catRequestMatch[1].includes('petKind: "cat";'),
+      "Expected CatPostRequest.petKind narrowed to its literal value",
+    );
+    ok(
+      catRequestMatch[1].includes("isPurrer: boolean;"),
+      "Expected CatPostRequest to retain Cat's own property",
+    );
+
+    const clientFile = Object.keys(results).find((k) =>
+      k.endsWith("PetsClient.ts"),
+    );
+    ok(clientFile, "Expected PetsClient.ts to be emitted");
+    ok(
+      results[clientFile].includes("body: PetPostRequest"),
+      "Expected create() to accept the PetPostRequest union as its body",
+    );
+  });
+
   // ─── index.ts and package.json ────────────────────────────────────────────────
 
   it("emits an index.ts that re-exports models and endpoints", async () => {

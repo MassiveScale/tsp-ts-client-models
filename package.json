@@ -1,6 +1,6 @@
 {
   "name": "@massivescale/tsp-ts-client-models",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "type": "module",
   "main": "dist/src/index.js",
   "exports": {
