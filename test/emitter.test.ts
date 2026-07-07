@@ -703,6 +703,66 @@ describe("emitter", () => {
     );
   });
 
+  it("keeps variant interfaces even when a discriminated write body has no independent read operation", async () => {
+    // Regression test: the per-variant request types (DogPostRequest,
+    // CatPostRequest) were previously registered under the *variant's* name
+    // (e.g. "Dog") in requestTypeBaseModels, which could suppress the plain
+    // Dog/Cat interfaces the union alias (Pet = Dog | Cat) still references —
+    // producing models.ts with a dangling reference. There is deliberately no
+    // GET/list operation here, so Dog/Cat are never independently "read".
+    const results = await emit(`
+      import "@typespec/http";
+      using Http;
+
+      @service(#{ title: "Test API" })
+      namespace TestApi;
+
+      enum PetKind { Dog: "dog", Cat: "cat" }
+
+      @discriminator("petKind")
+      model Pet {
+        @visibility(Lifecycle.Read)
+        id: string;
+
+        petKind: PetKind;
+        name: string;
+      }
+
+      model Dog extends Pet {
+        petKind: PetKind.Dog;
+        isBarker: boolean;
+      }
+
+      model Cat extends Pet {
+        petKind: PetKind.Cat;
+        isPurrer: boolean;
+      }
+
+      @route("/pets")
+      interface Pets {
+        @post create(@body pet: Pet): Pet;
+      }
+    `);
+
+    const modelsFile = Object.keys(results).find((k) =>
+      k.endsWith("models.ts"),
+    );
+    ok(modelsFile, "Expected models.ts to be emitted");
+    const content = results[modelsFile];
+
+    ok(
+      content.includes("export interface Dog"),
+      "Expected Dog interface to still be emitted for the Pet union's sake",
+    );
+    ok(
+      content.includes("export interface Cat"),
+      "Expected Cat interface to still be emitted for the Pet union's sake",
+    );
+    ok(content.includes("id: string;"), "Expected Dog/Cat to include id");
+    ok(content.includes("isBarker: boolean;"), "Expected Dog's own property");
+    ok(content.includes("isPurrer: boolean;"), "Expected Cat's own property");
+  });
+
   // ─── index.ts and package.json ────────────────────────────────────────────────
 
   it("emits an index.ts that re-exports models and endpoints", async () => {

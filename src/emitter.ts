@@ -799,9 +799,13 @@ function collectDiscriminatedRequestVariants(
       program,
     );
 
+    // Register under the discriminated base's name, not the variant's — the
+    // variant's own plain interface (e.g. "Dog") isn't replaced by a request
+    // type, it's still needed as-is for the base union's members. It's the
+    // base itself (e.g. "Pet") that's represented by a request type here.
     storeRequestType(
       requestTypeName,
-      variant.name,
+      bodyModel.name,
       {
         name: requestTypeName,
         doc: getDoc(program, variant),
