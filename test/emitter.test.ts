@@ -612,6 +612,333 @@ describe("emitter", () => {
     );
   });
 
+  it("emits a per-variant union for a discriminated write body with read-only properties", async () => {
+    const results = await emit(`
+      import "@typespec/http";
+      using Http;
+
+      @service(#{ title: "Test API" })
+      namespace TestApi;
+
+      enum PetKind { Dog: "dog", Cat: "cat" }
+
+      @discriminator("petKind")
+      model Pet {
+        @visibility(Lifecycle.Read)
+        id: string;
+
+        petKind: PetKind;
+        name: string;
+      }
+
+      model Dog extends Pet {
+        petKind: PetKind.Dog;
+        isBarker: boolean;
+      }
+
+      model Cat extends Pet {
+        petKind: PetKind.Cat;
+        isPurrer: boolean;
+      }
+
+      @route("/pets")
+      interface Pets {
+        @post create(@body pet: Pet): Pet;
+        @get list(): Pet[];
+      }
+    `);
+
+    const modelsFile = Object.keys(results).find((k) =>
+      k.endsWith("models.ts"),
+    );
+    ok(modelsFile, "Expected models.ts to be emitted");
+    const content = results[modelsFile];
+
+    ok(
+      content.includes(
+        "export type PetPostRequest = DogPostRequest | CatPostRequest;",
+      ),
+      "Expected PetPostRequest to be a union of per-variant request types",
+    );
+    ok(
+      !content.includes("export interface PetPostRequest"),
+      "PetPostRequest should not be a flat interface",
+    );
+
+    const dogRequestMatch =
+      /export interface DogPostRequest \{([\s\S]*?)\}/.exec(content);
+    ok(dogRequestMatch, "Expected DogPostRequest interface");
+    ok(
+      dogRequestMatch[1].includes('petKind: "dog";'),
+      "Expected DogPostRequest.petKind narrowed to its literal value",
+    );
+    ok(
+      dogRequestMatch[1].includes("isBarker: boolean;"),
+      "Expected DogPostRequest to retain Dog's own property",
+    );
+    ok(
+      !dogRequestMatch[1].includes("id:"),
+      "Expected DogPostRequest to exclude the read-only id property",
+    );
+
+    const catRequestMatch =
+      /export interface CatPostRequest \{([\s\S]*?)\}/.exec(content);
+    ok(catRequestMatch, "Expected CatPostRequest interface");
+    ok(
+      catRequestMatch[1].includes('petKind: "cat";'),
+      "Expected CatPostRequest.petKind narrowed to its literal value",
+    );
+    ok(
+      catRequestMatch[1].includes("isPurrer: boolean;"),
+      "Expected CatPostRequest to retain Cat's own property",
+    );
+
+    const clientFile = Object.keys(results).find((k) =>
+      k.endsWith("PetsClient.ts"),
+    );
+    ok(clientFile, "Expected PetsClient.ts to be emitted");
+    ok(
+      results[clientFile].includes("body: PetPostRequest"),
+      "Expected create() to accept the PetPostRequest union as its body",
+    );
+  });
+
+  it("keeps variant interfaces even when a discriminated write body has no independent read operation", async () => {
+    // Regression test: the per-variant request types (DogPostRequest,
+    // CatPostRequest) were previously registered under the *variant's* name
+    // (e.g. "Dog") in requestTypeBaseModels, which could suppress the plain
+    // Dog/Cat interfaces the union alias (Pet = Dog | Cat) still references —
+    // producing models.ts with a dangling reference. There is deliberately no
+    // GET/list operation here, so Dog/Cat are never independently "read".
+    const results = await emit(`
+      import "@typespec/http";
+      using Http;
+
+      @service(#{ title: "Test API" })
+      namespace TestApi;
+
+      enum PetKind { Dog: "dog", Cat: "cat" }
+
+      @discriminator("petKind")
+      model Pet {
+        @visibility(Lifecycle.Read)
+        id: string;
+
+        petKind: PetKind;
+        name: string;
+      }
+
+      model Dog extends Pet {
+        petKind: PetKind.Dog;
+        isBarker: boolean;
+      }
+
+      model Cat extends Pet {
+        petKind: PetKind.Cat;
+        isPurrer: boolean;
+      }
+
+      @route("/pets")
+      interface Pets {
+        @post create(@body pet: Pet): Pet;
+      }
+    `);
+
+    const modelsFile = Object.keys(results).find((k) =>
+      k.endsWith("models.ts"),
+    );
+    ok(modelsFile, "Expected models.ts to be emitted");
+    const content = results[modelsFile];
+
+    ok(
+      content.includes("export type Pet = Dog | Cat;"),
+      "Expected Pet union alias to still be emitted even though Pet itself is never read via GET/HEAD",
+    );
+    ok(
+      content.includes("export interface Dog"),
+      "Expected Dog interface to still be emitted for the Pet union's sake",
+    );
+    ok(
+      content.includes("export interface Cat"),
+      "Expected Cat interface to still be emitted for the Pet union's sake",
+    );
+    ok(content.includes("id: string;"), "Expected Dog/Cat to include id");
+    ok(content.includes("isBarker: boolean;"), "Expected Dog's own property");
+    ok(content.includes("isPurrer: boolean;"), "Expected Cat's own property");
+  });
+
+  it("resolves a discriminated write-body collision across operations with @tag prefixes", async () => {
+    // Regression test: two operations produce the same {Base}{Verb}Request
+    // union name ("PetPatchRequest") but with differently-shaped variants
+    // (different @parameterVisibility). Both the union and its members must
+    // be renamed together and consistently, and no stale unprefixed variant
+    // interface (e.g. a leftover "DogPatchRequest") should remain.
+    const results = await emit(`
+      import "@typespec/http";
+      using Http;
+
+      @service(#{ title: "Test API" })
+      namespace TestApi;
+
+      enum PetKind { Dog: "dog", Cat: "cat" }
+
+      @discriminator("petKind")
+      model Pet {
+        @visibility(Lifecycle.Read)
+        id: string;
+        @visibility(Lifecycle.Create)
+        ownerId: string;
+
+        petKind: PetKind;
+        name: string;
+      }
+
+      model Dog extends Pet {
+        petKind: PetKind.Dog;
+        isBarker: boolean;
+      }
+
+      model Cat extends Pet {
+        petKind: PetKind.Cat;
+        isPurrer: boolean;
+      }
+
+      @route("/pets")
+      interface Pets {
+        @tag("Standard")
+        @patch update(@path id: string, @body pet: Pet): Pet;
+        @get list(): Pet[];
+      }
+
+      @route("/admin/pets")
+      interface AdminPets {
+        @tag("Admin")
+        @patch
+        @parameterVisibility(Lifecycle.Create, Lifecycle.Update)
+        update(@path id: string, @body pet: Pet): Pet;
+      }
+    `);
+
+    const modelsFile = Object.keys(results).find((k) =>
+      k.endsWith("models.ts"),
+    );
+    ok(modelsFile, "Expected models.ts to be emitted");
+    const content = results[modelsFile];
+
+    ok(
+      content.includes(
+        "export type StandardPetPatchRequest = StandardDogPatchRequest | StandardCatPatchRequest;",
+      ),
+      "Expected Standard union to reference the Standard-prefixed variants",
+    );
+    ok(
+      content.includes(
+        "export type AdminPetPatchRequest = AdminDogPatchRequest | AdminCatPatchRequest;",
+      ),
+      "Expected Admin union to reference the Admin-prefixed variants",
+    );
+    ok(
+      !content.includes("export type PetPatchRequest ="),
+      "Unprefixed PetPatchRequest union should not exist once renamed",
+    );
+    ok(
+      !content.includes("export interface DogPatchRequest"),
+      "Stale unprefixed DogPatchRequest interface should not linger",
+    );
+    ok(
+      !content.includes("export interface CatPatchRequest"),
+      "Stale unprefixed CatPatchRequest interface should not linger",
+    );
+
+    const adminDogMatch =
+      /export interface AdminDogPatchRequest \{([\s\S]*?)\}/.exec(content);
+    ok(adminDogMatch, "Expected AdminDogPatchRequest interface");
+    ok(
+      adminDogMatch[1].includes("ownerId: string;"),
+      "Admin variant includes Create-visibility ownerId per its @parameterVisibility",
+    );
+
+    const standardDogMatch =
+      /export interface StandardDogPatchRequest \{([\s\S]*?)\}/.exec(content);
+    ok(standardDogMatch, "Expected StandardDogPatchRequest interface");
+    ok(
+      !standardDogMatch[1].includes("ownerId"),
+      "Standard variant excludes Create-only ownerId under default PATCH visibility",
+    );
+
+    // Regression test: client method bodies must resolve to the tag-prefixed
+    // request type, not silently fall back to the unfiltered base model
+    // (the unprefixed "PetPatchRequest" name is no longer registered once
+    // renamed, so the lookup must retry under the operation's own @tag).
+    const standardClientFile = Object.keys(results).find((k) =>
+      k.endsWith("PetsClient.ts"),
+    );
+    ok(standardClientFile, "Expected PetsClient.ts to be emitted");
+    ok(
+      results[standardClientFile].includes("body: StandardPetPatchRequest"),
+      "Expected Pets.update() to accept the StandardPetPatchRequest union as its body",
+    );
+
+    const adminClientFile = Object.keys(results).find((k) =>
+      k.endsWith("AdminPetsClient.ts"),
+    );
+    ok(adminClientFile, "Expected AdminPetsClient.ts to be emitted");
+    ok(
+      results[adminClientFile].includes("body: AdminPetPatchRequest"),
+      "Expected AdminPets.update() to accept the AdminPetPatchRequest union as its body",
+    );
+  });
+
+  it("reports request-type-collision for a discriminated write-body collision with no @tag", async () => {
+    const [, diagnostics] = await emitWithDiagnostics(`
+      import "@typespec/http";
+      using Http;
+
+      @service(#{ title: "Test API" })
+      namespace TestApi;
+
+      enum PetKind { Dog: "dog", Cat: "cat" }
+
+      @discriminator("petKind")
+      model Pet {
+        @visibility(Lifecycle.Read)
+        id: string;
+        @visibility(Lifecycle.Create)
+        ownerId: string;
+
+        petKind: PetKind;
+        name: string;
+      }
+
+      model Dog extends Pet {
+        petKind: PetKind.Dog;
+        isBarker: boolean;
+      }
+
+      model Cat extends Pet {
+        petKind: PetKind.Cat;
+        isPurrer: boolean;
+      }
+
+      @route("/pets")
+      interface Pets {
+        @patch update(@path id: string, @body pet: Pet): Pet;
+      }
+
+      @route("/admin/pets")
+      interface AdminPets {
+        @patch
+        @parameterVisibility(Lifecycle.Create, Lifecycle.Update)
+        update(@path id: string, @body pet: Pet): Pet;
+      }
+    `);
+
+    ok(
+      diagnostics.some((d) => d.code.includes("request-type-collision")),
+      "Expected a request-type-collision diagnostic",
+    );
+  });
+
   // ─── index.ts and package.json ────────────────────────────────────────────────
 
   it("emits an index.ts that re-exports models and endpoints", async () => {

@@ -58,6 +58,28 @@ export type Pet = Dog | Cat;
 - **Every reference to the base model becomes the union.** A property or response typed `Pet[]` is emitted as `Pet[]` (i.e. `(Dog | Cat)[]`) — no changes are needed at the reference site.
 - **Multi-level hierarchies are flattened.** If an intermediate model in the hierarchy has no discriminator value of its own, the emitter walks down to its concrete descendants and includes those in the union instead.
 
+## Write bodies with read-only properties
+
+If the base model has any read-only or create-only property (e.g. a server-assigned `id`), a `POST`/`PUT`/`PATCH` operation accepting the base model as its body gets a filtered request type — same as any other model (see [request-models.md](request-models.md)). For a discriminated base, that filtered type is itself a union of **per-variant** filtered request types, so each variant keeps its own fields and its discriminator narrowed to its literal value:
+
+```typescript
+export interface DogPostRequest {
+  petKind: "dog";
+  name: string;
+  isBarker: boolean;
+}
+
+export interface CatPostRequest {
+  petKind: "cat";
+  name: string;
+  isPurrer: boolean;
+}
+
+export type PetPostRequest = DogPostRequest | CatPostRequest;
+```
+
+`PetsClient.create()` accepts `body: PetPostRequest`, so callers must supply a valid variant — including its narrowed discriminator value and its own fields — matching what an ASP.NET Core API using `[JsonPolymorphic]`/`[JsonDerivedType]` expects to deserialize.
+
 ## Limitations
 
 - Only the model-inheritance form of `@discriminator` (a base model with `extends`-based subtypes) is supported. `@discriminator` on a `union` declaration is not yet handled.
