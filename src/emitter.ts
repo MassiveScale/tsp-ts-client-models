@@ -778,6 +778,7 @@ interface DiscriminatedRequestUnion {
   sourceOp: HttpOperation;
 }
 
+/** Compares two discriminated request-union variant property maps for structural equality (variant set + property keys). */
 function discriminatedVariantShapesMatch(
   a: Map<string, Map<string, ModelProperty>>,
   b: Map<string, Map<string, ModelProperty>>,
