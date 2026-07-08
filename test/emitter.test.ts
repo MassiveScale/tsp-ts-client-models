@@ -865,6 +865,28 @@ describe("emitter", () => {
       !standardDogMatch[1].includes("ownerId"),
       "Standard variant excludes Create-only ownerId under default PATCH visibility",
     );
+
+    // Regression test: client method bodies must resolve to the tag-prefixed
+    // request type, not silently fall back to the unfiltered base model
+    // (the unprefixed "PetPatchRequest" name is no longer registered once
+    // renamed, so the lookup must retry under the operation's own @tag).
+    const standardClientFile = Object.keys(results).find((k) =>
+      k.endsWith("PetsClient.ts"),
+    );
+    ok(standardClientFile, "Expected PetsClient.ts to be emitted");
+    ok(
+      results[standardClientFile].includes("body: StandardPetPatchRequest"),
+      "Expected Pets.update() to accept the StandardPetPatchRequest union as its body",
+    );
+
+    const adminClientFile = Object.keys(results).find((k) =>
+      k.endsWith("AdminPetsClient.ts"),
+    );
+    ok(adminClientFile, "Expected AdminPetsClient.ts to be emitted");
+    ok(
+      results[adminClientFile].includes("body: AdminPetPatchRequest"),
+      "Expected AdminPets.update() to accept the AdminPetPatchRequest union as its body",
+    );
   });
 
   it("reports request-type-collision for a discriminated write-body collision with no @tag", async () => {

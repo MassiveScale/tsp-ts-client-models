@@ -1546,12 +1546,31 @@ function buildClientMethodView(
       const baseName = mergePatchBase ?? bodyModel.name;
       const suffix = requestTypeSuffix(op.verb);
       const requestTypeName = `${baseName}${suffix}Request`;
+      let resolvedRequestTypeName: string | undefined;
       if (
         requestTypes.has(requestTypeName) ||
         discriminatedRequestUnions.has(requestTypeName)
       ) {
-        bodyType = requestTypeName;
-        modelImportSet.add(requestTypeName);
+        resolvedRequestTypeName = requestTypeName;
+      } else {
+        // A name collision may have forced this request type to be renamed
+        // under its operation's own @tag prefix (see storeRequestType /
+        // collectDiscriminatedRequestType) — retry under that name before
+        // falling back to the unfiltered base model.
+        const tags = getTags(program, op.operation);
+        if (tags.length) {
+          const prefixedRequestTypeName = `${capitalize(tags[0])}${requestTypeName}`;
+          if (
+            requestTypes.has(prefixedRequestTypeName) ||
+            discriminatedRequestUnions.has(prefixedRequestTypeName)
+          ) {
+            resolvedRequestTypeName = prefixedRequestTypeName;
+          }
+        }
+      }
+      if (resolvedRequestTypeName) {
+        bodyType = resolvedRequestTypeName;
+        modelImportSet.add(resolvedRequestTypeName);
       } else if (bodyModel.name && !isSynthesizedMergePatchModel(bodyModel)) {
         bodyType = bodyModel.name;
         modelImportSet.add(bodyModel.name);
