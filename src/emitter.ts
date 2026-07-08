@@ -443,7 +443,10 @@ async function emitVersion(
   const enums = new Map<string, Enum>();
   const requestTypes = new Map<string, RequestType>();
   const requestTypeBaseModels = new Set<string>();
-  const discriminatedRequestUnions = new Map<string, string[]>();
+  const discriminatedRequestUnions = new Map<
+    string,
+    DiscriminatedRequestUnion
+  >();
 
   // Determine which model names are needed for GET/HEAD responses BEFORE the
   // full collection pass. Models that only appear as write-operation bodies (and
@@ -670,7 +673,7 @@ function collectRequestType(
   version: Version | undefined,
   requestTypes: Map<string, RequestType>,
   requestTypeBaseModels: Set<string>,
-  discriminatedRequestUnions: Map<string, string[]>,
+  discriminatedRequestUnions: Map<string, DiscriminatedRequestUnion>,
 ): void {
   if (!op.parameters.body) return;
   const body = op.parameters.body;
@@ -717,8 +720,7 @@ function collectRequestType(
   // mirroring how the plain model itself is exposed as a union of variants.
   const discriminator = getDiscriminator(program, bodyModel);
   if (discriminator) {
-    const requestTypeName = `${bodyModel.name}${suffix}Request`;
-    const variantRequestNames = collectDiscriminatedRequestVariants(
+    collectDiscriminatedRequestType(
       bodyModel,
       discriminator,
       visibility,
@@ -730,8 +732,8 @@ function collectRequestType(
       enums,
       requestTypes,
       requestTypeBaseModels,
+      discriminatedRequestUnions,
     );
-    discriminatedRequestUnions.set(requestTypeName, variantRequestNames);
     return;
   }
 
@@ -761,13 +763,47 @@ function collectRequestType(
   );
 }
 
+/** View of a discriminated write body's request type: a union of its
+ * per-variant filtered request types (e.g. `PetPostRequest = DogPostRequest |
+ * CatPostRequest`). */
+interface DiscriminatedRequestUnion {
+  /** Ordered, deduplicated request-type names of the concrete variants. */
+  memberNames: string[];
+  /** Filtered props per variant model name, kept so a later operation on the
+   * same discriminated base model + verb can be checked for a shape collision
+   * (e.g. a different `@parameterVisibility`) before registering anything. */
+  variantProps: Map<string, Map<string, ModelProperty>>;
+  /** The operation that produced this registration — its `@tag` resolves a
+   * collision against a later conflicting operation. */
+  sourceOp: HttpOperation;
+}
+
+function discriminatedVariantShapesMatch(
+  a: Map<string, Map<string, ModelProperty>>,
+  b: Map<string, Map<string, ModelProperty>>,
+): boolean {
+  if (a.size !== b.size) return false;
+  for (const [variantName, aProps] of a) {
+    const bProps = b.get(variantName);
+    if (!bProps || !propsHaveSameKeys(aProps, bProps)) return false;
+  }
+  return true;
+}
+
 /**
- * Registers a filtered `{Variant}{Verb}Request` type for every concrete
- * variant of a discriminator-annotated write body, so each keeps its own
- * fields (and its discriminator property narrowed to its literal wire value)
- * instead of collapsing to the shared base model's properties.
+ * Registers the write-body request types for a discriminator-annotated body
+ * model: a filtered `{Variant}{Verb}Request` for every concrete variant
+ * (keeping its own fields and its discriminator narrowed to its literal wire
+ * value), exposed together as a `{Base}{Verb}Request` union.
+ *
+ * If a different operation already registered a differently-shaped union
+ * under the same name (e.g. two operations on the same discriminated body
+ * with different `@parameterVisibility`), the collision is resolved with the
+ * same `@tag`-prefix convention {@link storeRequestType} uses — renaming the
+ * union *and* every member consistently for both operations, so the union
+ * never references a name that isn't actually registered.
  */
-function collectDiscriminatedRequestVariants(
+function collectDiscriminatedRequestType(
   bodyModel: Model,
   discriminator: Discriminator,
   visibility: Visibility,
@@ -779,48 +815,147 @@ function collectDiscriminatedRequestVariants(
   enums: Map<string, Enum>,
   requestTypes: Map<string, RequestType>,
   requestTypeBaseModels: Set<string>,
-): string[] {
+  discriminatedRequestUnions: Map<string, DiscriminatedRequestUnion>,
+): void {
   const [union] = getDiscriminatedUnionFromInheritance(
     bodyModel,
     discriminator,
   );
-  const variantRequestNames: string[] = [];
+  const variants: Model[] = [];
   const seen = new Set<Model>();
   for (const variant of union.variants.values()) {
     if (seen.has(variant) || !variant.name) continue;
     seen.add(variant);
+    variants.push(variant);
+  }
 
-    const requestTypeName = `${variant.name}${suffix}Request`;
-    variantRequestNames.push(requestTypeName);
-    const newProps = filterPropsForRequest(
-      variant,
-      visibility,
-      version,
-      program,
+  const variantProps = new Map<string, Map<string, ModelProperty>>();
+  for (const variant of variants) {
+    variantProps.set(
+      variant.name!,
+      filterPropsForRequest(variant, visibility, version, program),
     );
+  }
 
-    // Register under the discriminated base's name, not the variant's — the
-    // variant's own plain interface (e.g. "Dog") isn't replaced by a request
-    // type, it's still needed as-is for the base union's members. It's the
-    // base itself (e.g. "Pet") that's represented by a request type here.
-    storeRequestType(
-      requestTypeName,
-      bodyModel.name,
-      {
-        name: requestTypeName,
-        doc: getDoc(program, variant),
-        props: newProps,
-        sourceOp: op,
-      },
-      op,
+  const requestTypeName = `${bodyModel.name}${suffix}Request`;
+  const existing = discriminatedRequestUnions.get(requestTypeName);
+
+  if (existing) {
+    if (discriminatedVariantShapesMatch(existing.variantProps, variantProps)) {
+      // Identical shape — deduplicate silently.
+      return;
+    }
+
+    const existingTags = getTags(program, existing.sourceOp.operation);
+    const newTags = getTags(program, op.operation);
+    if (!existingTags.length || !newTags.length) {
+      reportDiagnostic(program, {
+        code: "request-type-collision",
+        messageId: !existingTags.length ? "missingTag" : "default",
+        format: { name: requestTypeName, op: op.operation.name },
+        target: op.operation,
+      });
+      return;
+    }
+
+    discriminatedRequestUnions.delete(requestTypeName);
+    requestTypeBaseModels.delete(bodyModel.name);
+    // The original (unprefixed) per-variant entries from the first
+    // registration are being replaced by tag-prefixed ones below — drop them
+    // so they don't linger in requestTypes as unreferenced dead interfaces.
+    for (const variant of variants) {
+      requestTypes.delete(`${variant.name}${suffix}Request`);
+    }
+
+    registerDiscriminatedRequestUnion(
+      bodyModel,
+      variants,
+      existing.variantProps,
+      existing.sourceOp,
+      suffix,
+      capitalize(existingTags[0]),
       program,
       models,
       enums,
       requestTypes,
       requestTypeBaseModels,
+      discriminatedRequestUnions,
     );
+    registerDiscriminatedRequestUnion(
+      bodyModel,
+      variants,
+      variantProps,
+      op,
+      suffix,
+      capitalize(newTags[0]),
+      program,
+      models,
+      enums,
+      requestTypes,
+      requestTypeBaseModels,
+      discriminatedRequestUnions,
+    );
+    return;
   }
-  return variantRequestNames;
+
+  registerDiscriminatedRequestUnion(
+    bodyModel,
+    variants,
+    variantProps,
+    op,
+    suffix,
+    "",
+    program,
+    models,
+    enums,
+    requestTypes,
+    requestTypeBaseModels,
+    discriminatedRequestUnions,
+  );
+}
+
+/**
+ * Stores the `{prefix}{Variant}{Verb}Request` interface for every variant
+ * under a single, already-resolved name prefix (empty when there is no
+ * collision) and records the resulting `{prefix}{Base}{Verb}Request` union —
+ * so the union's member names always match what's actually registered.
+ */
+function registerDiscriminatedRequestUnion(
+  bodyModel: Model,
+  variants: Model[],
+  variantProps: Map<string, Map<string, ModelProperty>>,
+  op: HttpOperation,
+  suffix: string,
+  prefix: string,
+  program: Program,
+  models: Map<string, Model>,
+  enums: Map<string, Enum>,
+  requestTypes: Map<string, RequestType>,
+  requestTypeBaseModels: Set<string>,
+  discriminatedRequestUnions: Map<string, DiscriminatedRequestUnion>,
+): void {
+  const memberNames: string[] = [];
+  for (const variant of variants) {
+    const props = variantProps.get(variant.name!)!;
+    const variantRequestTypeName = `${prefix}${variant.name}${suffix}Request`;
+    memberNames.push(variantRequestTypeName);
+    requestTypes.set(variantRequestTypeName, {
+      name: variantRequestTypeName,
+      doc: getDoc(program, variant),
+      props,
+      sourceOp: op,
+    });
+    for (const [, prop] of props) {
+      mapTsType(prop.type, program, models, enums);
+    }
+  }
+
+  requestTypeBaseModels.add(`${prefix}${bodyModel.name}`);
+  discriminatedRequestUnions.set(`${prefix}${bodyModel.name}${suffix}Request`, {
+    memberNames,
+    variantProps,
+    sourceOp: op,
+  });
 }
 
 // ─── Read-response model name collection ─────────────────────────────────────
@@ -921,7 +1056,7 @@ function buildModelsFile(
   requestTypeBaseModels: Set<string>,
   readResponseModelNames: Set<string>,
   discriminatedUnions: Map<string, string[]>,
-  discriminatedRequestUnions: Map<string, string[]>,
+  discriminatedRequestUnions: Map<string, DiscriminatedRequestUnion>,
   program: Program,
   renderer: Renderer,
   renameMap: Map<string, string>,
@@ -938,16 +1073,13 @@ function buildModelsFile(
     // Never emit synthesized MergePatch types — they are replaced by *PatchRequest
     // types or by references to the plain base model.
     if (isSynthesizedMergePatchModel(model)) continue;
-    // Suppress models that have a request type and are NOT needed for any
-    // GET/HEAD response — they'll appear only via their filtered request type.
-    if (
-      requestTypeBaseModels.has(model.name!) &&
-      !readResponseModelNames.has(model.name!)
-    )
-      continue;
     // A @discriminator base model is emitted as a union type alias of its
     // concrete variants instead of a plain interface, so every reference to it
-    // resolves to the precise discriminated union (e.g. `Dog | Cat`).
+    // resolves to the precise discriminated union (e.g. `Dog | Cat`). Checked
+    // before the request-type suppression below: a discriminated base is
+    // never rendered as a plain interface, so whether it separately "has a
+    // request type" (e.g. a filtered write-body union) must not skip its
+    // union alias — the base's own response-type references still need it.
     const variantNames = discriminatedUnions.get(model.name!);
     if (variantNames) {
       const unionView: UnionView = {
@@ -958,6 +1090,13 @@ function buildModelsFile(
       parts.push(renderer.renderUnion(unionView));
       continue;
     }
+    // Suppress models that have a request type and are NOT needed for any
+    // GET/HEAD response — they'll appear only via their filtered request type.
+    if (
+      requestTypeBaseModels.has(model.name!) &&
+      !readResponseModelNames.has(model.name!)
+    )
+      continue;
     parts.push(
       renderer.renderInterface(
         buildInterfaceView(model, program, models, enums, renameMap),
@@ -985,8 +1124,8 @@ function buildModelsFile(
   // filtered request types (e.g. `PetPostRequest = DogPostRequest | CatPostRequest`)
   // instead of a single flat interface, so callers must supply a variant's
   // own fields alongside its narrowed discriminator value.
-  for (const [unionName, variantNames] of discriminatedRequestUnions) {
-    const unionView: UnionView = { unionName, memberNames: variantNames };
+  for (const [unionName, { memberNames }] of discriminatedRequestUnions) {
+    const unionView: UnionView = { unionName, memberNames };
     parts.push(renderer.renderUnion(unionView));
   }
 
@@ -1339,7 +1478,7 @@ function buildClientFile(
   name: string,
   ops: HttpOperation[],
   requestTypes: Map<string, RequestType>,
-  discriminatedRequestUnions: Map<string, string[]>,
+  discriminatedRequestUnions: Map<string, DiscriminatedRequestUnion>,
   program: Program,
   models: Map<string, Model>,
   enums: Map<string, Enum>,
@@ -1375,7 +1514,7 @@ function buildClientMethodView(
   op: HttpOperation,
   endpointsClassName: string,
   requestTypes: Map<string, RequestType>,
-  discriminatedRequestUnions: Map<string, string[]>,
+  discriminatedRequestUnions: Map<string, DiscriminatedRequestUnion>,
   program: Program,
   models: Map<string, Model>,
   enums: Map<string, Enum>,

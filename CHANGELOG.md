@@ -11,6 +11,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Fixed
 
 - **Discriminated write bodies now preserve per-variant fields.** A `POST`/`PUT`/`PATCH` operation whose body is a `@discriminator` base model that also has a read-only/create-only property (e.g. a server-assigned `id`) previously generated a single flat `{Base}{Verb}Request` interface built only from the base model's own properties — silently dropping every variant-specific field (e.g. `Dog.isBarker`) and widening the discriminator back to its full enum type. The request type is now a union of per-variant filtered request types (e.g. `PetPostRequest = DogPostRequest | CatPostRequest`), each keeping its own fields and its discriminator narrowed to its literal value. See [docs/discriminated-models.md](docs/discriminated-models.md#write-bodies-with-read-only-properties).
+- **Fixed dangling references in the discriminated write-body union.** The base model's own union alias (e.g. `Pet = Dog | Cat`) could be omitted entirely for a write-only API with no `GET`/`HEAD` operation, and a naming collision between two operations producing the same `{Base}{Verb}Request` (e.g. different `@parameterVisibility`) could leave the union referencing per-variant interfaces that had been renamed out from under it, or leave stale unprefixed interfaces behind. Collisions are now resolved with the same `@tag`-prefix convention as plain request types, renaming the union and every member together.
 
 ## [0.4.0] — 2026-07-05
 
