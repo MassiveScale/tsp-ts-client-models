@@ -15,6 +15,7 @@ import {
   EnumMember,
   Discriminator,
   getDoc,
+  getEncode,
   getFormat,
   getTags,
   getDiscriminator,
@@ -59,6 +60,7 @@ import {
   ClientView,
   UnionView,
   TemplateOverrides,
+  TemplateName,
 } from "./renderer.js";
 import { EmitterOptions, createDiagnostic, reportDiagnostic } from "./lib.js";
 
@@ -113,8 +115,7 @@ function resolveTemplateOverrides(
   if (!templates) return {};
   const result: TemplateOverrides = {};
   for (const [key, val] of Object.entries(templates)) {
-    if (val)
-      (result as Record<string, string>)[key] = resolve(process.cwd(), val);
+    if (val) result[key as TemplateName] = resolve(process.cwd(), val);
   }
   return result;
 }
@@ -189,6 +190,16 @@ export function deriveNpmVersion(
 
 // ─── Version selection ───────────────────────────────────────────────────────
 
+/**
+ * Resolves which versions should be emitted based on options.
+ *
+ * Returns:
+ * - All versions if `all-versions` is true
+ * - The specific version if `target-version` is set and found
+ * - The latest version if versions exist and no target is specified
+ * - Empty array if no versions are declared and no target is specified
+ * - null if an error occurs (version not found)
+ */
 function resolveTargetVersions(
   program: Program,
   versions: Version[],
@@ -240,6 +251,11 @@ function resolveTargetVersions(
 
 // ─── Version filtering ───────────────────────────────────────────────────────
 
+/**
+ * Checks if an HTTP operation is available in the given API version.
+ * Returns true if the operation has no availability constraints or if it is
+ * marked as Added or Available in the target version.
+ */
 function isOpInVersion(
   program: Program,
   op: HttpOperation,
@@ -260,6 +276,10 @@ interface RequestType {
   sourceOp: HttpOperation;
 }
 
+/**
+ * Returns the capitalized HTTP verb name to be used as a suffix in request type names.
+ * For example, "post" → "Post", "patch" → "Patch".
+ */
 function requestTypeSuffix(verb: string): string {
   return capitalize(verb);
 }
@@ -375,7 +395,8 @@ async function emitService(
     const name = c.kind === "Interface" ? c.name : serviceNs.name;
     if (!byContainer.has(key))
       byContainer.set(key, { name, container: c, ops: [] });
-    byContainer.get(key)!.ops.push(op);
+    const entry = byContainer.get(key);
+    if (entry) entry.ops.push(op);
   }
 
   const prefixTemplate = options["route-prefix"] ?? "api/{version}";
@@ -1177,6 +1198,34 @@ function buildFilteredInterfaceView(
   };
 }
 
+/**
+ * Maps a model property to its TypeScript type, honoring `@encode(string)` on
+ * boolean targets (TypeSpec 1.14.0). The generated client uses native `fetch`
+ * with `JSON.stringify`/`response.json()` and performs no per-field transform,
+ * so a boolean carried on the wire as the string `"true"`/`"false"` is typed as
+ * `string` — matching what `response.json()` actually yields — rather than the
+ * logical `boolean`, which would be a runtime type mismatch. All other property
+ * types (and all other encodings) fall through to the normal type mapping.
+ */
+function mapPropertyTsType(
+  prop: ModelProperty,
+  program: Program,
+  models: Map<string, Model>,
+  enums: Map<string, Enum>,
+  renameMap?: Map<string, string>,
+): string {
+  if (prop.type.kind === "Scalar") {
+    const scalar = prop.type as Scalar;
+    if (builtinScalarName(scalar) === "boolean") {
+      const encode = getEncode(program, prop) ?? getEncode(program, scalar);
+      if (encode && builtinScalarName(encode.type) === "string") {
+        return "string";
+      }
+    }
+  }
+  return mapTsType(prop.type, program, models, enums, renameMap);
+}
+
 function buildPropertyViews(
   props: Iterable<[string, ModelProperty]>,
   program: Program,
@@ -1187,7 +1236,7 @@ function buildPropertyViews(
   const result: PropertyView[] = [];
   for (const [, prop] of props) {
     const doc = getDoc(program, prop);
-    const tsType = mapTsType(prop.type, program, models, enums, renameMap);
+    const tsType = mapPropertyTsType(prop, program, models, enums, renameMap);
     result.push({
       doc: doc ?? undefined,
       name: prop.name,

@@ -14,9 +14,15 @@ Every method, property, and enum should include a valid `JSDOC`
 
 ## Project Overview
 
-`@massivescale/tsp-ts-client-models` is a [TypeSpec](https://typespec.io) emitter that generates TypeScript API client models. Given a TypeSpec definition, it produces an npm package with models for each HTTP operation (`GET`, `POST`, `PATCH`, `DELETE`), including version-aware client generation.
+`@massivescale/tsp-ts-client-models` is a [TypeSpec](https://typespec.io) emitter that generates a complete, publishable TypeScript client package from a TypeSpec definition. The output includes:
 
-The emitter generates TypeScript models and enums. See `src/emitter.ts` for the implementation.
+- **Models & enums** — `export interface` / `export enum` for every model and enum.
+- **Discriminated unions** — a `@discriminator` model becomes a TypeScript union of its concrete variants (e.g. `type Pet = Dog | Cat`).
+- **Request types** — visibility-filtered write bodies (`WidgetPostRequest`, `WidgetPatchRequest`, `WidgetPutRequest`), including MergePatch support.
+- **Endpoint utilities** — `*Endpoints` `as const` path-builder objects per interface.
+- **Typed HTTP client** _(optional, on by default via `generate-http-client`)_ — one native-`fetch` `*Client` class per interface, with retry, timeout, and `AbortSignal` support.
+
+Generation is version-aware (`target-version` / `all-versions`) and rendered through Handlebars templates. See `src/emitter.ts` (orchestration + type mapping) and `src/renderer.ts` (view models + templates) for the implementation.
 
 ---
 
@@ -52,12 +58,12 @@ node --test dist/test/emitter.test.js
 
 TypeSpec discovers this emitter via two required exports in `src/index.ts`:
 
-- **`$lib`** (`src/lib.ts`) — Registers the library name (`"@massivescale/tsp-refit-client"`) and declares compiler diagnostics via `createTypeSpecLibrary`. Add new diagnostic codes here before using `reportDiagnostic` or `createDiagnostic`.
+- **`$lib`** (`src/lib.ts`) — Registers the library name (`"@massivescale/tsp-ts-client-models"`), declares the emitter options schema, and declares compiler diagnostics via `createTypeSpecLibrary`. Add new diagnostic codes here before using `reportDiagnostic` or `createDiagnostic`.
 - **`$onEmit`** (`src/emitter.ts`) — The emitter entry point called by the TypeSpec compiler. Receives an `EmitContext` containing the program's type graph. All code generation logic lives here or is called from here.
 
 ### Test Infrastructure
 
-`test/test-host.ts` sets up a TypeSpec test harness using `createTester` pointed at the repo root, with `@massivescale/tsp-refit-client` as the loaded library. It exports two helpers:
+`test/test-host.ts` sets up a TypeSpec test harness using `createTester` pointed at the repo root, loading `@massivescale/tsp-ts-client-models` alongside `@typespec/http`, `@typespec/rest`, and `@typespec/versioning`. It exports two helpers:
 
 - `emit(code)` — Compiles inline TypeSpec, asserts no diagnostics, returns `Record<string, string>` mapping output file paths to their string content.
 - `emitWithDiagnostics(code)` — Same but also returns compiler diagnostics for testing error cases.
@@ -66,7 +72,10 @@ Tests use Node.js native test runner (`node:test` / `node:assert`) — no extern
 
 ### Example
 
-`example/versioned-api/` contains a versioned Pet Store TypeSpec API used for manual end-to-end validation. Its `package.json` currently references `@massivescale/tsp-aspnetcore-api` (a sibling emitter project) — this needs updating to reference `@massivescale/tsp-refit-client` once the emitter is functional. Run the example builds via `example/versioned-api/build.ps1`.
+The `example/` directory contains standalone TypeSpec projects used for manual end-to-end validation, each depending on this emitter via `file:` link (`"@massivescale/tsp-ts-client-models"`):
+
+- `example/simple-api/` — a minimal single-version API. Build with `cd example/simple-api && npm install && tsp compile .`.
+- `example/versioned-api/` — a versioned Pet Store API demonstrating multi-version routes and models. Build via `example/versioned-api/build.ps1`.
 
 ---
 
@@ -78,7 +87,7 @@ The project uses ESM (`"type": "module"`). All internal imports must use `.js` e
 
 ### TypeSpec Peer Dependency
 
-`@typespec/compiler` is declared as a peer dependency at `latest`. Keep it in sync with any TypeSpec packages used in tests or the example.
+`@typespec/compiler` is declared as a peer dependency pinned to `^1.14.0`. The dev/test/example dependencies track the same 1.14.0 release train: `@typespec/http` `^1.14.0`, `@typespec/rest` and `@typespec/versioning` `^0.84.0`. When upgrading, bump the compiler, http, rest, and versioning packages together (compiler/http share the 1.x line; rest/versioning are on the 0.8x line) and keep the examples in sync.
 
 ### Diagnostics
 

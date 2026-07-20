@@ -190,6 +190,40 @@ describe("emitter", () => {
     ok(content.includes("/** The name. */"), "Expected JSDoc on property");
   });
 
+  it("maps @encode(string) boolean properties to string, leaving plain booleans as boolean", async () => {
+    const results = await emit(`
+      import "@typespec/http";
+      using Http;
+
+      @service(#{ title: "Test API" })
+      namespace TestApi;
+
+      model Widget {
+        @encode(string) active: boolean;
+        enabled: boolean;
+      }
+
+      @route("/widgets")
+      interface Widgets {
+        @get list(): Widget[];
+      }
+    `);
+
+    const modelsFile = Object.keys(results).find((k) =>
+      k.endsWith("models.ts"),
+    );
+    ok(modelsFile, "Expected models.ts to be emitted");
+    const content = results[modelsFile];
+    ok(
+      content.includes("active: string;"),
+      "Expected @encode(string) boolean to be typed as string",
+    );
+    ok(
+      content.includes("enabled: boolean;"),
+      "Expected plain boolean to remain boolean",
+    );
+  });
+
   it("emits optional properties with ?", async () => {
     const results = await emit(`
       import "@typespec/http";

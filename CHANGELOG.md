@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-07-20
+
+### Changed
+
+- **Upgraded to the TypeSpec 1.14.0 release train.** `@typespec/compiler` and `@typespec/http` bumped to `^1.14.0`, `@typespec/rest` and `@typespec/versioning` to `^0.84.0`. The `@typespec/compiler` dependency is now pinned to `^1.14.0` (previously the floating `latest` tag) for reproducible builds. No emitter API changes were required — the release contains no breaking changes for the compiler/http/rest/versioning APIs this emitter consumes.
+
+### Added
+
+- **`@encode(string)` on boolean properties.** A property annotated with `@encode(string)` on a `boolean` (TypeSpec 1.14.0) is now emitted with the TypeScript type `string` instead of `boolean`. The generated `fetch`/JSON client performs no per-field transformation, so such a value arrives from `response.json()` as the string `"true"`/`"false"`; typing it `string` matches the actual runtime shape. Plain booleans and all other encodings are unaffected.
+
 ## [0.5.0] — 2026-07-07
 
 ### Fixed

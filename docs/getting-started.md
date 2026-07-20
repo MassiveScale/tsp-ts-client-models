@@ -5,7 +5,7 @@
 ## Prerequisites
 
 - Node.js 18 or later (native `fetch` is required for the HTTP client)
-- TypeSpec CLI (`npm install -g @typespec/compiler`)
+- TypeSpec 1.14.0 or later (`npm install -g @typespec/compiler@^1.14.0`)
 
 ## Installation
 
