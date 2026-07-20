@@ -236,12 +236,33 @@ export type Pet = Dog | Cat;
 
 Every reference to `Pet` (e.g. `pets: Pet[]`) resolves to the union, enabling standard TypeScript discriminated-union narrowing on `petKind`. See [docs/discriminated-models.md](docs/discriminated-models.md) for details, including multi-level hierarchies.
 
+### Property encoding
+
+TypeSpec scalars map to their natural TypeScript types (`string`, `number`, `boolean`, `Date`, `Uint8Array`, …). The one encoding that changes the generated type is `@encode(string)` on a `boolean` (TypeSpec 1.14.0+):
+
+```typespec
+model Widget {
+  @encode(string) active: boolean; // carried on the wire as "true" / "false"
+  enabled: boolean;
+}
+```
+
+```typescript
+export interface Widget {
+  active: string; // matches what response.json() actually yields
+  enabled: boolean;
+}
+```
+
+The generated `fetch`/JSON client performs no per-field transformation, so a boolean carried as a string arrives from `response.json()` as `"true"`/`"false"` — typing it `string` reflects the real runtime shape. Plain booleans and every other encoding are unaffected.
+
 ## Development
 
 ### Prerequisites
 
-- Node.js (LTS)
+- Node.js 22 or later (LTS recommended)
 - npm 11+
+- TypeSpec 1.14.0+ (`@typespec/compiler` `^1.14.0`, `@typespec/http` `^1.14.0`, `@typespec/rest` / `@typespec/versioning` `^0.84.0`)
 
 ### Setup
 
