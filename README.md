@@ -260,7 +260,7 @@ The generated `fetch`/JSON client performs no per-field transformation, so a boo
 
 ### Prerequisites
 
-- Node.js (LTS)
+- Node.js 22 or later (LTS recommended)
 - npm 11+
 - TypeSpec 1.14.0+ (`@typespec/compiler` `^1.14.0`, `@typespec/http` `^1.14.0`, `@typespec/rest` / `@typespec/versioning` `^0.84.0`)
 
