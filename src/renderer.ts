@@ -11,13 +11,7 @@ const TEMPLATES_DIR = resolve(
 
 /** Names of the built-in Handlebars templates. */
 export type TemplateName =
-  | "file"
-  | "interface"
-  | "enum"
-  | "endpoints"
-  | "index"
-  | "client"
-  | "union";
+  "file" | "interface" | "enum" | "endpoints" | "index" | "client" | "union";
 
 /**
  * Partial map of template names to absolute file paths used to override the
