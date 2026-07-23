@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-07-23
+
+### Added
+
+- **RxJS Observable client flavor (`client-style` option).** A new emitter option `client-style` selects the return-type flavor of the generated HTTP client(s): `promise` (default — unchanged behavior), `observable`, or `both`. The `observable`/`both` flavors emit a `{Name}ObservableClient` class per interface whose methods return a cold RxJS `Observable<T>` (the request fires on `subscribe`; unsubscribing aborts the in-flight `fetch` via `AbortController`), backed by a new `client/ApiClientRx.ts` base (`RxHttpClient`). `RxHttpClient` extends the existing `HttpClient` and reuses the same `fetch` transport, retry/backoff, timeout, and `ApiError`/`RateLimitError`/`ServiceUnavailableError` classes — so `catchError` sees the same error types as the Promise client. When enabled, the generated `package.json` declares `rxjs` as an **optional** `peerDependency` (`^7.0.0 || ^8.0.0`). **Promise-only consumers are unaffected:** with the default `promise` style, output is byte-for-byte identical and no `rxjs` dependency is added. The `templates.clientObservable` override slot lets you customize the Observable client template. See [docs/environments/angular.md](docs/environments/angular.md) and [docs/http-client.md](docs/http-client.md#observable-rxjs-client).
+
 ## [0.6.0] — 2026-07-20
 
 ### Changed

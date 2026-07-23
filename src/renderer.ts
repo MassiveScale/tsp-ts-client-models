@@ -11,7 +11,14 @@ const TEMPLATES_DIR = resolve(
 
 /** Names of the built-in Handlebars templates. */
 export type TemplateName =
-  "file" | "interface" | "enum" | "endpoints" | "index" | "client" | "union";
+  | "file"
+  | "interface"
+  | "enum"
+  | "endpoints"
+  | "index"
+  | "client"
+  | "clientObservable"
+  | "union";
 
 /**
  * Partial map of template names to absolute file paths used to override the
@@ -130,6 +137,12 @@ export interface ClientMethodView {
   methodParams: string;
   /** Pre-rendered method body, e.g. `"return this.post<Widget>(WidgetsEndpoints.create(), body);"`. */
   methodBody: string;
+  /**
+   * Pre-rendered method body for the RxJS Observable flavor, calling the
+   * `$`-suffixed transport helpers, e.g.
+   * `"return this.post$<Widget>(WidgetsEndpoints.create(), body, { ...options, query });"`.
+   */
+  methodBodyObservable: string;
   /** TypeScript return type, e.g. `"Widget[]"` or `"void"`. */
   responseType: string;
 }
@@ -164,8 +177,10 @@ export interface Renderer {
   renderEndpoints(view: EndpointsView): string;
   /** Renders the barrel `index.ts` (file header + export * lines). */
   renderIndex(view: IndexView): string;
-  /** Renders a typed HTTP client class for one TypeSpec Interface. */
+  /** Renders a typed Promise-based HTTP client class for one TypeSpec Interface. */
   renderClient(view: ClientView): string;
+  /** Renders a typed RxJS Observable HTTP client class for one TypeSpec Interface. */
+  renderObservableClient(view: ClientView): string;
 }
 
 // ---------------------------------------------------------------------------
@@ -229,6 +244,11 @@ export function createRenderer(overrides: TemplateOverrides = {}): Renderer {
   const endpointsTemplate = loadTemplate(env, "endpoints", overrides.endpoints);
   const indexTemplate = loadTemplate(env, "index", overrides.index);
   const clientTemplate = loadTemplate(env, "client", overrides.client);
+  const clientObservableTemplate = loadTemplate(
+    env,
+    "clientObservable",
+    overrides.clientObservable,
+  );
 
   return {
     renderFile(view) {
@@ -258,6 +278,11 @@ export function createRenderer(overrides: TemplateOverrides = {}): Renderer {
 
     renderClient(view) {
       const body = clientTemplate(view);
+      return fileTemplate({ body, fileName: `${view.className}.ts` });
+    },
+
+    renderObservableClient(view) {
+      const body = clientObservableTemplate(view);
       return fileTemplate({ body, fileName: `${view.className}.ts` });
     },
   };

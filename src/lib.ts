@@ -13,6 +13,7 @@ export interface EmitterOptions {
   "npm-description"?: string;
   "route-prefix"?: string;
   "generate-http-client"?: boolean;
+  "client-style"?: "promise" | "observable" | "both";
   templates?: TemplateOverrides;
 }
 
@@ -61,6 +62,13 @@ const EmitterOptionsSchema: JSONSchemaType<EmitterOptions> = {
         "When true (default), generates a typed HTTP client class for each interface alongside the models and endpoint utilities.",
       nullable: true,
     },
+    "client-style": {
+      type: "string",
+      enum: ["promise", "observable", "both"],
+      description:
+        "Return-type flavor of the generated HTTP client(s). 'promise' (default) emits Promise-based `{Name}Client` classes. 'observable' emits RxJS `Observable`-based `{Name}ObservableClient` classes instead. 'both' emits both side by side. The observable flavor adds `rxjs` as an optional peer dependency of the generated package.",
+      nullable: true,
+    },
     templates: {
       type: "object",
       description:
@@ -102,6 +110,11 @@ const EmitterOptionsSchema: JSONSchemaType<EmitterOptions> = {
           type: "string",
           nullable: true,
           description: "HTTP client class template.",
+        },
+        clientObservable: {
+          type: "string",
+          nullable: true,
+          description: "RxJS Observable HTTP client class template.",
         },
       },
       required: [],
