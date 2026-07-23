@@ -305,22 +305,28 @@ function isSynthesizedMergePatchModel(model: Model): boolean {
 
 // Build a rename map for all synthesized MergePatch model names found in the
 // collected models. Each synthesized name maps to:
-//   - "{Base}PatchRequest" when the base model has its own endpoint (appears in
-//     requestTypeBaseModels), meaning it already has a generated request type.
-//   - "{Base}" (the plain model name) when the base is a complex value type with
-//     no endpoint (e.g. Tag), so we simply reference the original model.
+//   - "{Base}PatchRequest" only when that patch request type is actually emitted
+//     (the base has its own MergePatch/PATCH operation, so `{Base}PatchRequest`
+//     exists as a request type or discriminated request union).
+//   - "{Base}" (the plain model name) otherwise — e.g. a complex value type with
+//     no endpoint (Tag), or a model that is only *transitively* reached through
+//     another patch body (e.g. `Store.pets: Pet[]` in a version where `Pet` has a
+//     POST but no PATCH). Referencing `{Base}PatchRequest` there would dangle
+//     because that type is never emitted for this version.
 function buildMergePatchRenameMap(
   models: Map<string, Model>,
-  requestTypeBaseModels: Set<string>,
+  requestTypes: Map<string, RequestType>,
+  discriminatedRequestUnions: Map<string, DiscriminatedRequestUnion>,
 ): Map<string, string> {
   const renameMap = new Map<string, string>();
   for (const [name] of models) {
     const base = getMergePatchBaseName(name);
     if (base === undefined) continue;
-    renameMap.set(
-      name,
-      requestTypeBaseModels.has(base) ? `${base}PatchRequest` : base,
-    );
+    const patchTypeName = `${base}PatchRequest`;
+    const patchTypeEmitted =
+      requestTypes.has(patchTypeName) ||
+      discriminatedRequestUnions.has(patchTypeName);
+    renameMap.set(name, patchTypeEmitted ? patchTypeName : base);
   }
   return renameMap;
 }
@@ -511,7 +517,8 @@ async function emitVersion(
   // → PetPatchRequest, TagMergePatchUpdateReplaceOnly → Tag).
   const mergePatchRenameMap = buildMergePatchRenameMap(
     models,
-    requestTypeBaseModels,
+    requestTypes,
+    discriminatedRequestUnions,
   );
 
   const generateClient = options["generate-http-client"] !== false;
@@ -1511,14 +1518,14 @@ export class HttpClient {
     throw lastError ?? new ApiError(0, "Unknown error");
   }
 
-  protected get<T>(
+  protected httpGet<T>(
     path: string,
     options?: RequestOptions & { query?: Record<string, unknown> },
   ): Promise<T> {
     return this.request<T>("GET", path, options);
   }
 
-  protected post<T>(
+  protected httpPost<T>(
     path: string,
     body?: unknown,
     options?: RequestOptions & { query?: Record<string, unknown> },
@@ -1526,7 +1533,7 @@ export class HttpClient {
     return this.request<T>("POST", path, { ...options, body });
   }
 
-  protected put<T>(
+  protected httpPut<T>(
     path: string,
     body?: unknown,
     options?: RequestOptions & { query?: Record<string, unknown> },
@@ -1534,7 +1541,7 @@ export class HttpClient {
     return this.request<T>("PUT", path, { ...options, body });
   }
 
-  protected patch<T>(
+  protected httpPatch<T>(
     path: string,
     body?: unknown,
     options?: RequestOptions & { query?: Record<string, unknown> },
@@ -1542,14 +1549,14 @@ export class HttpClient {
     return this.request<T>("PATCH", path, { ...options, body });
   }
 
-  protected delete<T>(
+  protected httpDelete<T>(
     path: string,
     options?: RequestOptions & { query?: Record<string, unknown> },
   ): Promise<T> {
     return this.request<T>("DELETE", path, options);
   }
 
-  protected head(
+  protected httpHead(
     path: string,
     options?: RequestOptions & { query?: Record<string, unknown> },
   ): Promise<void> {
@@ -1613,65 +1620,65 @@ export class RxHttpClient extends HttpClient {
     });
   }
 
-  protected get$<T>(
+  protected httpGet$<T>(
     path: string,
     options?: RequestOptions & { query?: Record<string, unknown> },
   ): Observable<T> {
     return this.observe<T>(
-      (signal) => this.get<T>(path, { ...options, signal }),
+      (signal) => this.httpGet<T>(path, { ...options, signal }),
       options?.signal,
     );
   }
 
-  protected post$<T>(
-    path: string,
-    body?: unknown,
-    options?: RequestOptions & { query?: Record<string, unknown> },
-  ): Observable<T> {
-    return this.observe<T>(
-      (signal) => this.post<T>(path, body, { ...options, signal }),
-      options?.signal,
-    );
-  }
-
-  protected put$<T>(
+  protected httpPost$<T>(
     path: string,
     body?: unknown,
     options?: RequestOptions & { query?: Record<string, unknown> },
   ): Observable<T> {
     return this.observe<T>(
-      (signal) => this.put<T>(path, body, { ...options, signal }),
+      (signal) => this.httpPost<T>(path, body, { ...options, signal }),
       options?.signal,
     );
   }
 
-  protected patch$<T>(
+  protected httpPut$<T>(
     path: string,
     body?: unknown,
     options?: RequestOptions & { query?: Record<string, unknown> },
   ): Observable<T> {
     return this.observe<T>(
-      (signal) => this.patch<T>(path, body, { ...options, signal }),
+      (signal) => this.httpPut<T>(path, body, { ...options, signal }),
       options?.signal,
     );
   }
 
-  protected delete$<T>(
+  protected httpPatch$<T>(
+    path: string,
+    body?: unknown,
+    options?: RequestOptions & { query?: Record<string, unknown> },
+  ): Observable<T> {
+    return this.observe<T>(
+      (signal) => this.httpPatch<T>(path, body, { ...options, signal }),
+      options?.signal,
+    );
+  }
+
+  protected httpDelete$<T>(
     path: string,
     options?: RequestOptions & { query?: Record<string, unknown> },
   ): Observable<T> {
     return this.observe<T>(
-      (signal) => this.delete<T>(path, { ...options, signal }),
+      (signal) => this.httpDelete<T>(path, { ...options, signal }),
       options?.signal,
     );
   }
 
-  protected head$(
+  protected httpHead$(
     path: string,
     options?: RequestOptions & { query?: Record<string, unknown> },
   ): Observable<void> {
     return this.observe<void>(
-      (signal) => this.head(path, { ...options, signal }),
+      (signal) => this.httpHead(path, { ...options, signal }),
       options?.signal,
     );
   }
@@ -1828,16 +1835,20 @@ function buildClientMethodView(
   // helpers on RxHttpClient (`this.get$`, `this.post$`, …). Both share the same
   // unwrapped `responseType` — the wrapping `Promise<…>` / `Observable<…>` is
   // applied by the respective template.
+  // The base transport helpers are prefixed (`httpGet`, `httpPost`, …) so that a
+  // TypeSpec operation named after an HTTP verb (e.g. `delete`) does not shadow —
+  // and clash with the signature of — the inherited helper it delegates to.
   const httpMethod = op.verb.toLowerCase();
+  const helper = `http${capitalize(httpMethod)}`;
   let methodBody: string;
   let methodBodyObservable: string;
   if (op.verb === "get" || op.verb === "head" || op.verb === "delete") {
-    methodBody = `return this.${httpMethod}<${responseType}>(${endpointCall}, { ...options, query });`;
-    methodBodyObservable = `return this.${httpMethod}$<${responseType}>(${endpointCall}, { ...options, query });`;
+    methodBody = `return this.${helper}<${responseType}>(${endpointCall}, { ...options, query });`;
+    methodBodyObservable = `return this.${helper}$<${responseType}>(${endpointCall}, { ...options, query });`;
   } else {
     const bodyArg = bodyType ? "body" : "undefined";
-    methodBody = `return this.${httpMethod}<${responseType}>(${endpointCall}, ${bodyArg}, { ...options, query });`;
-    methodBodyObservable = `return this.${httpMethod}$<${responseType}>(${endpointCall}, ${bodyArg}, { ...options, query });`;
+    methodBody = `return this.${helper}<${responseType}>(${endpointCall}, ${bodyArg}, { ...options, query });`;
+    methodBodyObservable = `return this.${helper}$<${responseType}>(${endpointCall}, ${bodyArg}, { ...options, query });`;
   }
 
   return {
@@ -1971,11 +1982,18 @@ function buildPackageJson(
   // The Observable client flavor imports from `rxjs`. Declare it as an optional
   // peer dependency so consumers who only use the Promise client are never
   // forced to install it, while those using the Observable client resolve their
-  // own rxjs version.
+  // own rxjs version. Also list it as a devDependency so the generated package
+  // type-checks and builds standalone (`npm install && npm run build`) — npm
+  // does not auto-install *optional* peer dependencies.
   const clientStyle = options["client-style"] ?? "promise";
   if (clientStyle === "observable" || clientStyle === "both") {
-    pkg.peerDependencies = { rxjs: "^7.0.0 || ^8.0.0" };
+    const rxjsRange = "^7.0.0 || ^8.0.0";
+    pkg.peerDependencies = { rxjs: rxjsRange };
     pkg.peerDependenciesMeta = { rxjs: { optional: true } };
+    pkg.devDependencies = {
+      ...(pkg.devDependencies as Record<string, string>),
+      rxjs: rxjsRange,
+    };
   }
 
   return JSON.stringify(pkg, null, 2) + "\n";

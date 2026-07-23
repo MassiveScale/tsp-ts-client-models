@@ -1786,6 +1786,63 @@ describe("emitter", () => {
     );
   });
 
+  it("references the base model, not a missing PatchRequest, for a nested merge-patch type that has no PATCH of its own", async () => {
+    // Regression: Store has a MergePatch (StorePatchRequest) and contains
+    // `pets: Pet[]`. Pet has a POST (so it is in requestTypeBaseModels) but no
+    // PATCH — so PetPatchRequest is never emitted. The nested reference inside
+    // StorePatchRequest.pets must fall back to `Pet`, not dangle on
+    // `PetPatchRequest`. (This surfaced in versioned APIs where an entity's PATCH
+    // is @added in a later version than an entity that embeds it.)
+    const results = await emit(`
+      import "@typespec/http";
+      using Http;
+
+      @service(#{ title: "Test API" })
+      namespace TestApi;
+
+      model Pet {
+        @visibility(Lifecycle.Read) id: string;
+        name: string;
+      }
+
+      model Store {
+        @visibility(Lifecycle.Read) id: string;
+        name: string;
+        pets: Pet[];
+      }
+
+      @route("/pets")
+      interface Pets {
+        @post create(@body body: Pet): Pet;
+      }
+
+      @route("/stores")
+      interface Stores {
+        @post create(@body body: Store): Store;
+        @patch update(@path id: string, @body body: MergePatchUpdate<Store>): Store;
+      }
+    `);
+
+    const modelsFile = Object.keys(results).find((k) =>
+      k.endsWith("models.ts"),
+    );
+    ok(modelsFile, "Expected models.ts");
+    const content = results[modelsFile];
+    ok(
+      content.includes("export interface StorePatchRequest"),
+      "Expected StorePatchRequest from Store's MergePatch",
+    );
+    ok(
+      !content.includes("PetPatchRequest"),
+      "StorePatchRequest.pets must not reference a never-emitted PetPatchRequest",
+    );
+    const storePatch = content.slice(content.indexOf("StorePatchRequest"));
+    ok(
+      /pets\??:\s*Pet\[\]/.test(storePatch),
+      "Expected StorePatchRequest.pets to fall back to Pet[]",
+    );
+  });
+
   // ─── Collision detection ─────────────────────────────────────────────────────
 
   it("disambiguates colliding request types using @tag prefix", async () => {
@@ -2020,6 +2077,56 @@ describe("emitter", () => {
     );
   });
 
+  it("does not shadow base transport helpers when an operation is named after an HTTP verb", async () => {
+    // Regression: an operation literally named `delete` (or `get`, etc.) would
+    // generate a public `delete()` method that shadowed the protected base
+    // `HttpClient.delete<T>()` helper it delegates to — producing an incompatible
+    // override (TS2416) and a self-referential call (TS2558). The base helpers
+    // are now prefixed (`httpGet`, `httpDelete`, …) so no operation name collides.
+    const results = await emit(`
+      import "@typespec/http";
+      using Http;
+
+      @service(#{ title: "Test API" })
+      namespace TestApi;
+
+      model Widget { id: string; name: string; }
+
+      @route("/widgets")
+      interface Widgets {
+        @delete delete(@path id: string): void;
+        @get list(): Widget[];
+      }
+    `);
+
+    const apiClientFile = Object.keys(results).find((k) =>
+      k.includes("client/ApiClient.ts"),
+    );
+    ok(apiClientFile, "Expected client/ApiClient.ts");
+    const api = results[apiClientFile];
+    ok(api.includes("protected httpDelete<T>"), "Expected httpDelete helper");
+    ok(api.includes("protected httpGet<T>"), "Expected httpGet helper");
+    ok(
+      !/protected delete<T>/.test(api),
+      "Base helper must not use the bare verb name `delete`",
+    );
+
+    const clientFile = Object.keys(results).find((k) =>
+      k.includes("client/WidgetsClient.ts"),
+    );
+    ok(clientFile, "Expected client/WidgetsClient.ts");
+    const client = results[clientFile];
+    ok(client.includes("async delete("), "Expected the delete() method");
+    ok(
+      client.includes("return this.httpDelete<void>("),
+      "delete() body must call the prefixed helper, not itself",
+    );
+    ok(
+      client.includes("return this.httpGet<Widget[]>("),
+      "list() body must call the prefixed helper",
+    );
+  });
+
   // ─── Observable (RxJS) client flavor ──────────────────────────────────────────
 
   const OBSERVABLE_API = `
@@ -2104,12 +2211,12 @@ describe("emitter", () => {
       "Expected list() to return Observable<Widget[]>",
     );
     ok(
-      obs.includes("return this.get$<Widget[]>("),
-      "Expected list() body to call the get$ transport helper",
+      obs.includes("return this.httpGet$<Widget[]>("),
+      "Expected list() body to call the httpGet$ transport helper",
     );
     ok(
-      obs.includes("return this.post$<Widget>("),
-      "Expected create() body to call the post$ transport helper",
+      obs.includes("return this.httpPost$<Widget>("),
+      "Expected create() body to call the httpPost$ transport helper",
     );
 
     // Rx transport base
@@ -2128,8 +2235,8 @@ describe("emitter", () => {
       ),
       "Expected RxHttpClient to reuse the Promise transport from ApiClient.js",
     );
-    ok(rx.includes("get$<T>"), "Expected get$ helper");
-    ok(rx.includes("post$<T>"), "Expected post$ helper");
+    ok(rx.includes("httpGet$<T>"), "Expected httpGet$ helper");
+    ok(rx.includes("httpPost$<T>"), "Expected httpPost$ helper");
     ok(rx.includes("new AbortController()"), "Expected cancellation wiring");
 
     // Shared base transport still emitted (RxHttpClient depends on it)
@@ -2169,6 +2276,14 @@ describe("emitter", () => {
       pkg.peerDependenciesMeta?.rxjs?.optional,
       true,
       "Expected rxjs peer dependency to be optional",
+    );
+    ok(
+      pkg.devDependencies?.rxjs,
+      "Expected rxjs devDependency so the generated package builds standalone",
+    );
+    ok(
+      pkg.devDependencies?.typescript,
+      "Expected typescript devDependency to be preserved",
     );
   });
 

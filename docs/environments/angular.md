@@ -164,11 +164,11 @@ export class TokenAwareRxClient extends RxHttpClient {
     this.token = t;
   }
 
-  protected override get$<T>(
+  protected override httpGet$<T>(
     path: string,
-    options?: Parameters<RxHttpClient["get$"]>[1],
+    options?: Parameters<RxHttpClient["httpGet$"]>[1],
   ) {
-    return super.get$<T>(path, {
+    return super.httpGet$<T>(path, {
       ...options,
       headers: { Authorization: `Bearer ${this.token}`, ...options?.headers },
     });

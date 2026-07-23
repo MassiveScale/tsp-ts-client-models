@@ -3,3 +3,4 @@ emit:
 options:
   "@massivescale/tsp-ts-client-models":
     emitter-output-dir: "{output-dir}/defaults"
+    client-style: "both"
