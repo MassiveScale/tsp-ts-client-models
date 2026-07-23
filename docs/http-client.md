@@ -6,13 +6,15 @@ The emitter generates a typed HTTP client for each TypeSpec interface. The clien
 
 ```
 client/
-├── ApiClient.ts        ← base infrastructure
-└── WidgetsClient.ts    ← one class per TypeSpec interface
+├── ApiClient.ts               ← base infrastructure (Promise transport)
+├── ApiClientRx.ts             ← RxJS base (only with client-style: observable|both)
+├── WidgetsClient.ts           ← Promise client, one per interface
+└── WidgetsObservableClient.ts ← Observable client (only with client-style: observable|both)
 ```
 
-Both files are exported from `index.ts` and are part of the generated package.
+All generated files are exported from `index.ts` and are part of the generated package.
 
-To skip client generation, set `generate-http-client: false` in `tspconfig.yaml`.
+To skip client generation, set `generate-http-client: false` in `tspconfig.yaml`. To generate RxJS `Observable`-based clients (for Angular), set `client-style: observable` or `client-style: both` — see [Observable (RxJS) client](#observable-rxjs-client).
 
 ## ApiClient.ts
 
@@ -161,6 +163,60 @@ const widget = await client.read("abc123", {
 // Cancel in-flight request
 controller.abort();
 ```
+
+## Observable (RxJS) client
+
+By default the emitter generates Promise-based clients. Set `client-style` in `tspconfig.yaml` to also (or instead) generate an RxJS `Observable`-based client — ideal for Angular:
+
+```yaml
+options:
+  "@massivescale/tsp-ts-client-models":
+    client-style: both # "promise" (default) | "observable" | "both"
+```
+
+| Value        | Emits                                                           |
+| ------------ | --------------------------------------------------------------- |
+| `promise`    | `{Name}Client` only (default; output unchanged, no `rxjs`)      |
+| `observable` | `{Name}ObservableClient` only                                   |
+| `both`       | Both clients side by side, sharing one `ApiClient.ts` transport |
+
+When `observable`/`both` is selected the emitter adds a `client/ApiClientRx.ts` base (`RxHttpClient extends HttpClient`) and declares `rxjs` as an **optional** peer dependency in the generated `package.json`. The Promise flavor is completely unaffected — with the default `promise` style, no `rxjs` dependency is added and no extra files are emitted.
+
+```typescript
+// Generated (client-style: observable | both)
+export class WidgetsObservableClient extends RxHttpClient {
+  list(query?: Record<string, unknown>, options?: RequestOptions): Observable<Widget[]> { … }
+  read(id: string, query?: Record<string, unknown>, options?: RequestOptions): Observable<Widget> { … }
+  create(body: WidgetPostRequest, query?: Record<string, unknown>, options?: RequestOptions): Observable<Widget> { … }
+}
+```
+
+The method signatures, path/body/query parameters, and `RequestOptions` are identical to the Promise client — only the return type differs (`Observable<T>` instead of `Promise<T>`).
+
+### Semantics
+
+- **Cold:** the underlying `fetch` fires on `subscribe`, not when the Observable is created. Each subscription triggers its own request; use `shareReplay`/`share` (or Angular's `async` pipe with a single subscription) if you need to share one result across subscribers.
+- **Cancellation:** unsubscribing aborts the in-flight request via `AbortController`. A `RequestOptions.signal` you pass also aborts it, and a configured `timeout` still applies.
+- **Errors:** `ApiError` / `RateLimitError` / `ServiceUnavailableError` are delivered via the Observable's error channel, so `catchError` sees the same types as the Promise client. Retry/backoff and timeout behavior are shared with `HttpClient` — `RxHttpClient` reuses the same transport.
+
+```typescript
+import { WidgetsObservableClient } from "@my-org/my-api-client";
+import { catchError, of } from "rxjs";
+
+const client = new WidgetsObservableClient({
+  baseUrl: "https://api.example.com",
+});
+
+const sub = client
+  .list({ status: "active" })
+  .pipe(catchError((err) => of([])))
+  .subscribe((widgets) => console.log(widgets));
+
+// Cancel the in-flight request
+sub.unsubscribe();
+```
+
+See [Using in Angular](environments/angular.md) for the full Angular integration.
 
 ## Extending the client
 

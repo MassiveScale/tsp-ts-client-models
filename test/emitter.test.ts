@@ -2020,6 +2020,203 @@ describe("emitter", () => {
     );
   });
 
+  // ─── Observable (RxJS) client flavor ──────────────────────────────────────────
+
+  const OBSERVABLE_API = `
+    import "@typespec/http";
+    using Http;
+
+    @service(#{ title: "Test API" })
+    namespace TestApi;
+
+    model Widget { id: string; name: string; }
+
+    @route("/widgets")
+    interface Widgets {
+      @get list(): Widget[];
+      @get read(@path id: string): Widget;
+      @post create(@body body: Widget): Widget;
+      @delete remove(@path id: string): void;
+    }
+  `;
+
+  it("does not emit an Observable client or rxjs peer dep by default (promise)", async () => {
+    const results = await emit(OBSERVABLE_API);
+
+    ok(
+      Object.keys(results).some((k) => k.includes("client/WidgetsClient.ts")),
+      "Expected the Promise client by default",
+    );
+    ok(
+      !Object.keys(results).some((k) => k.includes("ObservableClient.ts")),
+      "No Observable client should be emitted by default",
+    );
+    ok(
+      !Object.keys(results).some((k) => k.includes("client/ApiClientRx.ts")),
+      "No ApiClientRx.ts should be emitted by default",
+    );
+
+    const pkgFile = Object.keys(results).find((k) =>
+      k.endsWith("package.json"),
+    );
+    ok(pkgFile, "Expected package.json");
+    ok(
+      !results[pkgFile].includes("rxjs"),
+      "package.json must not reference rxjs by default",
+    );
+  });
+
+  it("emits byte-for-byte identical output for the default and explicit promise style", async () => {
+    const defaultOut = await emit(OBSERVABLE_API);
+    const explicitOut = await emit(OBSERVABLE_API, {
+      "client-style": "promise",
+    });
+    deepStrictEqual(
+      explicitOut,
+      defaultOut,
+      "client-style: 'promise' must be identical to the default output",
+    );
+  });
+
+  it("emits an Observable client backed by RxHttpClient when client-style is observable", async () => {
+    const results = await emit(OBSERVABLE_API, {
+      "client-style": "observable",
+    });
+
+    // Observable client class + signatures
+    const obsFile = Object.keys(results).find((k) =>
+      k.includes("client/WidgetsObservableClient.ts"),
+    );
+    ok(obsFile, "Expected client/WidgetsObservableClient.ts");
+    const obs = results[obsFile];
+    ok(
+      obs.includes("class WidgetsObservableClient extends RxHttpClient"),
+      "Expected WidgetsObservableClient extending RxHttpClient",
+    );
+    ok(
+      obs.includes('import { Observable } from "rxjs";'),
+      "Expected rxjs Observable import",
+    );
+    ok(obs.includes("list(query?"), "Expected non-async list method signature");
+    ok(!obs.includes("async "), "Observable methods must not be async");
+    ok(
+      obs.includes("): Observable<Widget[]> {"),
+      "Expected list() to return Observable<Widget[]>",
+    );
+    ok(
+      obs.includes("return this.get$<Widget[]>("),
+      "Expected list() body to call the get$ transport helper",
+    );
+    ok(
+      obs.includes("return this.post$<Widget>("),
+      "Expected create() body to call the post$ transport helper",
+    );
+
+    // Rx transport base
+    const rxFile = Object.keys(results).find((k) =>
+      k.includes("client/ApiClientRx.ts"),
+    );
+    ok(rxFile, "Expected client/ApiClientRx.ts");
+    const rx = results[rxFile];
+    ok(
+      rx.includes("export class RxHttpClient extends HttpClient"),
+      "Expected RxHttpClient extending HttpClient",
+    );
+    ok(
+      rx.includes(
+        'import { HttpClient, type RequestOptions } from "./ApiClient.js";',
+      ),
+      "Expected RxHttpClient to reuse the Promise transport from ApiClient.js",
+    );
+    ok(rx.includes("get$<T>"), "Expected get$ helper");
+    ok(rx.includes("post$<T>"), "Expected post$ helper");
+    ok(rx.includes("new AbortController()"), "Expected cancellation wiring");
+
+    // Shared base transport still emitted (RxHttpClient depends on it)
+    ok(
+      Object.keys(results).some((k) => k.includes("client/ApiClient.ts")),
+      "Expected shared ApiClient.ts to still be emitted",
+    );
+
+    // Promise client suppressed in observable-only mode
+    ok(
+      !Object.keys(results).some((k) => k.includes("client/WidgetsClient.ts")),
+      "Promise client must not be emitted in observable-only mode",
+    );
+
+    // Barrel exports both bases and the observable client
+    const indexFile = Object.keys(results).find((k) => k.endsWith("index.ts"));
+    ok(indexFile, "Expected index.ts");
+    const index = results[indexFile];
+    ok(index.includes("./client/ApiClient.js"), "Expected ApiClient export");
+    ok(
+      index.includes("./client/ApiClientRx.js"),
+      "Expected ApiClientRx export",
+    );
+    ok(
+      index.includes("./client/WidgetsObservableClient.js"),
+      "Expected WidgetsObservableClient export",
+    );
+
+    // Optional rxjs peer dependency
+    const pkgFile = Object.keys(results).find((k) =>
+      k.endsWith("package.json"),
+    );
+    ok(pkgFile, "Expected package.json");
+    const pkg = JSON.parse(results[pkgFile]);
+    ok(pkg.peerDependencies?.rxjs, "Expected rxjs peerDependency");
+    strictEqual(
+      pkg.peerDependenciesMeta?.rxjs?.optional,
+      true,
+      "Expected rxjs peer dependency to be optional",
+    );
+  });
+
+  it("emits both Promise and Observable clients side by side when client-style is both", async () => {
+    const results = await emit(OBSERVABLE_API, { "client-style": "both" });
+
+    ok(
+      Object.keys(results).some((k) => k.includes("client/WidgetsClient.ts")),
+      "Expected the Promise client",
+    );
+    ok(
+      Object.keys(results).some((k) =>
+        k.includes("client/WidgetsObservableClient.ts"),
+      ),
+      "Expected the Observable client",
+    );
+    ok(
+      Object.keys(results).some((k) => k.includes("client/ApiClient.ts")),
+      "Expected shared ApiClient.ts",
+    );
+    ok(
+      Object.keys(results).some((k) => k.includes("client/ApiClientRx.ts")),
+      "Expected ApiClientRx.ts",
+    );
+
+    const indexFile = Object.keys(results).find((k) => k.endsWith("index.ts"));
+    ok(indexFile, "Expected index.ts");
+    const index = results[indexFile];
+    ok(
+      index.includes("./client/WidgetsClient.js"),
+      "Expected Promise client export",
+    );
+    ok(
+      index.includes("./client/WidgetsObservableClient.js"),
+      "Expected Observable client export",
+    );
+
+    // Both clients share the single ApiError from ApiClient.ts
+    const rxFile = Object.keys(results).find((k) =>
+      k.includes("client/ApiClientRx.ts"),
+    );
+    ok(rxFile, "Expected ApiClientRx.ts");
+    ok(
+      results[rxFile].includes('from "./ApiClient.js"'),
+      "Rx client must import shared types from ApiClient.js (single ApiError)",
+    );
+  });
+
   // ─── Custom query parameters ─────────────────────────────────────────────────
 
   it("allows additional custom query parameters alongside declared ones", async () => {
