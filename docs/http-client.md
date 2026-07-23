@@ -180,7 +180,7 @@ options:
 | `observable` | `{Name}ObservableClient` only                                   |
 | `both`       | Both clients side by side, sharing one `ApiClient.ts` transport |
 
-When `observable`/`both` is selected the emitter adds a `client/ApiClientRx.ts` base (`RxHttpClient extends HttpClient`) and declares `rxjs` as an **optional** peer dependency in the generated `package.json`. The Promise flavor is completely unaffected — with the default `promise` style, no `rxjs` dependency is added and no extra files are emitted.
+When `observable`/`both` is selected the emitter adds a `client/ApiClientRx.ts` base (`RxHttpClient extends HttpClient`) and declares `rxjs` in the generated `package.json` as both an **optional** `peerDependency` (so consumers resolve their own version) and a `devDependency` (so the generated package type-checks and builds standalone — npm does not auto-install optional peers). The Promise flavor is completely unaffected — with the default `promise` style, no `rxjs` dependency is added and no extra files are emitted.
 
 ```typescript
 // Generated (client-style: observable | both)
