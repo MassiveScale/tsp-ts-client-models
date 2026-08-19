@@ -22,7 +22,7 @@
   "devDependencies": {
     "@types/node": "^22.0.0",
     "@typespec/compiler": "^1.14.0",
-    "@typespec/http": "^1.14.0",
+    "@typespec/http": "^1.15.0",
     "@typespec/rest": "^0.84.0",
     "@typespec/versioning": "^0.84.0",
     "eslint": "^9.15.0",
