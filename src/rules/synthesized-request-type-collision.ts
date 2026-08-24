@@ -69,7 +69,8 @@ function checkVersion(
     if (!op.parameters.body) continue;
     const body = op.parameters.body;
     if (body.bodyKind !== "single" || body.type.kind !== "Model") continue;
-    if (op.verb !== "post" && op.verb !== "patch" && op.verb !== "put") continue;
+    if (op.verb !== "post" && op.verb !== "patch" && op.verb !== "put")
+      continue;
 
     const bodyModel = body.type as Model;
     if (!bodyModel.name) continue;
@@ -110,8 +111,20 @@ function checkVersion(
     }
 
     const requestTypeName = `${bodyModel.name}${suffix}Request`;
-    const newProps = filterPropsForRequest(bodyModel, visibility, version, program);
-    checkPlainCollision(requestTypeName, newProps, op, requestTypes, program, report);
+    const newProps = filterPropsForRequest(
+      bodyModel,
+      visibility,
+      version,
+      program,
+    );
+    checkPlainCollision(
+      requestTypeName,
+      newProps,
+      op,
+      requestTypes,
+      program,
+      report,
+    );
   }
 }
 
@@ -157,7 +170,10 @@ function checkDiscriminatedCollision(
   discriminatedUnions: Map<string, SynthesizedDiscriminatedUnion>,
   report: (op: HttpOperation, missingTag: boolean, name: string) => void,
 ): void {
-  const [union] = getDiscriminatedUnionFromInheritance(bodyModel, discriminator);
+  const [union] = getDiscriminatedUnionFromInheritance(
+    bodyModel,
+    discriminator,
+  );
   const variants: Model[] = [];
   const seen = new Set<Model>();
   for (const variant of union.variants.values()) {
@@ -178,7 +194,8 @@ function checkDiscriminatedCollision(
   const existing = discriminatedUnions.get(requestTypeName);
 
   if (existing) {
-    if (discriminatedVariantShapesMatch(existing.variantProps, variantProps)) return;
+    if (discriminatedVariantShapesMatch(existing.variantProps, variantProps))
+      return;
 
     const existingTags = getTags(program, existing.sourceOp.operation);
     const newTags = getTags(program, op.operation);
@@ -188,7 +205,10 @@ function checkDiscriminatedCollision(
     }
 
     discriminatedUnions.delete(requestTypeName);
-    discriminatedUnions.set(`${capitalize(existingTags[0])}${requestTypeName}`, existing);
+    discriminatedUnions.set(
+      `${capitalize(existingTags[0])}${requestTypeName}`,
+      existing,
+    );
     discriminatedUnions.set(`${capitalize(newTags[0])}${requestTypeName}`, {
       variantProps,
       sourceOp: op,
@@ -218,13 +238,18 @@ export const synthesizedRequestTypeCollisionRule = createRule({
             undefined,
           ];
           for (const version of allVersions) {
-            checkVersion(program, service.operations, version, (op, missingTag, name) => {
-              context.reportDiagnostic({
-                messageId: missingTag ? "missingTag" : "default",
-                format: { name, op: op.operation.name },
-                target: op.operation,
-              });
-            });
+            checkVersion(
+              program,
+              service.operations,
+              version,
+              (op, missingTag, name) => {
+                context.reportDiagnostic({
+                  messageId: missingTag ? "missingTag" : "default",
+                  format: { name, op: op.operation.name },
+                  target: op.operation,
+                });
+              },
+            );
           }
         }
       },

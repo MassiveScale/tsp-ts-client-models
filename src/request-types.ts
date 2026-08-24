@@ -1,6 +1,10 @@
 import { Model, ModelProperty, Program } from "@typespec/compiler";
 import { HttpOperation, Visibility, isVisible } from "@typespec/http";
-import { Availability, getAvailabilityMap, Version } from "@typespec/versioning";
+import {
+  Availability,
+  getAvailabilityMap,
+  Version,
+} from "@typespec/versioning";
 
 // ─── Shared naming / collision-detection helpers ─────────────────────────────
 //

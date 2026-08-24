@@ -20,7 +20,8 @@ describe("synthesized-request-type-collision lint rule", () => {
 
   it("reports a diagnostic when two operations would synthesize a same-named request type with different shapes and no @tag", async () => {
     await ruleTester
-      .expect(`
+      .expect(
+        `
         import "@typespec/http";
         using Http;
 
@@ -46,7 +47,8 @@ describe("synthesized-request-type-collision lint rule", () => {
           @parameterVisibility(TypeSpec.Lifecycle.Create, TypeSpec.Lifecycle.Update)
           update(@path id: string, @body body: Widget): Widget;
         }
-      `)
+      `,
+      )
       .toEmitDiagnostics({
         code: "@massivescale/tsp-ts-client-models/synthesized-request-type-collision",
       });
@@ -54,7 +56,8 @@ describe("synthesized-request-type-collision lint rule", () => {
 
   it("is valid when colliding operations are disambiguated with @tag", async () => {
     await ruleTester
-      .expect(`
+      .expect(
+        `
         import "@typespec/http";
         using Http;
 
@@ -82,13 +85,15 @@ describe("synthesized-request-type-collision lint rule", () => {
           @parameterVisibility(TypeSpec.Lifecycle.Create, TypeSpec.Lifecycle.Update)
           update(@path id: string, @body body: Widget): Widget;
         }
-      `)
+      `,
+      )
       .toBeValid();
   });
 
   it("is valid when two operations synthesize the same request type with identical shapes", async () => {
     await ruleTester
-      .expect(`
+      .expect(
+        `
         import "@typespec/http";
         using Http;
 
@@ -110,7 +115,8 @@ describe("synthesized-request-type-collision lint rule", () => {
         interface Widgets2 {
           @patch update2(@path id: string, @body body: Widget): Widget;
         }
-      `)
+      `,
+      )
       .toBeValid();
   });
 });

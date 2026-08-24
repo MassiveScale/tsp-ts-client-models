@@ -19,10 +19,7 @@ function fakeProp(name: string): ModelProperty {
 
 /** Builds a fake `Model`-shaped object carrying just the fields
  * `flattenProperties` reads: `baseModel` and `properties`. */
-function fakeModel(
-  propNames: string[],
-  baseModel?: Model,
-): Model {
+function fakeModel(propNames: string[], baseModel?: Model): Model {
   const properties = new Map<string, ModelProperty>();
   for (const name of propNames) properties.set(name, fakeProp(name));
   return { baseModel, properties } as unknown as Model;
@@ -82,14 +79,23 @@ describe("request-types", () => {
 
   describe("propsHaveSameKeys", () => {
     it("returns true for maps with identical keys", () => {
-      const a = new Map([["id", fakeProp("id")], ["name", fakeProp("name")]]);
-      const b = new Map([["id", fakeProp("id")], ["name", fakeProp("name")]]);
+      const a = new Map([
+        ["id", fakeProp("id")],
+        ["name", fakeProp("name")],
+      ]);
+      const b = new Map([
+        ["id", fakeProp("id")],
+        ["name", fakeProp("name")],
+      ]);
       ok(propsHaveSameKeys(a, b));
     });
 
     it("returns false when sizes differ", () => {
       const a = new Map([["id", fakeProp("id")]]);
-      const b = new Map([["id", fakeProp("id")], ["name", fakeProp("name")]]);
+      const b = new Map([
+        ["id", fakeProp("id")],
+        ["name", fakeProp("name")],
+      ]);
       ok(!propsHaveSameKeys(a, b));
     });
 
@@ -118,7 +124,9 @@ describe("request-types", () => {
     });
 
     it("returns false when the variant sets differ in size", () => {
-      const a = new Map([["Dog", new Map([["isBarker", fakeProp("isBarker")]])]]);
+      const a = new Map([
+        ["Dog", new Map([["isBarker", fakeProp("isBarker")]])],
+      ]);
       const b = new Map([
         ["Dog", new Map([["isBarker", fakeProp("isBarker")]])],
         ["Cat", new Map([["isPurrer", fakeProp("isPurrer")]])],
@@ -127,13 +135,19 @@ describe("request-types", () => {
     });
 
     it("returns false when a variant is missing on one side", () => {
-      const a = new Map([["Dog", new Map([["isBarker", fakeProp("isBarker")]])]]);
-      const b = new Map([["Cat", new Map([["isPurrer", fakeProp("isPurrer")]])]]);
+      const a = new Map([
+        ["Dog", new Map([["isBarker", fakeProp("isBarker")]])],
+      ]);
+      const b = new Map([
+        ["Cat", new Map([["isPurrer", fakeProp("isPurrer")]])],
+      ]);
       ok(!discriminatedVariantShapesMatch(a, b));
     });
 
     it("returns false when a shared variant's property keys differ", () => {
-      const a = new Map([["Dog", new Map([["isBarker", fakeProp("isBarker")]])]]);
+      const a = new Map([
+        ["Dog", new Map([["isBarker", fakeProp("isBarker")]])],
+      ]);
       const b = new Map([["Dog", new Map([["ownerId", fakeProp("ownerId")]])]]);
       ok(!discriminatedVariantShapesMatch(a, b));
     });
