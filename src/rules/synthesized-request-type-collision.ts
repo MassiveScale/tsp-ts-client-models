@@ -142,7 +142,8 @@ function checkPlainCollision(
       const existingTags = getTags(program, existing.sourceOp.operation);
       const newTags = getTags(program, op.operation);
       if (!existingTags.length || !newTags.length) {
-        report(op, !existingTags.length, requestTypeName);
+        if (!existingTags.length) report(existing.sourceOp, true, requestTypeName);
+        if (!newTags.length) report(op, true, requestTypeName);
         return;
       }
       const existingPrefix = capitalize(existingTags[0]);
@@ -200,7 +201,8 @@ function checkDiscriminatedCollision(
     const existingTags = getTags(program, existing.sourceOp.operation);
     const newTags = getTags(program, op.operation);
     if (!existingTags.length || !newTags.length) {
-      report(op, !existingTags.length, requestTypeName);
+      if (!existingTags.length) report(existing.sourceOp, true, requestTypeName);
+      if (!newTags.length) report(op, true, requestTypeName);
       return;
     }
 

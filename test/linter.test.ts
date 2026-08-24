@@ -49,8 +49,51 @@ describe("synthesized-request-type-collision lint rule", () => {
         }
       `,
       )
+      .toEmitDiagnostics([
+        {
+          code: "@massivescale/tsp-ts-client-models/synthesized-request-type-collision",
+        },
+        {
+          code: "@massivescale/tsp-ts-client-models/synthesized-request-type-collision",
+        },
+      ]);
+  });
+
+  it("blames the existing (first-registered) operation when it is the one missing @tag, not the new operation", async () => {
+    await ruleTester
+      .expect(
+        `
+        import "@typespec/http";
+        using Http;
+
+        @service(#{ title: "Test API" })
+        namespace TestApi;
+
+        model Widget {
+          @visibility(TypeSpec.Lifecycle.Read)
+          id: string;
+          name: string;
+          @visibility(TypeSpec.Lifecycle.Create)
+          tenantId: string;
+        }
+
+        @route("/widgets")
+        interface Widgets {
+          @patch updateWidget(@path id: string, @body body: Widget): Widget;
+        }
+
+        @route("/admin/widgets")
+        interface AdminWidgets {
+          @tag("Admin")
+          @patch
+          @parameterVisibility(TypeSpec.Lifecycle.Create, TypeSpec.Lifecycle.Update)
+          updateAdminWidget(@path id: string, @body body: Widget): Widget;
+        }
+      `,
+      )
       .toEmitDiagnostics({
         code: "@massivescale/tsp-ts-client-models/synthesized-request-type-collision",
+        message: /"updateWidget"/,
       });
   });
 
