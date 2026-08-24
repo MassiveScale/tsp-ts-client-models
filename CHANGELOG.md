@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **First lint rule: `synthesized-request-type-collision`.** The emitter has always detected — at _emit_ time — when two operations would synthesize a same-named request body type with different property shapes (the `request-type-collision` diagnostic). This is now also predicted at _lint_ time, before an emit is ever run, via a new `$linter` export and its `synthesized-request-type-collision` rule (`severity: "warning"`, included in the `recommended` and `all` rule sets). The rule checks every declared API version independently (since which versions get emitted depends on emitter options a lint pass can't see) and reuses the exact same collision-detection logic as the emitter, so its findings always agree with what emission would report. Add `@tag` to disambiguate conflicting operations, exactly as the emit-time diagnostic already instructs.
+
+### Fixed
+
+- **`synthesized-request-type-collision` missing-`@tag` diagnostic now blames the correct operation.** When a collision was detected and one of the two colliding operations had no `@tag`, the `missingTag` diagnostic was always reported against the newly-processed operation, even when it was actually the previously-registered operation that lacked the `@tag`. The rule now reports against whichever operation genuinely has no `@tag` (both, if neither does), for both the plain request-type collision check and the discriminated-union variant collision check.
+
+### Changed
+
+- **Extracted request-type-collision detection into `src/request-types.ts`.** The naming, visibility-filtering, and shape-comparison helpers `collectRequestType`/`collectDiscriminatedRequestType` rely on (`capitalize`, `flattenProperties`, `isOpInVersion`, `requestTypeSuffix`, `getMergePatchBaseName`, `propsHaveSameKeys`, `hasHiddenProperties`, `filterPropsForRequest`, `discriminatedVariantShapesMatch`) moved from `src/emitter.ts` into a new `src/request-types.ts` module. This is a behavior-preserving refactor with no change to emitted output — it exists so the new lint rule (below) can reuse the identical logic instead of duplicating it.
+- **Upgraded to the TypeSpec 1.15.0 release train.** `@typespec/compiler` and `@typespec/http` bumped to `^1.15.0`, `@typespec/rest` and `@typespec/versioning` to `^0.85.0`. `@typespec/http` and `@typespec/versioning` are now also declared as explicit `peerDependencies` (alongside `@typespec/compiler`) since this emitter structurally uses HTTP operation/route concepts and versioning APIs at its core — matching the convention of sibling emitter packages. `@typespec/rest` remains a devDependency only; it is used solely by the example fixtures and test suite for cross-library compatibility, never by `src/`. No emitter API changes were required — 1.15.0's `using X;` resolution change (statements before a file-level `namespace` now resolve from the global namespace) does not affect this project, since every `using` target in `example/**/*.tsp` (`Http`, `Versioning`) is already a genuine top-level global.
+
 ## [0.7.0] — 2026-07-23
 
 ### Added
