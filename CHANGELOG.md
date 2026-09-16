@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-09-16
+
 ### Added
 
 - **Pluggable HTTP client: custom transport, middleware, and lifecycle hooks.** The generated `HttpClient` base (`client/ApiClient.ts`) now exposes three extension points on `ClientConfig`, so existing auth and error-handling code can be reused with a generated client instead of being reimplemented around it:
