@@ -30,8 +30,17 @@ interface ClientConfig {
   defaultHeaders?: Record<string, string>; // Sent with every request.
   timeout?: number; // Milliseconds. Uses AbortSignal.timeout().
   retry?: RetryConfig;
+
+  // Extensibility — see docs/client-extensibility.md
+  fetch?: FetchFunction; // Custom transport. Default: the global fetch.
+  middleware?: HttpMiddleware[]; // Onion-style layers, outermost first.
+  onRequest?: RequestHook; // Before middleware, once per attempt.
+  onResponse?: ResponseHook; // After middleware, once per attempt.
+  onError?: ErrorHook; // Once, after retries are exhausted.
 }
 ```
+
+`fetch`, `middleware`, and the three hooks let you inject your own transport, attach access tokens, and route failures into an app-level error handler without wrapping every call site. See [Extending the generated client](client-extensibility.md) — that page covers the full pipeline, including where each piece runs relative to retry.
 
 ### `RetryConfig`
 
@@ -60,20 +69,36 @@ interface RequestOptions {
 
 ### Error classes
 
-| Class                     | Status | When thrown                      |
-| ------------------------- | ------ | -------------------------------- |
-| `ApiError`                | any    | Non-2xx after all retry attempts |
-| `RateLimitError`          | 429    | Subclass of `ApiError`           |
-| `ServiceUnavailableError` | 503    | Subclass of `ApiError`           |
+| Class                     | Status | Extra properties                           |
+| ------------------------- | ------ | ------------------------------------------ |
+| `ApiError`                | any    | `status`, `statusText`, `body`, `response` |
+| `RateLimitError`          | 429    | `retryAfterMs` (parsed from `Retry-After`) |
+| `ServiceUnavailableError` | 503    | —                                          |
+
+All three are thrown for a non-2xx response after the retry attempts are exhausted. `RateLimitError` and `ServiceUnavailableError` extend `ApiError`, so `instanceof ApiError` catches every case.
 
 ```typescript
 try {
   await client.create(payload);
 } catch (err) {
-  if (err instanceof ApiError) {
+  if (err instanceof RateLimitError) {
+    await sleep(err.retryAfterMs ?? 60_000);
+  } else if (err instanceof ApiError) {
     console.error(err.status, err.statusText, err.body);
+    console.error(err.response?.headers.get("X-Request-Id"));
   }
 }
+```
+
+`err.response` is the originating `Response`, useful for status and headers. Its body is already consumed — the parsed value is on `err.body`.
+
+To route every failure into a handler you already have, use the `onError` hook instead of a `try`/`catch` at each call site:
+
+```typescript
+const client = new WidgetsClient({
+  baseUrl,
+  onError: (error, context) => appErrorHandler.report(error, context),
+});
 ```
 
 ## Generated client classes
@@ -198,6 +223,7 @@ The method signatures, path/body/query parameters, and `RequestOptions` are iden
 - **Cold:** the underlying `fetch` fires on `subscribe`, not when the Observable is created. Each subscription triggers its own request; use `shareReplay`/`share` (or Angular's `async` pipe with a single subscription) if you need to share one result across subscribers.
 - **Cancellation:** unsubscribing aborts the in-flight request via `AbortController`. A `RequestOptions.signal` you pass also aborts it, and a configured `timeout` still applies.
 - **Errors:** `ApiError` / `RateLimitError` / `ServiceUnavailableError` are delivered via the Observable's error channel, so `catchError` sees the same types as the Promise client. Retry/backoff and timeout behavior are shared with `HttpClient` — `RxHttpClient` reuses the same transport.
+- **Extensibility:** `config.fetch`, `config.middleware`, `client.use()`, and the `onRequest`/`onResponse`/`onError` hooks all behave identically, for the same reason. `onError` fires before the error reaches `subscriber.error`, so a `catchError` downstream sees whatever the hook decided to throw.
 
 ```typescript
 import { WidgetsObservableClient } from "@my-org/my-api-client";
@@ -220,7 +246,22 @@ See [Using in Angular](environments/angular.md) for the full Angular integration
 
 ## Extending the client
 
-You can extend any generated client to add shared logic:
+Three extension points are built into every generated client — a custom `fetch` transport, an onion-style middleware pipeline, and `onRequest`/`onResponse`/`onError` hooks:
+
+```typescript
+const client = new WidgetsClient({
+  baseUrl: "https://api.example.com",
+  fetch: myTransport,
+  middleware: [authMiddleware, loggingMiddleware],
+  onError: (error) => appErrorHandler.report(error),
+});
+
+client.use(tracingMiddleware); // also registerable after construction
+```
+
+Middleware and the request/response hooks run **once per retry attempt**, so a layer that refreshes an expired token sees every attempt. `onError` runs **once**, after the last attempt fails. See [Extending the generated client](client-extensibility.md) for the full pipeline, worked examples (auth, refresh-on-401, caching, logging, test stubs, axios/Angular adapters), and the `Request`/`Response` rules for writing middleware.
+
+Subclassing still works too:
 
 ```typescript
 import { WidgetsClient, type ClientConfig } from "@my-org/my-api-client";

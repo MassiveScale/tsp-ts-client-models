@@ -1310,6 +1310,73 @@ const API_CLIENT_CONTENT = `export interface RetryConfig {
   retryOn?: number[];
 }
 
+/**
+ * A \`fetch\`-compatible transport: anything that takes a \`Request\` and resolves
+ * to a \`Response\`. The global \`fetch\` satisfies this type, as does a wrapper
+ * around \`axios\`, Angular's \`HttpClient\`, or a stub used in tests.
+ */
+export type FetchFunction = (request: Request) => Promise<Response>;
+
+/** Invokes the remainder of the middleware chain. */
+export type HttpNext = (request: Request) => Promise<Response>;
+
+/**
+ * Onion-style middleware. Receives the outgoing \`Request\` plus a \`next\`
+ * callback representing the rest of the chain, and returns the \`Response\`.
+ *
+ * Middleware runs once per retry attempt, so a layer that refreshes an expired
+ * token sees every attempt. Layers listed earlier in
+ * {@link ClientConfig.middleware} wrap the ones listed later.
+ *
+ * A \`Request\` body may only be read once — call \`request.clone()\` before
+ * inspecting it, and build a modified request with \`new Request(request, …)\`
+ * so the original \`AbortSignal\` is preserved.
+ */
+export type HttpMiddleware = (
+  request: Request,
+  next: HttpNext,
+) => Promise<Response>;
+
+/** Identifies the call a hook is observing. */
+export interface RequestContext {
+  /** HTTP method of the request, e.g. \`"GET"\`. */
+  readonly method: string;
+  /** Fully-resolved request URL, including any query string. */
+  readonly url: string;
+  /** Zero-based retry attempt; \`0\` is the first try. */
+  readonly attempt: number;
+}
+
+/**
+ * Called with the outgoing request before any middleware runs. Return a
+ * replacement \`Request\` to substitute it, or nothing to keep the original.
+ */
+export type RequestHook = (
+  request: Request,
+  context: RequestContext,
+) => Request | void | Promise<Request | void>;
+
+/**
+ * Called with the response after all middleware has returned, including
+ * non-2xx responses. Return a replacement \`Response\` to substitute it, or
+ * nothing to keep the original.
+ */
+export type ResponseHook = (
+  response: Response,
+  context: RequestContext,
+) => Response | void | Promise<Response | void>;
+
+/**
+ * Called once per logical call when it ultimately fails — after every retry
+ * attempt has been exhausted, not per attempt. Return a replacement error to
+ * throw it instead, throw to substitute your own, or return nothing to let the
+ * original error propagate.
+ */
+export type ErrorHook = (
+  error: unknown,
+  context: RequestContext,
+) => unknown | Promise<unknown>;
+
 export interface ClientConfig {
   /** Base URL of the API, e.g. "https://api.example.com". Trailing slash is trimmed automatically. */
   baseUrl: string;
@@ -1319,6 +1386,20 @@ export interface ClientConfig {
   timeout?: number;
   /** Retry configuration. */
   retry?: RetryConfig;
+  /** Transport used to send every request. Default: the global \`fetch\`. */
+  fetch?: FetchFunction;
+  /**
+   * Middleware applied to every request, outermost first. Each layer runs once
+   * per retry attempt. Further layers can be appended later with
+   * {@link HttpClient.use}.
+   */
+  middleware?: HttpMiddleware[];
+  /** Runs before any middleware, once per retry attempt. */
+  onRequest?: RequestHook;
+  /** Runs after all middleware, once per retry attempt. */
+  onResponse?: ResponseHook;
+  /** Runs once when a call ultimately fails, after retries are exhausted. */
+  onError?: ErrorHook;
 }
 
 export interface RequestOptions {
@@ -1333,6 +1414,8 @@ export class ApiError extends Error {
     public readonly status: number,
     public readonly statusText: string,
     public readonly body?: unknown,
+    /** The originating response. Its body is already consumed. */
+    public readonly response?: Response,
   ) {
     super(\`HTTP \${status}: \${statusText}\`);
     this.name = "ApiError";
@@ -1340,15 +1423,19 @@ export class ApiError extends Error {
 }
 
 export class RateLimitError extends ApiError {
-  constructor(public readonly retryAfterMs?: number) {
-    super(429, "Too Many Requests");
+  constructor(
+    public readonly retryAfterMs?: number,
+    body?: unknown,
+    response?: Response,
+  ) {
+    super(429, "Too Many Requests", body, response);
     this.name = "RateLimitError";
   }
 }
 
 export class ServiceUnavailableError extends ApiError {
-  constructor() {
-    super(503, "Service Unavailable");
+  constructor(body?: unknown, response?: Response) {
+    super(503, "Service Unavailable", body, response);
     this.name = "ServiceUnavailableError";
   }
 }
@@ -1357,8 +1444,66 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/** Parses a \`Retry-After\` header value into milliseconds. */
+function retryAfterMs(response: Response): number | undefined {
+  const after = response.headers.get("Retry-After");
+  if (!after) return undefined;
+  const seconds = parseFloat(after);
+  return Number.isNaN(seconds) ? undefined : seconds * 1000;
+}
+
+/** Builds the most specific {@link ApiError} subclass for a failed response. */
+function toApiError(response: Response, body?: unknown): ApiError {
+  if (response.status === 429) {
+    return new RateLimitError(retryAfterMs(response), body, response);
+  }
+  if (response.status === 503) {
+    return new ServiceUnavailableError(body, response);
+  }
+  return new ApiError(response.status, response.statusText, body, response);
+}
+
+/**
+ * Folds a middleware list into a single dispatch function, with the first
+ * entry as the outermost layer and \`transport\` at the center.
+ */
+function composeMiddleware(
+  middleware: readonly HttpMiddleware[],
+  transport: FetchFunction,
+): HttpNext {
+  return middleware.reduceRight<HttpNext>(
+    (next, layer) => (request) => layer(request, next),
+    (request) => transport(request),
+  );
+}
+
 export class HttpClient {
-  constructor(protected readonly config: ClientConfig) {}
+  private readonly middleware: HttpMiddleware[];
+
+  constructor(protected readonly config: ClientConfig) {
+    this.middleware = [...(config.middleware ?? [])];
+  }
+
+  /**
+   * Appends a middleware layer, inside any already registered. Returns the
+   * client so registrations can be chained.
+   */
+  use(middleware: HttpMiddleware): this {
+    this.middleware.push(middleware);
+    return this;
+  }
+
+  /** Joins the base URL, path, and serialized query string. */
+  protected buildUrl(path: string, query?: Record<string, unknown>): string {
+    const url = \`\${this.config.baseUrl.replace(/\\/$/, "")}\${path}\`;
+    if (!query) return url;
+    const qs = new URLSearchParams(
+      Object.entries(query)
+        .filter(([, v]) => v !== undefined && v !== null)
+        .map(([k, v]) => [k, String(v)]),
+    ).toString();
+    return qs ? \`\${url}?\${qs}\` : url;
+  }
 
   protected async request<T>(
     method: string,
@@ -1371,15 +1516,7 @@ export class HttpClient {
     const { maxAttempts = 3, baseDelayMs = 1000, retryOn = [429, 503] } =
       this.config.retry ?? {};
 
-    let url = \`\${this.config.baseUrl.replace(/\\/$/, "")}\${path}\`;
-    if (options?.query) {
-      const qs = new URLSearchParams(
-        Object.entries(options.query)
-          .filter(([, v]) => v !== undefined && v !== null)
-          .map(([k, v]) => [k, String(v)]),
-      ).toString();
-      if (qs) url = \`\${url}?\${qs}\`;
-    }
+    const url = this.buildUrl(path, options?.query);
 
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
@@ -1393,39 +1530,72 @@ export class HttpClient {
       signal = AbortSignal.timeout(this.config.timeout);
     }
 
+    const body =
+      options?.body !== undefined ? JSON.stringify(options.body) : undefined;
+    const dispatch = composeMiddleware(
+      this.middleware,
+      this.config.fetch ?? ((request) => fetch(request)),
+    );
+
+    let attempt = 0;
     let lastError: unknown;
-    for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      if (attempt > 0) await delay(baseDelayMs * Math.pow(2, attempt - 1));
-      try {
-        const resp = await fetch(url, {
-          method,
-          headers,
-          body:
-            options?.body !== undefined
-              ? JSON.stringify(options.body)
-              : undefined,
-          signal,
-        });
-        if (!resp.ok) {
+    try {
+      let succeeded: Response | undefined;
+      for (; attempt < maxAttempts; attempt++) {
+        if (attempt > 0) await delay(baseDelayMs * Math.pow(2, attempt - 1));
+        const context: RequestContext = { method, url, attempt };
+        try {
+          let request = new Request(url, { method, headers, body, signal });
+          if (this.config.onRequest) {
+            request = (await this.config.onRequest(request, context)) ?? request;
+          }
+          let resp = await dispatch(request);
+          if (this.config.onResponse) {
+            resp = (await this.config.onResponse(resp, context)) ?? resp;
+          }
+          if (resp.ok) {
+            succeeded = resp;
+            break;
+          }
           if (retryOn.includes(resp.status) && attempt < maxAttempts - 1) {
             if (resp.status === 429) {
-              const after = resp.headers.get("Retry-After");
-              if (after) await delay(parseFloat(after) * 1000);
+              const after = retryAfterMs(resp);
+              if (after !== undefined) await delay(after);
             }
-            lastError = new ApiError(resp.status, resp.statusText);
+            lastError = toApiError(resp);
             continue;
           }
-          const body = await resp.json().catch(() => undefined);
-          throw new ApiError(resp.status, resp.statusText, body);
+          const errorBody = await resp.json().catch(() => undefined);
+          throw toApiError(resp, errorBody);
+        } catch (err) {
+          if (err instanceof ApiError) throw err;
+          lastError = err;
         }
-        if (resp.status === 204) return undefined as T;
-        return resp.json() as Promise<T>;
-      } catch (err) {
-        if (err instanceof ApiError) throw err;
-        lastError = err;
       }
+      if (!succeeded) throw lastError ?? new ApiError(0, "Unknown error");
+      // Parsed outside the retry loop so a malformed success body is surfaced
+      // rather than retried.
+      if (method === "HEAD" || succeeded.status === 204 || succeeded.status === 205) {
+        return undefined as T;
+      }
+      return (await succeeded.json()) as T;
+    } catch (err) {
+      throw await this.applyErrorHook(err, {
+        method,
+        url,
+        attempt: Math.min(attempt, maxAttempts - 1),
+      });
     }
-    throw lastError ?? new ApiError(0, "Unknown error");
+  }
+
+  /** Runs {@link ClientConfig.onError}, resolving the error actually thrown. */
+  private async applyErrorHook(
+    error: unknown,
+    context: RequestContext,
+  ): Promise<unknown> {
+    if (!this.config.onError) return error;
+    const replacement = await this.config.onError(error, context);
+    return replacement === undefined ? error : replacement;
   }
 
   protected httpGet<T>(
@@ -1493,6 +1663,11 @@ import { HttpClient, type RequestOptions } from "./ApiClient.js";
  *   \`AbortController\`. A caller-supplied \`options.signal\` also aborts it.
  * - **Errors:** \`ApiError\` (and its subclasses) are delivered via
  *   \`subscriber.error\`, so \`catchError\` sees the same types as the Promise API.
+ * - **Extensibility:** a custom \`config.fetch\` transport, \`config.middleware\`
+ *   (and {@link HttpClient.use}), and the \`onRequest\`/\`onResponse\`/\`onError\`
+ *   hooks all apply unchanged, because every verb helper routes through the
+ *   same \`HttpClient\` transport. \`onError\` fires before the error reaches
+ *   \`subscriber.error\`.
  */
 export class RxHttpClient extends HttpClient {
   /**

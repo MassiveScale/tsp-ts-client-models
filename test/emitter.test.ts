@@ -1956,6 +1956,125 @@ describe("emitter", () => {
     ok(content.includes("RetryConfig"), "Expected RetryConfig interface");
   });
 
+  it("generates the extensibility surface in client/ApiClient.ts", async () => {
+    const results = await emit(`
+      import "@typespec/http";
+      using Http;
+
+      @service(#{ title: "Test API" })
+      namespace TestApi;
+
+      model Widget { id: string; name: string; }
+
+      @route("/widgets")
+      interface Widgets {
+        @get list(): Widget[];
+      }
+    `);
+
+    const apiClientFile = Object.keys(results).find((k) =>
+      k.includes("client/ApiClient.ts"),
+    );
+    ok(apiClientFile, "Expected client/ApiClient.ts");
+    const content = results[apiClientFile];
+
+    for (const symbol of [
+      "export type FetchFunction",
+      "export type HttpNext",
+      "export type HttpMiddleware",
+      "export interface RequestContext",
+      "export type RequestHook",
+      "export type ResponseHook",
+      "export type ErrorHook",
+    ]) {
+      ok(content.includes(symbol), `Expected ${symbol}`);
+    }
+
+    for (const member of [
+      "fetch?: FetchFunction;",
+      "middleware?: HttpMiddleware[];",
+      "onRequest?: RequestHook;",
+      "onResponse?: ResponseHook;",
+      "onError?: ErrorHook;",
+    ]) {
+      ok(content.includes(member), `Expected ClientConfig.${member}`);
+    }
+
+    ok(
+      content.includes("use(middleware: HttpMiddleware): this"),
+      "Expected HttpClient.use()",
+    );
+    ok(
+      content.includes("function composeMiddleware("),
+      "Expected the middleware composer",
+    );
+    ok(
+      content.includes("this.config.fetch ?? ((request) => fetch(request))"),
+      "Expected the global fetch fallback",
+    );
+  });
+
+  it("composes middleware inside the retry loop so layers see every attempt", async () => {
+    const results = await emit(`
+      import "@typespec/http";
+      using Http;
+
+      @service(#{ title: "Test API" })
+      namespace TestApi;
+
+      model Widget { id: string; name: string; }
+
+      @route("/widgets")
+      interface Widgets {
+        @get list(): Widget[];
+      }
+    `);
+
+    const apiClientFile = Object.keys(results).find((k) =>
+      k.includes("client/ApiClient.ts"),
+    );
+    ok(apiClientFile, "Expected client/ApiClient.ts");
+    const content = results[apiClientFile];
+
+    const loopStart = content.indexOf("for (; attempt < maxAttempts");
+    const dispatchCall = content.indexOf("await dispatch(request)");
+    ok(loopStart > -1, "Expected the retry loop");
+    ok(
+      dispatchCall > loopStart,
+      "The middleware chain must be dispatched inside the retry loop",
+    );
+  });
+
+  it("throws typed subclasses for 429 and 503 responses", async () => {
+    const results = await emit(`
+      import "@typespec/http";
+      using Http;
+
+      @service(#{ title: "Test API" })
+      namespace TestApi;
+
+      model Widget { id: string; name: string; }
+
+      @route("/widgets")
+      interface Widgets {
+        @get list(): Widget[];
+      }
+    `);
+
+    const apiClientFile = Object.keys(results).find((k) =>
+      k.includes("client/ApiClient.ts"),
+    );
+    ok(apiClientFile, "Expected client/ApiClient.ts");
+    const content = results[apiClientFile];
+
+    ok(content.includes("function toApiError("), "Expected the error factory");
+    ok(content.includes("new RateLimitError("), "Expected RateLimitError use");
+    ok(
+      content.includes("new ServiceUnavailableError("),
+      "Expected ServiceUnavailableError use",
+    );
+  });
+
   it("generates a typed client class per interface", async () => {
     const results = await emit(`
       import "@typespec/http";
@@ -2225,6 +2344,10 @@ describe("emitter", () => {
     );
     ok(rxFile, "Expected client/ApiClientRx.ts");
     const rx = results[rxFile];
+    ok(
+      rx.includes("**Extensibility:**"),
+      "Expected RxHttpClient to document that middleware and hooks still apply",
+    );
     ok(
       rx.includes("export class RxHttpClient extends HttpClient"),
       "Expected RxHttpClient extending HttpClient",

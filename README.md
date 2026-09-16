@@ -11,6 +11,7 @@ This emitter produces:
 - **Request types** — visibility-filtered interfaces (e.g. `WidgetPostRequest`, `WidgetPatchRequest`) that strip server-managed fields like `id` from write operations. MergePatch operations are also supported.
 - **Endpoint utilities** — `*Endpoints` `as const` objects with typed path-building functions per interface.
 - **Typed HTTP client** _(optional, on by default)_ — one `*Client` class per TypeSpec interface using native `fetch`, with retry, `AbortSignal`, timeout support, and an always-available `query` parameter for custom query parameters on any call.
+- **Pluggable client** — inject your own `fetch`-compatible transport, add middleware, or hook into every request, response, and failure, so existing auth and error-handling code works with the generated client. See [docs/client-extensibility.md](docs/client-extensibility.md).
 
 The output is a complete, buildable npm package (`package.json`, `tsconfig.json`, `index.ts`) ready to publish or consume locally.
 
@@ -177,7 +178,37 @@ await client.create({ name: "New Widget" }); // body typed as WidgetPostRequest
 await client.list({ status: "active", debug: "true" });
 ```
 
-See [docs/http-client.md](docs/http-client.md) for the full `ClientConfig`, error types, query parameters, and extension patterns.
+See [docs/http-client.md](docs/http-client.md) for the full `ClientConfig`, error types, and query parameters.
+
+### Plugging in your own code
+
+Every client accepts a custom transport, middleware, and lifecycle hooks, so the token fetcher and error handler you already have can be reused as-is:
+
+```typescript
+const client = new WidgetsClient({
+  baseUrl: "https://api.example.com",
+
+  // Your own fetch — a wrapper, an axios adapter, or a test stub.
+  fetch: myTransport,
+
+  // Onion-style layers, outermost first. Re-run on every retry attempt,
+  // so an expired token gets refreshed rather than replayed.
+  middleware: [
+    async (request, next) => {
+      const authed = new Request(request);
+      authed.headers.set("Authorization", `Bearer ${await getToken()}`);
+      return next(authed);
+    },
+  ],
+
+  // Terminal, app-level error handler. Fires once, after retries run out.
+  onError: (error, context) => appErrorHandler.report(error, context),
+});
+
+client.use(tracingMiddleware); // layers can also be added later
+```
+
+`onRequest` and `onResponse` hooks are available for the simpler cases. Everything works identically on the Observable (RxJS) client. See [docs/client-extensibility.md](docs/client-extensibility.md) for the full pipeline and worked examples.
 
 ### Endpoint utilities only
 
