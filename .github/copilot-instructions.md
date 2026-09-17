@@ -36,7 +36,10 @@ npm run lint:fix       # Lint with auto-fix
 npm run format         # Format all files with Prettier
 npm run format:check   # Check formatting without writing
 npm run watch          # Watch mode TypeScript compilation
+npm run sweep          # Type-check generated packages for adversarial names (requires build first; ~2 min)
 ```
+
+`npm run sweep` emits a spec for every interface, operation, model, and enum name that has ever collided with a generated symbol — infrastructure exports, imported bindings, inherited members, JavaScript globals — and runs `tsc` over the result under both client styles. The test suite pins each _known_ collision; the sweep is the wider net. Run it after changing anything that names a generated symbol.
 
 **Important:** Tests run against compiled output in `dist/`. Always run `npm run build` before `npm test`, or chain them:
 

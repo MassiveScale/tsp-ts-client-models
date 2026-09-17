@@ -399,6 +399,162 @@ describe("generated package compiles", () => {
     },
   );
 
+  // Regression: `interface Http` declares `class HttpClient`, the same name as
+  // the base class it imports — TS2440 and a self-referential extends clause.
+  for (const style of ["promise", "both"] as const) {
+    it(
+      `compiles an interface named Http (${style})`,
+      { timeout: TYPE_CHECK_TIMEOUT },
+      async () => {
+        const { errors, files } = await emitAndTypeCheck(
+          `
+          import "@typespec/http";
+          using Http;
+
+          @service(#{ title: "Test API" })
+          namespace TestApi;
+
+          model Widget { id: string; }
+
+          @route("/http") interface Http { @get list(): Widget[]; }
+        `,
+          { "client-style": style },
+        );
+
+        deepStrictEqual(errors, []);
+
+        const key = Object.keys(files).find((k) =>
+          k.endsWith("client/HttpClient.ts"),
+        );
+        ok(key, "Expected client/HttpClient.ts");
+        // The generated class keeps its name; the base-class import yields.
+        ok(
+          files[key].includes("HttpClient as ClientHttpClient"),
+          "Expected the base-class import to be aliased",
+        );
+        ok(
+          files[key].includes(
+            "export class HttpClient extends ClientHttpClient",
+          ),
+          "Expected the generated class to extend the alias",
+        );
+      },
+    );
+  }
+
+  // Regression: a model named after a global the client references — most
+  // importantly `Promise` — shadowed it when imported, so every
+  // `Promise<T>` return type became a reference to the user's non-generic
+  // model (TS2315). One spec covers every protected global at once.
+  for (const style of ["promise", "both"] as const) {
+    it(
+      `compiles when models shadow Promise, Record, Date and Uint8Array (${style})`,
+      { timeout: TYPE_CHECK_TIMEOUT },
+      async () => {
+        const { errors, files } = await emitAndTypeCheck(
+          `
+          import "@typespec/http";
+          using Http;
+
+          @service(#{ title: "Test API" })
+          namespace TestApi;
+
+          model Promise { id: string; }
+          model Record { id: string; }
+          model Date { id: string; }
+          model Uint8Array { id: string; }
+
+          @route("/x")
+          interface Widgets {
+            @route("/a") @get a(@query since?: utcDateTime): Promise[];
+            @route("/b") @post b(@body body: Record): Record;
+            @route("/c") @get c(): Date[];
+            @route("/d") @post d(@body body: Uint8Array): Uint8Array;
+          }
+        `,
+          { "client-style": style },
+        );
+
+        deepStrictEqual(errors, []);
+
+        const key = Object.keys(files).find((k) =>
+          k.endsWith("client/WidgetsClient.ts"),
+        );
+        ok(key, "Expected client/WidgetsClient.ts");
+        const client = files[key];
+        for (const g of ["Promise", "Record", "Date", "Uint8Array"]) {
+          ok(
+            client.includes(`${g} as ${g}Model`),
+            `Expected the ${g} model import to be aliased`,
+          );
+        }
+        ok(
+          client.includes("Promise<PromiseModel[]>"),
+          "The return type must wrap the aliased model in the global Promise",
+        );
+        ok(
+          client.includes("body: RecordModel"),
+          "The body parameter must use the alias too",
+        );
+        ok(
+          client.includes("since?: Date"),
+          "A scalar query param must still mean the global Date",
+        );
+      },
+    );
+  }
+
+  // Object.prototype members compile when overridden — TypeScript does not
+  // check class members against Object's apparent members — but an async
+  // `toString`/`valueOf` breaks coercion, and a `then` method would make the
+  // client a thenable. All are reserved regardless of client style.
+  it(
+    "renames operations named after Object.prototype members and then",
+    { timeout: TYPE_CHECK_TIMEOUT },
+    async () => {
+      const names = [
+        "toString",
+        "toLocaleString",
+        "valueOf",
+        "hasOwnProperty",
+        "isPrototypeOf",
+        "propertyIsEnumerable",
+        "then",
+      ];
+      const ops = names
+        .map((n, i) => `@route("/${i}") @get ${n}(): Widget[];`)
+        .join("\n");
+      const { errors, files } = await emitAndTypeCheck(`
+        import "@typespec/http";
+        using Http;
+
+        @service(#{ title: "Test API" })
+        namespace TestApi;
+
+        model Widget { id: string; }
+
+        @route("/x") interface Widgets { ${ops} }
+      `);
+
+      deepStrictEqual(errors, []);
+
+      const key = Object.keys(files).find((k) =>
+        k.endsWith("client/WidgetsClient.ts"),
+      );
+      ok(key, "Expected client/WidgetsClient.ts");
+      for (const n of names) {
+        ok(
+          files[key].includes(`async ${n}Operation(`),
+          `Expected ${n} to be renamed`,
+        );
+        ok(
+          !new RegExp(`async ${n}\\(`).test(files[key]),
+          `Expected no bare ${n} method`,
+        );
+      }
+    },
+  );
+
   it(
     "compiles when a model collides with an Observable-flavor export",
     { timeout: TYPE_CHECK_TIMEOUT },

@@ -147,10 +147,10 @@ async requestOperation(…): Promise<Widget[]> {
 
 Which names are reserved depends on the base class your client actually extends, so a Promise-only build does not give up names that exist only on `RxHttpClient`:
 
-| `client-style`               | Reserved                                                                                                                                                                                  |
-| ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `promise` (default)          | `HttpClient` members: `constructor`, `config`, `middleware`, `useMiddleware`, `buildUrl`, `request`, `applyErrorHook`, `httpGet`/`httpPost`/`httpPut`/`httpPatch`/`httpDelete`/`httpHead` |
-| `observable` &middot; `both` | The above, plus `RxHttpClient` members: `observe` and the `$` verb helpers (`httpGet$`, `httpPost$`, …)                                                                                   |
+| `client-style`               | Reserved                                                                                                                                                                                                                                                                                                                                                                           |
+| ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `promise` (default)          | `Object.prototype` members (`constructor`, `toString`, `toLocaleString`, `valueOf`, `hasOwnProperty`, `isPrototypeOf`, `propertyIsEnumerable`) and `then`, which would make the client a thenable; plus `HttpClient` members: `config`, `middleware`, `useMiddleware`, `buildUrl`, `request`, `applyErrorHook`, `httpGet`/`httpPost`/`httpPut`/`httpPatch`/`httpDelete`/`httpHead` |
+| `observable` &middot; `both` | The above, plus `RxHttpClient` members: `observe` and the `$` verb helpers (`httpGet$`, `httpPost$`, …)                                                                                                                                                                                                                                                                            |
 
 So `@get observe(): Widget[]` generates `client.observe()` under the default style, and `client.observeOperation()` once an Observable client is in the mix. Under `both`, the larger set applies to _both_ generated clients, so the Promise and Observable flavors stay method-for-method interchangeable.
 
@@ -187,7 +187,9 @@ import type { ClientRequestContext } from "@my-org/my-api-client";
 
 > The generated package's `exports` map only exposes the package root, so `@my-org/my-api-client/client/ApiClient.js` is **not** importable — use the aliased root export above. Rename the TypeSpec declaration if you would rather have the plain name back.
 
-The same applies inside a generated client module: if a model used as a response or request body is named `HttpClient`, `RequestOptions`, `Observable`, or after the interface's own `*Endpoints` object, the client's _infrastructure_ import is aliased and the model keeps the plain name in the method signatures.
+The same applies inside a generated client module: if a model used as a response or request body is named `HttpClient`, `RequestOptions`, `Observable`, or after the interface's own `*Endpoints` object, the client's _infrastructure_ import is aliased and the model keeps the plain name in the method signatures. The generated class itself counts too: `interface Http` declares `class HttpClient`, so its base-class import becomes `HttpClient as ClientHttpClient`.
+
+The one case where the **model** import is aliased instead is a model named after a global the client text references — `Promise`, `Record`, `Date`, or `Uint8Array`. Importing `Promise` from `models.ts` would shadow the global that every return type is wrapped in, so the client imports it as `Promise as PromiseModel` and uses that alias in its signatures. The model's exported name is unchanged; only the client module's local binding differs.
 
 When nothing collides, the barrel stays a plain list of `export *` lines.
 

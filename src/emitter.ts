@@ -2046,7 +2046,20 @@ function resolveBarrelModule(
  * shares a name with a private member of its base.
  */
 const BASE_CLIENT_MEMBERS: readonly string[] = [
+  // Inherited from Object.prototype. TypeScript does not type-check class
+  // members against Object's apparent members, so these compile — but an async
+  // `toString`/`valueOf` breaks string and number coercion of the client, and
+  // the rest are equally unreasonable to override with an HTTP call.
   "constructor",
+  "toString",
+  "toLocaleString",
+  "valueOf",
+  "hasOwnProperty",
+  "isPrototypeOf",
+  "propertyIsEnumerable",
+  // Not inherited, but a method named `then` makes every client instance a
+  // thenable: `await client` would fire a request with the resolver as query.
+  "then",
   "config",
   "middleware",
   "useMiddleware",
@@ -2163,6 +2176,7 @@ function buildClientView(
   const buildMethods = (
     modelImportSet: Set<string>,
     localNames: ClientLocalNames,
+    rename: Map<string, string>,
   ) =>
     ops.map((op) =>
       buildClientMethodView(
@@ -2173,7 +2187,7 @@ function buildClientView(
         models,
         enums,
         modelImportSet,
-        renameMap,
+        rename,
         siblingNames,
         reserved,
         localNames,
@@ -2181,24 +2195,75 @@ function buildClientView(
     );
 
   // The client's own model imports are only known once the method views have
-  // been built, but the local names those views reference depend on them — a
-  // model named `RequestOptions` forces the infrastructure import to be
-  // aliased. So build once to discover the imports, resolve the local names,
-  // then build again for real. Both passes are pure string work.
+  // been built, but the names those views reference depend on them — a model
+  // named `RequestOptions` forces the infrastructure import to be aliased, and
+  // a model named `Promise` must itself be aliased or it shadows the global
+  // every return type is wrapped in. So build once to discover the imports,
+  // resolve every local name, then build again for real. Both passes are pure
+  // string work.
   const discovered = new Set<string>();
-  buildMethods(discovered, defaultClientLocalNames(endpointsClassName));
-  const localNames = resolveClientLocalNames(endpointsClassName, discovered);
+  buildMethods(
+    discovered,
+    defaultClientLocalNames(endpointsClassName),
+    renameMap,
+  );
+  const localNames = resolveClientLocalNames(
+    endpointsClassName,
+    className,
+    discovered,
+  );
+  const globalAliases = resolveShadowedGlobalAliases(
+    discovered,
+    new Set([className, ...Object.values(localNames)]),
+  );
 
+  const clientRenameMap = new Map([...renameMap, ...globalAliases]);
   const modelImportSet = new Set<string>();
-  const methods = buildMethods(modelImportSet, localNames);
+  const methods = buildMethods(modelImportSet, localNames, clientRenameMap);
 
   return {
     className,
     endpointsClassName,
     methods,
-    modelImports: [...modelImportSet],
+    modelImports: [...modelImportSet].map((name) => {
+      const alias = globalAliases.get(name);
+      return alias ? `${name} as ${alias}` : name;
+    }),
     ...localNames,
   };
+}
+
+/**
+ * Global identifiers the generated client text references by name. A model
+ * import with one of these names would shadow the global inside the client
+ * module — `import type { Promise }` turns every `Promise<T>` return type into
+ * a reference to the user's model, which is not generic (TS2315).
+ */
+const CLIENT_REFERENCED_GLOBALS: readonly string[] = [
+  "Promise",
+  "Record",
+  "Date",
+  "Uint8Array",
+];
+
+/**
+ * For each model import that shadows a referenced global, picks a local alias
+ * (`Promise` → `PromiseModel`). Returned as a rename map so the same alias is
+ * used in both the import specifier and every type reference.
+ */
+function resolveShadowedGlobalAliases(
+  modelImports: ReadonlySet<string>,
+  taken: ReadonlySet<string>,
+): Map<string, string> {
+  const aliases = new Map<string, string>();
+  const claimed = new Set([...modelImports, ...taken]);
+  for (const name of CLIENT_REFERENCED_GLOBALS) {
+    if (!modelImports.has(name)) continue;
+    const alias = uniqueName(`${name}Model`, claimed);
+    claimed.add(alias);
+    aliases.set(name, alias);
+  }
+  return aliases;
 }
 
 /**
@@ -2232,12 +2297,17 @@ function defaultClientLocalNames(endpointsClassName: string): ClientLocalNames {
   };
 }
 
-/** Aliases each imported symbol that a model import would shadow. */
+/**
+ * Aliases each imported symbol that a model import — or the generated class
+ * itself — would shadow. `interface Http` declares `class HttpClient`, so its
+ * base-class import must become `HttpClient as ClientHttpClient`.
+ */
 function resolveClientLocalNames(
   endpointsClassName: string,
+  className: string,
   modelImports: ReadonlySet<string>,
 ): ClientLocalNames {
-  const taken = new Set(modelImports);
+  const taken = new Set([...modelImports, className]);
   const local = (imported: string): string => {
     if (!taken.has(imported)) return imported;
     const alias = uniqueName(`Client${imported}`, taken);
@@ -2316,7 +2386,10 @@ function buildClientMethodView(
         bodyType = resolvedRequestTypeName;
         modelImportSet.add(resolvedRequestTypeName);
       } else if (bodyModel.name && !isSynthesizedMergePatchModel(bodyModel)) {
-        bodyType = bodyModel.name;
+        // Through the rename map like every other type reference, so a model
+        // aliased to dodge a shadowed global (`Promise` → `PromiseModel`) is
+        // aliased here too. The import specifier is derived from the raw name.
+        bodyType = renameMap.get(bodyModel.name) ?? bodyModel.name;
         modelImportSet.add(bodyModel.name);
       }
     }

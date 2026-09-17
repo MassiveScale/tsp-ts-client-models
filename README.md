@@ -139,23 +139,23 @@ Each template receives the corresponding view model as its Handlebars context.
 
 **`client`** / **`clientObservable`** — `ClientView`
 
-| Field                            | Type                  | Description                                                                            |
-| -------------------------------- | --------------------- | -------------------------------------------------------------------------------------- |
-| `className`                      | `string`              | Generated class name, e.g. `WidgetsClient`.                                            |
-| `endpointsClassName`             | `string`              | Name to **import** from the endpoints module, and the module's file name.              |
-| `endpointsLocalName`             | `string`              | Name the method bodies **reference**. Differs from the above only on a name collision. |
-| `baseClassName`                  | `string`              | Local name for `HttpClient` — `"HttpClient"` unless aliased.                           |
-| `rxBaseClassName`                | `string`              | Local name for `RxHttpClient`.                                                         |
-| `requestOptionsName`             | `string`              | Local name for `RequestOptions`, as already embedded in `methodParams`.                |
-| `observableName`                 | `string`              | Local name for rxjs `Observable`.                                                      |
-| `modelImports[]`                 | `string[]`            | Deduplicated model type names imported from `../models.js`.                            |
-| `methods[]`                      | `ClientMethodView[]`  | Ordered list of client methods.                                                        |
-| `methods[].doc`                  | `string \| undefined` | Per-operation `@doc` text.                                                             |
-| `methods[].name`                 | `string`              | Method name (suffixed when the operation name is reserved).                            |
-| `methods[].methodParams`         | `string`              | Full parameter list, already rendered.                                                 |
-| `methods[].methodBody`           | `string`              | Promise-flavor body, already rendered.                                                 |
-| `methods[].methodBodyObservable` | `string`              | Observable-flavor body, already rendered.                                              |
-| `methods[].responseType`         | `string`              | Unwrapped response type; the template applies `Promise<…>` / `Observable<…>`.          |
+| Field                            | Type                  | Description                                                                                                                                                                                                                           |
+| -------------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `className`                      | `string`              | Generated class name, e.g. `WidgetsClient`.                                                                                                                                                                                           |
+| `endpointsClassName`             | `string`              | Name to **import** from the endpoints module, and the module's file name.                                                                                                                                                             |
+| `endpointsLocalName`             | `string`              | Name the method bodies **reference**. Differs from the above only on a name collision.                                                                                                                                                |
+| `baseClassName`                  | `string`              | Local name for `HttpClient` — `"HttpClient"` unless aliased.                                                                                                                                                                          |
+| `rxBaseClassName`                | `string`              | Local name for `RxHttpClient`.                                                                                                                                                                                                        |
+| `requestOptionsName`             | `string`              | Local name for `RequestOptions`, as already embedded in `methodParams`.                                                                                                                                                               |
+| `observableName`                 | `string`              | Local name for rxjs `Observable`.                                                                                                                                                                                                     |
+| `modelImports[]`                 | `string[]`            | Deduplicated import specifiers for `../models.js` — a bare name, or `Name as Alias` when the model shadows a global the client references (`Promise`, `Record`, `Date`, `Uint8Array`). Emit each verbatim inside `import type { … }`. |
+| `methods[]`                      | `ClientMethodView[]`  | Ordered list of client methods.                                                                                                                                                                                                       |
+| `methods[].doc`                  | `string \| undefined` | Per-operation `@doc` text.                                                                                                                                                                                                            |
+| `methods[].name`                 | `string`              | Method name (suffixed when the operation name is reserved).                                                                                                                                                                           |
+| `methods[].methodParams`         | `string`              | Full parameter list, already rendered.                                                                                                                                                                                                |
+| `methods[].methodBody`           | `string`              | Promise-flavor body, already rendered.                                                                                                                                                                                                |
+| `methods[].methodBodyObservable` | `string`              | Observable-flavor body, already rendered.                                                                                                                                                                                             |
+| `methods[].responseType`         | `string`              | Unwrapped response type; the template applies `Promise<…>` / `Observable<…>`.                                                                                                                                                         |
 
 The five local-name fields exist because a model used as a response or body can be named `HttpClient`, `RequestOptions`, `Observable`, or after the interface's own `*Endpoints` object. When that happens the model keeps the plain name and the **infrastructure import is aliased**, so a template must import under the declared name and reference the local one:
 
