@@ -51,6 +51,8 @@ import {
   EndpointMethodView,
   FileView,
   IndexView,
+  IndexBindingView,
+  IndexNamedExportView,
   ClientView,
   UnionView,
   TemplateOverrides,
@@ -548,6 +550,7 @@ async function emitVersion(
     [...enums.values()].some((e) => isEmittableEnum(e, nsFullName)) ||
     requestTypes.size > 0;
 
+  let generatedTypeNames: ReadonlySet<string> = new Set<string>();
   if (hasModels) {
     const content = buildModelsFile(
       nsFullName,
@@ -562,6 +565,10 @@ async function emitVersion(
       renderer,
       mergePatchRenameMap,
     );
+    // Read back from the emitted text rather than recomputing the name set, so
+    // the barrel's collision check can never disagree with what models.ts
+    // actually exports.
+    generatedTypeNames = collectExportedNames(content);
     await writeFile(program, resolvePath(vDir, "models.ts"), content);
   }
 
@@ -571,8 +578,29 @@ async function emitVersion(
   exports.push(...endpointExports);
   exports.push(...clientExports);
 
-  if (exports.length > 0) {
+  // A client infrastructure export sharing a name with a generated type makes
+  // the barrel's star export ambiguous (TS2308). Those modules switch to an
+  // explicit, aliased re-export; everything else keeps its `export *` line.
+  const namedExports: IndexNamedExportView[] = [];
+  for (const [path, moduleExports] of [
+    ["./client/ApiClient.js", API_CLIENT_EXPORTS],
+    ["./client/ApiClientRx.js", RX_API_CLIENT_EXPORTS],
+  ] as const) {
+    if (!exports.includes(path)) continue;
+    const named = buildInfrastructureExport(
+      program,
+      path,
+      moduleExports,
+      generatedTypeNames,
+    );
+    if (!named) continue;
+    exports.splice(exports.indexOf(path), 1);
+    namedExports.push(named);
+  }
+
+  if (exports.length > 0 || namedExports.length > 0) {
     const indexView: IndexView = { exports };
+    if (namedExports.length > 0) indexView.namedExports = namedExports;
     const indexContent = renderer.renderIndex(indexView);
     await writeFile(program, resolvePath(vDir, "index.ts"), indexContent);
   }
@@ -1658,14 +1686,47 @@ export class HttpClient {
     return this.request<T>("DELETE", path, options);
   }
 
-  protected httpHead(
+  /**
+   * Generic like the other verb helpers — a generated client renders
+   * \`this.httpHead<T>(…)\` uniformly — but defaulted to \`void\`, since a HEAD
+   * response has no body.
+   */
+  protected httpHead<T = void>(
     path: string,
     options?: RequestOptions & { query?: Record<string, unknown> },
-  ): Promise<void> {
-    return this.request<void>("HEAD", path, options);
+  ): Promise<T> {
+    return this.request<T>("HEAD", path, options);
   }
 }
 `;
+
+/**
+ * Top-level names exported by the static `client/ApiClient.ts` module, and
+ * whether each is type-only. The barrel needs this to re-export the module by
+ * explicit name when a star export would be ambiguous — and type-only names
+ * must go through `export type` so the emitted JavaScript does not reference a
+ * binding that exists only at compile time.
+ *
+ * Kept in sync with {@link API_CLIENT_CONTENT} by a test that re-reads the
+ * emitted file's own `export` declarations.
+ */
+export const API_CLIENT_EXPORTS: readonly { name: string; isType: boolean }[] =
+  [
+    { name: "RetryConfig", isType: true },
+    { name: "FetchFunction", isType: true },
+    { name: "HttpNext", isType: true },
+    { name: "HttpMiddleware", isType: true },
+    { name: "RequestContext", isType: true },
+    { name: "RequestHook", isType: true },
+    { name: "ResponseHook", isType: true },
+    { name: "ErrorHook", isType: true },
+    { name: "ClientConfig", isType: true },
+    { name: "RequestOptions", isType: true },
+    { name: "ApiError", isType: false },
+    { name: "RateLimitError", isType: false },
+    { name: "ServiceUnavailableError", isType: false },
+    { name: "HttpClient", isType: false },
+  ];
 
 // ─── client/ApiClientRx.ts — RxJS Observable transport ───────────────────────
 
@@ -1780,17 +1841,84 @@ export class RxHttpClient extends HttpClient {
     );
   }
 
-  protected httpHead$(
+  protected httpHead$<T = void>(
     path: string,
     options?: RequestOptions & { query?: Record<string, unknown> },
-  ): Observable<void> {
-    return this.observe<void>(
-      (signal) => this.httpHead(path, { ...options, signal }),
+  ): Observable<T> {
+    return this.observe<T>(
+      (signal) => this.httpHead<T>(path, { ...options, signal }),
       options?.signal,
     );
   }
 }
 `;
+
+/**
+ * Top-level names exported by the static `client/ApiClientRx.ts` module.
+ * See {@link API_CLIENT_EXPORTS}.
+ */
+export const RX_API_CLIENT_EXPORTS: readonly {
+  name: string;
+  isType: boolean;
+}[] = [{ name: "RxHttpClient", isType: false }];
+
+/** Reads the top-level `export` declarations out of a generated module. */
+function collectExportedNames(source: string): Set<string> {
+  const names = new Set<string>();
+  const pattern =
+    /^export\s+(?:interface|type|class|enum|const|function)\s+(\w+)/gm;
+  for (const match of source.matchAll(pattern)) names.add(match[1]);
+  return names;
+}
+
+/**
+ * Builds the barrel entry for a client infrastructure module.
+ *
+ * The barrel star-exports every generated module, so an infrastructure export
+ * whose name is also a model, enum, or request type name makes the star export
+ * ambiguous and the generated package fails to compile (TS2308). When that
+ * happens the module is re-exported by explicit name instead, and the colliding
+ * infrastructure name is aliased — the user's own type keeps the plain name,
+ * since that is the API the package exists to expose.
+ *
+ * Returns `undefined` when nothing collides, so the common case keeps its
+ * simpler `export *` line and byte-identical output.
+ */
+function buildInfrastructureExport(
+  program: Program,
+  from: string,
+  moduleExports: readonly { name: string; isType: boolean }[],
+  generatedTypeNames: ReadonlySet<string>,
+): IndexNamedExportView | undefined {
+  if (!moduleExports.some((e) => generatedTypeNames.has(e.name))) {
+    return undefined;
+  }
+
+  const taken = new Set([
+    ...generatedTypeNames,
+    ...moduleExports.map((e) => e.name),
+  ]);
+  const values: IndexBindingView[] = [];
+  const types: IndexBindingView[] = [];
+
+  for (const { name, isType } of moduleExports) {
+    let alias: string | undefined;
+    if (generatedTypeNames.has(name)) {
+      alias = `Client${name}`;
+      let suffix = 2;
+      while (taken.has(alias)) alias = `Client${name}${suffix++}`;
+      taken.add(alias);
+      reportDiagnostic(program, {
+        code: "client-infrastructure-name-collision",
+        format: { name, alias, module: from },
+        target: NoTarget,
+      });
+    }
+    (isType ? types : values).push(alias ? { name, alias } : { name });
+  }
+
+  return { from, values, types };
+}
 
 // ─── client/{Name}Client.ts generation ───────────────────────────────────────
 

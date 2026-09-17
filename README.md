@@ -125,9 +125,17 @@ Each template receives the corresponding view model as its Handlebars context.
 
 **`index`** — `IndexView`
 
-| Field       | Type       | Description                                                   |
-| ----------- | ---------- | ------------------------------------------------------------- |
-| `exports[]` | `string[]` | Ordered list of relative import paths (with `.js` extension). |
+| Field                      | Type                      | Description                                                                                       |
+| -------------------------- | ------------------------- | ------------------------------------------------------------------------------------------------- |
+| `exports[]`                | `string[]`                | Ordered list of relative import paths star-exported (`export * from …`).                          |
+| `namedExports[]`           | `IndexNamedExportView[]?` | Modules re-exported by explicit name instead of a star. Absent unless a name collision forced it. |
+| `namedExports[].from`      | `string`                  | Relative import path (with `.js` extension).                                                      |
+| `namedExports[].values[]`  | `IndexBindingView[]`      | Runtime bindings, to emit as `export { … } from`.                                                 |
+| `namedExports[].types[]`   | `IndexBindingView[]`      | Type-only bindings, to emit as `export type { … } from`.                                          |
+| `namedExports[].*[].name`  | `string`                  | Name as exported by the source module.                                                            |
+| `namedExports[].*[].alias` | `string \| undefined`     | Name to re-export it under, when it must differ to avoid a collision.                             |
+
+`namedExports` is only populated when a client infrastructure export (e.g. `RequestContext`) shares a name with a generated model or enum — see [Name collisions](docs/http-client.md#reserved-method-names). A custom `index` template that ignores it will emit a package that fails to compile in that case.
 
 ### Built-in Handlebars helpers
 

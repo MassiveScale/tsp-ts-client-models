@@ -2179,6 +2179,118 @@ describe("emitter", () => {
     );
   });
 
+  it("keeps plain star exports in the barrel when nothing collides", async () => {
+    const results = await emit(`
+      import "@typespec/http";
+      using Http;
+
+      @service(#{ title: "Test API" })
+      namespace TestApi;
+
+      model Widget { id: string; name: string; }
+
+      @route("/widgets")
+      interface Widgets { @get list(): Widget[]; }
+    `);
+
+    const indexFile = Object.keys(results).find((k) => k.endsWith("index.ts"));
+    ok(indexFile, "Expected index.ts");
+    const body = results[indexFile]
+      .split("\n")
+      .filter((l) => l.startsWith("export"))
+      .join("\n");
+
+    strictEqual(
+      body,
+      [
+        'export * from "./models.js";',
+        'export * from "./endpoints/WidgetsEndpoints.js";',
+        'export * from "./client/ApiClient.js";',
+        'export * from "./client/WidgetsClient.js";',
+      ].join("\n"),
+      "The no-collision barrel must stay a plain list of star exports",
+    );
+  });
+
+  it("aliases a client infrastructure export that collides with a model", async () => {
+    const [results, diags] = await emitWithDiagnostics(`
+      import "@typespec/http";
+      using Http;
+
+      @service(#{ title: "Test API" })
+      namespace TestApi;
+
+      model RequestContext { id: string; }
+      model Widget { id: string; ctx: RequestContext; }
+
+      @route("/widgets")
+      interface Widgets { @get list(): Widget[]; }
+    `);
+
+    const indexFile = Object.keys(results).find((k) => k.endsWith("index.ts"));
+    ok(indexFile, "Expected index.ts");
+    const index = results[indexFile];
+
+    ok(
+      index.includes('export * from "./models.js";'),
+      "The model keeps the plain name — it is the package's actual API",
+    );
+    ok(
+      !index.includes('export * from "./client/ApiClient.js";'),
+      "The ambiguous star export must be replaced",
+    );
+    ok(
+      index.includes("  RequestContext as ClientRequestContext,"),
+      "The infrastructure export is aliased",
+    );
+    // Type-only names must not be re-exported as runtime bindings.
+    ok(index.includes("export type {"), "Expected a type-only re-export group");
+    const valueGroup = index.slice(
+      index.indexOf("export {"),
+      index.indexOf("export type {"),
+    );
+    ok(valueGroup.includes("ApiError,"), "Classes go in the value group");
+    ok(
+      !valueGroup.includes("RequestContext"),
+      "Interfaces must not go in the value group",
+    );
+
+    const warnings = diags.filter(
+      (d) =>
+        d.code ===
+        "@massivescale/tsp-ts-client-models/client-infrastructure-name-collision",
+    );
+    strictEqual(warnings.length, 1, "Expected one collision warning");
+    ok(
+      warnings[0].message.includes("ClientRequestContext"),
+      "The warning names the alias",
+    );
+  });
+
+  it("numbers an alias that would itself collide", async () => {
+    const [results] = await emitWithDiagnostics(`
+      import "@typespec/http";
+      using Http;
+
+      @service(#{ title: "Test API" })
+      namespace TestApi;
+
+      model RequestContext { id: string; }
+      model ClientRequestContext { id: string; }
+      model Widget { id: string; a: RequestContext; b: ClientRequestContext; }
+
+      @route("/widgets")
+      interface Widgets { @get list(): Widget[]; }
+    `);
+
+    const indexFile = Object.keys(results).find((k) => k.endsWith("index.ts"));
+    ok(indexFile, "Expected index.ts");
+    ok(
+      results[indexFile].includes("  RequestContext as ClientRequestContext2,"),
+      "Expected the alias to be numbered past the taken name",
+    );
+  });
+
   it("serializes the request body inside the error-handled block", async () => {
     const results = await emit(`
       import "@typespec/http";

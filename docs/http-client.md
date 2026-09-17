@@ -149,6 +149,33 @@ The reserved names are `constructor`, `config`, `middleware`, `useMiddleware`, `
 
 The `*Endpoints` object is a plain `as const` and inherits nothing, so its keys always keep the original operation name. Rename the operation in TypeSpec if you want the method name back.
 
+### Infrastructure name collisions
+
+`index.ts` star-exports every generated module, so a model or enum sharing a name with a client infrastructure export — `RequestContext`, `ClientConfig`, `ApiError`, `RetryConfig`, `HttpMiddleware`, and the rest of [`ApiClient.ts`](#apiclientts) — would make the re-export ambiguous and the package would not compile (TS2308).
+
+When that happens the barrel re-exports `ApiClient.ts` by explicit name instead of with a star, and aliases the infrastructure name with a `Client` prefix. **Your model keeps the plain name**, since that is the API the package exists to expose:
+
+```typespec
+model RequestContext { id: string; }
+```
+
+```typescript
+// index.ts
+export * from "./models.js"; // RequestContext = your model
+export { ApiError, HttpClient /* … */ } from "./client/ApiClient.js";
+export type {
+  RequestContext as ClientRequestContext /* … */,
+} from "./client/ApiClient.js";
+```
+
+A `client-infrastructure-name-collision` warning reports each substitution. To use the infrastructure type under its original name, import it from the module directly:
+
+```typescript
+import type { RequestContext } from "@my-org/my-api-client/client/ApiClient.js";
+```
+
+When nothing collides, the barrel stays a plain list of `export *` lines.
+
 ## Query parameters
 
 Every generated client method accepts an optional `query` object, whether or not the TypeSpec operation declares any `@query` parameters, and regardless of HTTP verb (`GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `HEAD` all support it).

@@ -1,2 +1,18 @@
 {{#each exports}}export * from "{{this}}";
 {{/each}}
+{{#each namedExports}}
+{{#if values.length}}
+export {
+{{#each values}}
+  {{name}}{{#if alias}} as {{alias}}{{/if}},
+{{/each}}
+} from "{{from}}";
+{{/if}}
+{{#if types.length}}
+export type {
+{{#each types}}
+  {{name}}{{#if alias}} as {{alias}}{{/if}},
+{{/each}}
+} from "{{from}}";
+{{/if}}
+{{/each}}
