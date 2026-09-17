@@ -30,8 +30,17 @@ interface ClientConfig {
   defaultHeaders?: Record<string, string>; // Sent with every request.
   timeout?: number; // Milliseconds. Uses AbortSignal.timeout().
   retry?: RetryConfig;
+
+  // Extensibility — see docs/client-extensibility.md
+  fetch?: FetchFunction; // Custom transport. Default: the global fetch.
+  middleware?: HttpMiddleware[]; // Onion-style layers, outermost first.
+  onRequest?: RequestHook; // Before middleware, once per attempt.
+  onResponse?: ResponseHook; // After middleware, once per attempt.
+  onError?: ErrorHook; // Once, after retries are exhausted.
 }
 ```
+
+`fetch`, `middleware`, and the three hooks let you inject your own transport, attach access tokens, and route failures into an app-level error handler without wrapping every call site. See [Extending the generated client](client-extensibility.md) — that page covers the full pipeline, including where each piece runs relative to retry.
 
 ### `RetryConfig`
 
@@ -60,20 +69,36 @@ interface RequestOptions {
 
 ### Error classes
 
-| Class                     | Status | When thrown                      |
-| ------------------------- | ------ | -------------------------------- |
-| `ApiError`                | any    | Non-2xx after all retry attempts |
-| `RateLimitError`          | 429    | Subclass of `ApiError`           |
-| `ServiceUnavailableError` | 503    | Subclass of `ApiError`           |
+| Class                     | Status | Extra properties                           |
+| ------------------------- | ------ | ------------------------------------------ |
+| `ApiError`                | any    | `status`, `statusText`, `body`, `response` |
+| `RateLimitError`          | 429    | `retryAfterMs` (parsed from `Retry-After`) |
+| `ServiceUnavailableError` | 503    | —                                          |
+
+All three are thrown for a non-2xx response after the retry attempts are exhausted. `RateLimitError` and `ServiceUnavailableError` extend `ApiError`, so `instanceof ApiError` catches every case.
 
 ```typescript
 try {
   await client.create(payload);
 } catch (err) {
-  if (err instanceof ApiError) {
+  if (err instanceof RateLimitError) {
+    await sleep(err.retryAfterMs ?? 60_000);
+  } else if (err instanceof ApiError) {
     console.error(err.status, err.statusText, err.body);
+    console.error(err.response?.headers.get("X-Request-Id"));
   }
 }
+```
+
+`err.response` is the originating `Response`, useful for status and headers. Its body is already consumed — the parsed value is on `err.body`.
+
+To route every failure into a handler you already have, use the `onError` hook instead of a `try`/`catch` at each call site:
+
+```typescript
+const client = new WidgetsClient({
+  baseUrl,
+  onError: (error, context) => appErrorHandler.report(error, context),
+});
 ```
 
 ## Generated client classes
@@ -105,6 +130,110 @@ export class WidgetsClient extends HttpClient {
 - If a request type was generated for the body model, the body parameter uses that type (e.g. `WidgetPostRequest`). Otherwise the raw model is used.
 - The response type is the TypeScript equivalent of the first 2xx response body. Operations with no body response use `void`.
 - Every method accepts an optional `query` parameter, regardless of HTTP verb — see [Query parameters](#query-parameters).
+
+### Reserved method names
+
+A generated client extends `HttpClient`, so an operation whose name matches an inherited member would shadow it with an incompatible signature and the generated package would not compile. Those operations get an `Operation` suffix on the **client method only**, and the emitter reports a `reserved-client-method-name` warning naming the substitution:
+
+```typespec
+@get request(): Widget[];   // collides with HttpClient.request
+```
+
+```typescript
+async requestOperation(…): Promise<Widget[]> {
+  return this.httpGet<Widget[]>(WidgetsEndpoints.request(), …); // endpoint name unchanged
+}
+```
+
+Which names are reserved depends on the base class your client actually extends, so a Promise-only build does not give up names that exist only on `RxHttpClient`:
+
+| `client-style`               | Reserved                                                                                                                                                                                                                                                                                                                                                                           |
+| ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `promise` (default)          | `Object.prototype` members (`constructor`, `toString`, `toLocaleString`, `valueOf`, `hasOwnProperty`, `isPrototypeOf`, `propertyIsEnumerable`) and `then`, which would make the client a thenable; plus `HttpClient` members: `config`, `middleware`, `useMiddleware`, `buildUrl`, `request`, `applyErrorHook`, `httpGet`/`httpPost`/`httpPut`/`httpPatch`/`httpDelete`/`httpHead` |
+| `observable` &middot; `both` | The above, plus `RxHttpClient` members: `observe` and the `$` verb helpers (`httpGet$`, `httpPost$`, …)                                                                                                                                                                                                                                                                            |
+
+So `@get observe(): Widget[]` generates `client.observe()` under the default style, and `client.observeOperation()` once an Observable client is in the mix. Under `both`, the larger set applies to _both_ generated clients, so the Promise and Observable flavors stay method-for-method interchangeable.
+
+The `*Endpoints` object is a plain `as const` and inherits nothing, so its keys always keep the original operation name. Rename the operation in TypeSpec if you want the method name back.
+
+### Export name collisions
+
+`index.ts` star-exports every generated module, so two modules exporting the same name would make the re-export ambiguous and the package would not compile (TS2308). This happens when a TypeSpec declaration is named after something the emitter also generates — an infrastructure export like `RequestContext`, `ClientConfig` or `ApiError`, an endpoint object like `WidgetsEndpoints`, or a client class like `WidgetsClient`.
+
+The barrel resolves it by priority. Whichever module comes first keeps the plain name; later ones are re-exported explicitly, with a `Client` prefix:
+
+1. **Declared TypeSpec types** (`models.ts`) — always keep the plain name.
+2. **Generated endpoint objects and client classes.**
+3. **Static client infrastructure** (`ApiClient.ts`, `ApiClientRx.ts`).
+
+```typespec
+model RequestContext { id: string; }
+```
+
+```typescript
+// index.ts
+export * from "./models.js"; // RequestContext = your model
+export { ApiError, HttpClient /* … */ } from "./client/ApiClient.js";
+export type {
+  RequestContext as ClientRequestContext /* … */,
+} from "./client/ApiClient.js";
+```
+
+A `generated-export-name-collision` warning reports each substitution. The aliased name is a normal root export, so the infrastructure type is still reachable:
+
+```typescript
+import type { ClientRequestContext } from "@my-org/my-api-client";
+```
+
+> The generated package's `exports` map only exposes the package root, so `@my-org/my-api-client/client/ApiClient.js` is **not** importable — use the aliased root export above. Rename the TypeSpec declaration if you would rather have the plain name back.
+
+The same applies inside a generated client module: if a model used as a response or request body is named `HttpClient`, `RequestOptions`, `Observable`, or after the interface's own `*Endpoints` object, the client's _infrastructure_ import is aliased and the model keeps the plain name in the method signatures. The generated class itself counts too: `interface Http` declares `class HttpClient`, so its base-class import becomes `HttpClient as ClientHttpClient`.
+
+The one case where the **model** import is aliased instead is a model named after a global the client text references — `Promise`, `Record`, `Date`, or `Uint8Array`. Importing `Promise` from `models.ts` would shadow the global that every return type is wrapped in, so the client imports it as `Promise as PromiseModel` and uses that alias in its signatures. The model's exported name is unchanged; only the client module's local binding differs.
+
+### Shadowed globals in `models.ts`
+
+The same clash happens inside `models.ts`, where the type is _declared_ rather than imported — and there it is quieter, because it still compiles. A model or enum named `Date` or `Uint8Array` shadows the global that `utcDateTime` and `bytes` map to, so a sibling model's property would silently be typed as the user's own interface:
+
+```typespec
+model Date { id: string; }
+model Widget { when: utcDateTime; shadow: Date; }
+```
+
+The emitter detects this, reports a `shadowed-global-type` warning, and declares a non-exported alias that recovers the real global:
+
+```typescript
+/** The global `Date`, aliased because a generated type shadows that name. */
+type GlobalDate = InstanceType<typeof globalThis.Date>;
+
+export interface Widget {
+  when: GlobalDate; // the JS Date, as intended
+  shadow: Date; // the user's own model, unchanged
+}
+export interface Date {
+  id: string;
+}
+```
+
+A plain `type GlobalDate = Date` would not work — module-scope declarations are hoisted, so it would resolve to the shadowing interface too. Going through `globalThis` sidesteps the type namespace, and reading `.prototype` off the constructor keeps the alias from depending on any other name: an `InstanceType<…>` form would itself break for a spec that declares `model InstanceType`. The alias is not exported, so it never reaches the package barrel.
+
+Aliasing is name-only, so a generic model keeps its arguments — `Date<string>` becomes `DateModel<string>`, not a bare `DateModel`.
+
+`Record` needs no such handling: TypeSpec rejects a `model Record` declaration outright, since it shadows TypeSpec's own built-in template.
+
+When nothing collides, the barrel stays a plain list of `export *` lines.
+
+### Client module name collisions
+
+Generated client class names are allocated from one shared pool, so no two land on the same file. A client steps aside — taking a numeric suffix and reporting a `client-module-name-collision` warning — when its preferred name is already taken by:
+
+| Case                      | Example                                                                                              | Result                 |
+| ------------------------- | ---------------------------------------------------------------------------------------------------- | ---------------------- |
+| The static infrastructure | `interface Api` → `client/ApiClient.ts`                                                              | `ApiClient2`           |
+| Another generated client  | `interface Foo` (Observable) and `interface FooObservable` (Promise) both want `FooObservableClient` | `FooObservableClient2` |
+| A declared type           | `model WidgetsClient` alongside `interface Widgets`                                                  | `WidgetsClient2`       |
+
+The infrastructure path cannot move (every client imports `./ApiClient.js`) and a declared type keeps its own name, so the generated client is what yields. Rename the interface — or the type it collides with — to get the plain name back.
 
 ## Query parameters
 
@@ -198,6 +327,7 @@ The method signatures, path/body/query parameters, and `RequestOptions` are iden
 - **Cold:** the underlying `fetch` fires on `subscribe`, not when the Observable is created. Each subscription triggers its own request; use `shareReplay`/`share` (or Angular's `async` pipe with a single subscription) if you need to share one result across subscribers.
 - **Cancellation:** unsubscribing aborts the in-flight request via `AbortController`. A `RequestOptions.signal` you pass also aborts it, and a configured `timeout` still applies.
 - **Errors:** `ApiError` / `RateLimitError` / `ServiceUnavailableError` are delivered via the Observable's error channel, so `catchError` sees the same types as the Promise client. Retry/backoff and timeout behavior are shared with `HttpClient` — `RxHttpClient` reuses the same transport.
+- **Extensibility:** `config.fetch`, `config.middleware`, `client.useMiddleware()`, and the `onRequest`/`onResponse`/`onError` hooks all behave identically, for the same reason. `onError` fires before the error reaches `subscriber.error`, so a `catchError` downstream sees whatever the hook decided to throw.
 
 ```typescript
 import { WidgetsObservableClient } from "@my-org/my-api-client";
@@ -220,7 +350,22 @@ See [Using in Angular](environments/angular.md) for the full Angular integration
 
 ## Extending the client
 
-You can extend any generated client to add shared logic:
+Three extension points are built into every generated client — a custom `fetch` transport, an onion-style middleware pipeline, and `onRequest`/`onResponse`/`onError` hooks:
+
+```typescript
+const client = new WidgetsClient({
+  baseUrl: "https://api.example.com",
+  fetch: myTransport,
+  middleware: [authMiddleware, loggingMiddleware],
+  onError: (error) => appErrorHandler.report(error),
+});
+
+client.useMiddleware(tracingMiddleware); // also registerable after construction
+```
+
+Middleware and the request/response hooks run **once per retry attempt**, so a layer that refreshes an expired token sees every attempt. `onError` runs **once**, after the last attempt fails. See [Extending the generated client](client-extensibility.md) for the full pipeline, worked examples (auth, refresh-on-401, caching, logging, test stubs, axios/Angular adapters), and the `Request`/`Response` rules for writing middleware.
+
+Subclassing still works too:
 
 ```typescript
 import { WidgetsClient, type ClientConfig } from "@my-org/my-api-client";

@@ -145,6 +145,30 @@ export const $lib = createTypeSpecLibrary({
         missingTag: paramMessage`Request type "${"name"}" collision: operation "${"op"}" has no @tag for disambiguation. Add @tag to all conflicting operations.`,
       },
     },
+    "client-module-name-collision": {
+      severity: "warning",
+      messages: {
+        default: paramMessage`The generated client for this interface would be written to "client/${"preferred"}.ts", but that name is already taken — by the emitter's client infrastructure, by another generated client, or by a declared type of the same name. It was emitted as "${"resolved"}" instead. Rename the interface, or the type it collides with, to keep the name you intended.`,
+      },
+    },
+    "shadowed-global-type": {
+      severity: "warning",
+      messages: {
+        default: paramMessage`A generated type is named "${"name"}", which shadows the global type of that name inside models.ts. Properties that map to the global (e.g. \`utcDateTime\` → \`Date\`, \`bytes\` → \`Uint8Array\`) now reference "${"alias"}" so they keep their intended type. Rename the TypeSpec declaration to avoid the alias.`,
+      },
+    },
+    "generated-export-name-collision": {
+      severity: "warning",
+      messages: {
+        default: paramMessage`"${"name"}" is exported by more than one generated module. The copy in "${"module"}" is re-exported from the package root as "${"alias"}" so the barrel stays unambiguous. Rename the colliding TypeSpec declaration to avoid the alias.`,
+      },
+    },
+    "reserved-client-method-name": {
+      severity: "warning",
+      messages: {
+        default: paramMessage`Operation "${"name"}" collides with "${"name"}" inherited from the generated client base class, so the client method was emitted as "${"renamed"}" instead. Rename the operation to keep the method name you intended.`,
+      },
+    },
   },
   emitter: {
     options: EmitterOptionsSchema,

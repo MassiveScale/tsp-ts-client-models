@@ -1,6 +1,6 @@
 {
   "name": "@massivescale/tsp-ts-client-models",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "type": "module",
   "main": "dist/src/index.js",
   "exports": {
@@ -40,7 +40,8 @@
     "lint": "eslint src/ test/ --report-unused-disable-directives --max-warnings=0",
     "lint:fix": "eslint . --report-unused-disable-directives --fix",
     "format": "prettier .  --write",
-    "format:check": "prettier --check ."
+    "format:check": "prettier --check .",
+    "sweep": "node scripts/name-collision-sweep.mjs"
   },
   "packageManager": "npm@11.14.1+sha512.6a8a4d67478497a2dbc6815cad72e64c43f33413717e242756047d466241ab39bee61e691683a64658e94496ec5f1a1c05e4a5ec62dcc773280dfd949443a367"
 }

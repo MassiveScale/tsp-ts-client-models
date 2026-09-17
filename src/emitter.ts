@@ -51,6 +51,8 @@ import {
   EndpointMethodView,
   FileView,
   IndexView,
+  IndexBindingView,
+  IndexNamedExportView,
   ClientView,
   UnionView,
   TemplateOverrides,
@@ -450,9 +452,84 @@ async function emitVersion(
   const emitObservableClient =
     clientStyle === "observable" || clientStyle === "both";
 
+  // models.ts is rendered up front — before any client — because a generated
+  // client class must be allocated around the type names it exports. A client
+  // class named after a model would both import and declare that name. The
+  // collection passes above are what discover types, so rendering here sees
+  // exactly what rendering later would.
+  const hasModels =
+    [...models.values()].some((m) => isEmittable(m, nsFullName)) ||
+    [...enums.values()].some((e) => isEmittableEnum(e, nsFullName)) ||
+    requestTypes.size > 0;
+
+  let modelsContent: string | undefined;
+  let generatedTypeNames: ReadonlySet<string> = new Set<string>();
+  if (hasModels) {
+    modelsContent = buildModelsFile(
+      nsFullName,
+      models,
+      enums,
+      requestTypes,
+      requestTypeBaseModels,
+      readResponseModelNames,
+      discriminatedUnions,
+      discriminatedRequestUnions,
+      program,
+      renderer,
+      mergePatchRenameMap,
+    );
+    // Read back from the emitted text rather than recomputing the name set, so
+    // the collision checks can never disagree with what models.ts exports.
+    generatedTypeNames = collectExportedNames(modelsContent);
+
+    // A generated type named after a global that scalars map to shadows it
+    // inside this very file. Re-render with those scalar references pointed at
+    // an alias instead. Rendering is pure, so a second pass is safe — and it
+    // only happens for the rare spec that triggers it.
+    const shadowed = resolveShadowedScalarGlobals(generatedTypeNames);
+    if (shadowed.aliases.size > 0) {
+      for (const [global, alias] of shadowed.aliases) {
+        reportDiagnostic(program, {
+          code: "shadowed-global-type",
+          format: { name: global, alias },
+          target: NoTarget,
+        });
+      }
+      modelsContent = buildModelsFile(
+        nsFullName,
+        models,
+        enums,
+        requestTypes,
+        requestTypeBaseModels,
+        readResponseModelNames,
+        discriminatedUnions,
+        discriminatedRequestUnions,
+        program,
+        renderer,
+        new Map([
+          ...mergePatchRenameMap,
+          ...[...shadowed.aliases].map(
+            ([global, alias]) => [`scalar:${global}`, alias] as const,
+          ),
+        ]),
+        shadowed.declarations,
+      );
+    }
+  }
+
   // Emit endpoint files and (optionally) client files; collect exports for index
   const endpointExports: string[] = [];
   const clientExports: string[] = [];
+  // Per-interface modules the barrel re-exports, in emit order. They outrank
+  // the static client infrastructure but yield to declared TypeSpec types.
+  const generatedModules: BarrelModule[] = [];
+  // One shared pool for every generated client module name, so the two flavors
+  // cannot claim the same file as each other, as the static infrastructure, or
+  // as a declared type.
+  const takenClientNames = new Set<string>([
+    ...INFRASTRUCTURE_MODULE_NAMES,
+    ...generatedTypeNames,
+  ]);
 
   for (const { name, container, ops } of byContainer.values()) {
     const vOps = version
@@ -473,11 +550,30 @@ async function emitVersion(
     const relPath = `endpoints/${name}Endpoints.ts`;
     await writeFile(program, resolvePath(vDir, relPath), content);
     endpointExports.push(`./endpoints/${name}Endpoints.js`);
+    generatedModules.push({
+      path: `./endpoints/${name}Endpoints.js`,
+      exports: [{ name: className, isType: false }],
+    });
+
+    // Which names are off-limits depends on which base class the generated
+    // client extends, so a Promise-only build does not reserve RxHttpClient's
+    // members.
+    const reservedMembers = reservedClientMembers(emitObservableClient);
+
+    if (generateClient) {
+      reportReservedClientMethodNames(program, vOps, reservedMembers);
+    }
 
     if (generateClient && emitPromiseClient) {
+      const clientClassName = allocateClientModuleName(
+        program,
+        `${name}Client`,
+        container,
+        takenClientNames,
+      );
       const view = buildClientView(
         name,
-        `${name}Client`,
+        clientClassName,
         vOps,
         requestTypes,
         discriminatedRequestUnions,
@@ -485,19 +581,30 @@ async function emitVersion(
         models,
         enums,
         mergePatchRenameMap,
+        reservedMembers,
       );
       await writeFile(
         program,
-        resolvePath(vDir, `client/${name}Client.ts`),
+        resolvePath(vDir, `client/${clientClassName}.ts`),
         renderer.renderClient(view),
       );
-      clientExports.push(`./client/${name}Client.js`);
+      clientExports.push(`./client/${clientClassName}.js`);
+      generatedModules.push({
+        path: `./client/${clientClassName}.js`,
+        exports: [{ name: clientClassName, isType: false }],
+      });
     }
 
     if (generateClient && emitObservableClient) {
+      const observableClassName = allocateClientModuleName(
+        program,
+        `${name}ObservableClient`,
+        container,
+        takenClientNames,
+      );
       const view = buildClientView(
         name,
-        `${name}ObservableClient`,
+        observableClassName,
         vOps,
         requestTypes,
         discriminatedRequestUnions,
@@ -505,13 +612,18 @@ async function emitVersion(
         models,
         enums,
         mergePatchRenameMap,
+        reservedMembers,
       );
       await writeFile(
         program,
-        resolvePath(vDir, `client/${name}ObservableClient.ts`),
+        resolvePath(vDir, `client/${observableClassName}.ts`),
         renderer.renderObservableClient(view),
       );
-      clientExports.push(`./client/${name}ObservableClient.js`);
+      clientExports.push(`./client/${observableClassName}.js`);
+      generatedModules.push({
+        path: `./client/${observableClassName}.js`,
+        exports: [{ name: observableClassName, isType: false }],
+      });
     }
   }
 
@@ -538,27 +650,8 @@ async function emitVersion(
     clientExports.unshift("./client/ApiClient.js");
   }
 
-  // Emit models.ts if there's anything to export
-  const hasModels =
-    [...models.values()].some((m) => isEmittable(m, nsFullName)) ||
-    [...enums.values()].some((e) => isEmittableEnum(e, nsFullName)) ||
-    requestTypes.size > 0;
-
-  if (hasModels) {
-    const content = buildModelsFile(
-      nsFullName,
-      models,
-      enums,
-      requestTypes,
-      requestTypeBaseModels,
-      readResponseModelNames,
-      discriminatedUnions,
-      discriminatedRequestUnions,
-      program,
-      renderer,
-      mergePatchRenameMap,
-    );
-    await writeFile(program, resolvePath(vDir, "models.ts"), content);
+  if (modelsContent !== undefined) {
+    await writeFile(program, resolvePath(vDir, "models.ts"), modelsContent);
   }
 
   // Emit index.ts
@@ -567,8 +660,29 @@ async function emitVersion(
   exports.push(...endpointExports);
   exports.push(...clientExports);
 
-  if (exports.length > 0) {
+  // Two modules exporting the same name make the barrel's star export
+  // ambiguous (TS2308). Resolve in priority order — declared TypeSpec types,
+  // then per-interface generated modules, then the static infrastructure — so
+  // the name a consumer is most likely to reach for stays unaliased. A module
+  // that has to alias switches to an explicit re-export; the rest keep their
+  // `export *` line.
+  const claimed = new Set<string>(generatedTypeNames);
+  const namedExports: IndexNamedExportView[] = [];
+  const infrastructureModules: BarrelModule[] = [
+    { path: "./client/ApiClient.js", exports: API_CLIENT_EXPORTS },
+    { path: "./client/ApiClientRx.js", exports: RX_API_CLIENT_EXPORTS },
+  ];
+  for (const module of [...generatedModules, ...infrastructureModules]) {
+    if (!exports.includes(module.path)) continue;
+    const named = resolveBarrelModule(program, module, claimed);
+    if (!named) continue;
+    exports.splice(exports.indexOf(module.path), 1);
+    namedExports.push(named);
+  }
+
+  if (exports.length > 0 || namedExports.length > 0) {
     const indexView: IndexView = { exports };
+    if (namedExports.length > 0) indexView.namedExports = namedExports;
     const indexContent = renderer.renderIndex(indexView);
     await writeFile(program, resolvePath(vDir, "index.ts"), indexContent);
   }
@@ -1035,8 +1149,9 @@ function buildModelsFile(
   program: Program,
   renderer: Renderer,
   renameMap: Map<string, string>,
+  prelude: string[] = [],
 ): string {
-  const parts: string[] = [];
+  const parts: string[] = [...prelude];
 
   for (const [, e] of enums) {
     if (!isEmittableEnum(e, nsFullName)) continue;
@@ -1310,6 +1425,73 @@ const API_CLIENT_CONTENT = `export interface RetryConfig {
   retryOn?: number[];
 }
 
+/**
+ * A \`fetch\`-compatible transport: anything that takes a \`Request\` and resolves
+ * to a \`Response\`. The global \`fetch\` satisfies this type, as does a wrapper
+ * around \`axios\`, Angular's \`HttpClient\`, or a stub used in tests.
+ */
+export type FetchFunction = (request: Request) => Promise<Response>;
+
+/** Invokes the remainder of the middleware chain. */
+export type HttpNext = (request: Request) => Promise<Response>;
+
+/**
+ * Onion-style middleware. Receives the outgoing \`Request\` plus a \`next\`
+ * callback representing the rest of the chain, and returns the \`Response\`.
+ *
+ * Middleware runs once per retry attempt, so a layer that refreshes an expired
+ * token sees every attempt. Layers listed earlier in
+ * {@link ClientConfig.middleware} wrap the ones listed later.
+ *
+ * A \`Request\` body may only be read once — call \`request.clone()\` before
+ * inspecting it, and build a modified request with \`new Request(request, …)\`
+ * so the original \`AbortSignal\` is preserved.
+ */
+export type HttpMiddleware = (
+  request: Request,
+  next: HttpNext,
+) => Promise<Response>;
+
+/** Identifies the call a hook is observing. */
+export interface RequestContext {
+  /** HTTP method of the request, e.g. \`"GET"\`. */
+  readonly method: string;
+  /** Fully-resolved request URL, including any query string. */
+  readonly url: string;
+  /** Zero-based retry attempt; \`0\` is the first try. */
+  readonly attempt: number;
+}
+
+/**
+ * Called with the outgoing request before any middleware runs. Return a
+ * replacement \`Request\` to substitute it, or nothing to keep the original.
+ */
+export type RequestHook = (
+  request: Request,
+  context: RequestContext,
+) => Request | void | Promise<Request | void>;
+
+/**
+ * Called with the response after all middleware has returned, including
+ * non-2xx responses. Return a replacement \`Response\` to substitute it, or
+ * nothing to keep the original.
+ */
+export type ResponseHook = (
+  response: Response,
+  context: RequestContext,
+) => Response | void | Promise<Response | void>;
+
+/**
+ * Called once per logical call when it ultimately fails — after every retry
+ * attempt has been exhausted, not per attempt. Return a replacement error to
+ * throw it instead, throw to substitute your own, or return nothing to let the
+ * original error propagate.
+ */
+export type ErrorHook = (
+  error: unknown,
+  context: RequestContext,
+) => unknown | Promise<unknown>;
+
 export interface ClientConfig {
   /** Base URL of the API, e.g. "https://api.example.com". Trailing slash is trimmed automatically. */
   baseUrl: string;
@@ -1319,6 +1501,20 @@ export interface ClientConfig {
   timeout?: number;
   /** Retry configuration. */
   retry?: RetryConfig;
+  /** Transport used to send every request. Default: the global \`fetch\`. */
+  fetch?: FetchFunction;
+  /**
+   * Middleware applied to every request, outermost first. Each layer runs once
+   * per retry attempt. Further layers can be appended later with
+   * {@link HttpClient.useMiddleware}.
+   */
+  middleware?: HttpMiddleware[];
+  /** Runs before any middleware, once per retry attempt. */
+  onRequest?: RequestHook;
+  /** Runs after all middleware, once per retry attempt. */
+  onResponse?: ResponseHook;
+  /** Runs once when a call ultimately fails, after retries are exhausted. */
+  onError?: ErrorHook;
 }
 
 export interface RequestOptions {
@@ -1333,6 +1529,8 @@ export class ApiError extends Error {
     public readonly status: number,
     public readonly statusText: string,
     public readonly body?: unknown,
+    /** The originating response. Its body is already consumed. */
+    public readonly response?: Response,
   ) {
     super(\`HTTP \${status}: \${statusText}\`);
     this.name = "ApiError";
@@ -1340,25 +1538,111 @@ export class ApiError extends Error {
 }
 
 export class RateLimitError extends ApiError {
-  constructor(public readonly retryAfterMs?: number) {
-    super(429, "Too Many Requests");
+  constructor(
+    public readonly retryAfterMs?: number,
+    body?: unknown,
+    response?: Response,
+  ) {
+    super(429, "Too Many Requests", body, response);
     this.name = "RateLimitError";
   }
 }
 
 export class ServiceUnavailableError extends ApiError {
-  constructor() {
-    super(503, "Service Unavailable");
+  constructor(body?: unknown, response?: Response) {
+    super(503, "Service Unavailable", body, response);
     this.name = "ServiceUnavailableError";
   }
 }
+
+/**
+ * Largest delay a timer can actually represent (2^31 - 1 ms, about 24.8 days).
+ * Node silently wraps anything larger to roughly 1ms — firing a "wait a
+ * century" retry almost immediately — and browsers clamp it the same way, so a
+ * header asking for more than this is treated as unusable rather than honored.
+ */
+const MAX_TIMER_DELAY_MS = 2147483647;
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * Parses a \`Retry-After\` header value into milliseconds.
+ *
+ * Only the RFC 9110 \`delta-seconds\` form is honored, and the *entire* value
+ * must be a non-negative number that still lands within
+ * {@link MAX_TIMER_DELAY_MS} once converted to milliseconds. An HTTP-date, a
+ * trailing unit (\`"2seconds"\`), a negative value, \`"Infinity"\`, or a delay
+ * too large for a timer all yield \`undefined\`, so the caller falls back to its
+ * own exponential backoff.
+ */
+function retryAfterMs(response: Response): number | undefined {
+  const after = response.headers.get("Retry-After")?.trim();
+  if (!after || !/^\\d+(\\.\\d+)?$/.test(after)) return undefined;
+  // Range-checked after the multiplication: a value can be perfectly ordinary
+  // in seconds and unusable as a millisecond timer.
+  const ms = Number(after) * 1000;
+  return ms <= MAX_TIMER_DELAY_MS ? ms : undefined;
+}
+
+/** Builds the most specific {@link ApiError} subclass for a failed response. */
+function toApiError(response: Response, body?: unknown): ApiError {
+  if (response.status === 429) {
+    return new RateLimitError(retryAfterMs(response), body, response);
+  }
+  if (response.status === 503) {
+    return new ServiceUnavailableError(body, response);
+  }
+  return new ApiError(response.status, response.statusText, body, response);
+}
+
+/**
+ * Folds a middleware list into a single dispatch function, with the first
+ * entry as the outermost layer and \`transport\` at the center.
+ */
+function composeMiddleware(
+  middleware: readonly HttpMiddleware[],
+  transport: FetchFunction,
+): HttpNext {
+  return middleware.reduceRight<HttpNext>(
+    (next, layer) => (request) => layer(request, next),
+    (request) => transport(request),
+  );
+}
+
 export class HttpClient {
-  constructor(protected readonly config: ClientConfig) {}
+  /** Middleware layers registered for this client. */
+  private readonly middleware: HttpMiddleware[];
+
+  constructor(protected readonly config: ClientConfig) {
+    this.middleware = [...(config.middleware ?? [])];
+  }
+
+  /**
+   * Appends a middleware layer, inside any already registered. Returns the
+   * client so registrations can be chained.
+   *
+   * Named \`useMiddleware\` rather than \`use\` so that an API operation called
+   * \`use\` does not shadow it. Operation names that would still collide with an
+   * inherited member are renamed at generation time.
+   */
+  useMiddleware(middleware: HttpMiddleware): this {
+    this.middleware.push(middleware);
+    return this;
+  }
+
+  /** Joins the base URL, path, and serialized query string. */
+  protected buildUrl(path: string, query?: Record<string, unknown>): string {
+    const url = \`\${this.config.baseUrl.replace(/\\/$/, "")}\${path}\`;
+    if (!query) return url;
+    const qs = new URLSearchParams(
+      Object.entries(query)
+        .filter(([, v]) => v !== undefined && v !== null)
+        .map(([k, v]) => [k, String(v)]),
+    ).toString();
+    return qs ? \`\${url}?\${qs}\` : url;
+  }
 
   protected async request<T>(
     method: string,
@@ -1371,61 +1655,91 @@ export class HttpClient {
     const { maxAttempts = 3, baseDelayMs = 1000, retryOn = [429, 503] } =
       this.config.retry ?? {};
 
-    let url = \`\${this.config.baseUrl.replace(/\\/$/, "")}\${path}\`;
-    if (options?.query) {
-      const qs = new URLSearchParams(
-        Object.entries(options.query)
-          .filter(([, v]) => v !== undefined && v !== null)
-          .map(([k, v]) => [k, String(v)]),
-      ).toString();
-      if (qs) url = \`\${url}?\${qs}\`;
-    }
-
-    const headers: Record<string, string> = {
-      "Content-Type": "application/json",
-      Accept: "application/json",
-      ...this.config.defaultHeaders,
-      ...options?.headers,
-    };
-
-    let signal = options?.signal;
-    if (this.config.timeout && !signal) {
-      signal = AbortSignal.timeout(this.config.timeout);
-    }
-
+    // Resolved without the query string up front so the error context always
+    // carries a URL, even if building the real one throws below.
+    let url = this.buildUrl(path);
+    let attempt = 0;
     let lastError: unknown;
-    for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      if (attempt > 0) await delay(baseDelayMs * Math.pow(2, attempt - 1));
-      try {
-        const resp = await fetch(url, {
-          method,
-          headers,
-          body:
-            options?.body !== undefined
-              ? JSON.stringify(options.body)
-              : undefined,
-          signal,
-        });
-        if (!resp.ok) {
+    try {
+      url = this.buildUrl(path, options?.query);
+
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        ...this.config.defaultHeaders,
+        ...options?.headers,
+      };
+
+      let signal = options?.signal;
+      if (this.config.timeout && !signal) {
+        signal = AbortSignal.timeout(this.config.timeout);
+      }
+
+      // Serialized inside the try so that an unserializable body (a circular
+      // reference, a BigInt) reaches onError like any other failure.
+      const body =
+        options?.body !== undefined ? JSON.stringify(options.body) : undefined;
+      const dispatch = composeMiddleware(
+        this.middleware,
+        this.config.fetch ?? ((request) => fetch(request)),
+      );
+
+      let succeeded: Response | undefined;
+      for (; attempt < maxAttempts; attempt++) {
+        if (attempt > 0) await delay(baseDelayMs * Math.pow(2, attempt - 1));
+        const context: RequestContext = { method, url, attempt };
+        try {
+          let request = new Request(url, { method, headers, body, signal });
+          if (this.config.onRequest) {
+            request = (await this.config.onRequest(request, context)) ?? request;
+          }
+          let resp = await dispatch(request);
+          if (this.config.onResponse) {
+            resp = (await this.config.onResponse(resp, context)) ?? resp;
+          }
+          if (resp.ok) {
+            succeeded = resp;
+            break;
+          }
           if (retryOn.includes(resp.status) && attempt < maxAttempts - 1) {
             if (resp.status === 429) {
-              const after = resp.headers.get("Retry-After");
-              if (after) await delay(parseFloat(after) * 1000);
+              const after = retryAfterMs(resp);
+              if (after !== undefined) await delay(after);
             }
-            lastError = new ApiError(resp.status, resp.statusText);
+            lastError = toApiError(resp);
             continue;
           }
-          const body = await resp.json().catch(() => undefined);
-          throw new ApiError(resp.status, resp.statusText, body);
+          const errorBody = await resp.json().catch(() => undefined);
+          throw toApiError(resp, errorBody);
+        } catch (err) {
+          if (err instanceof ApiError) throw err;
+          lastError = err;
         }
-        if (resp.status === 204) return undefined as T;
-        return resp.json() as Promise<T>;
-      } catch (err) {
-        if (err instanceof ApiError) throw err;
-        lastError = err;
       }
+      if (!succeeded) throw lastError ?? new ApiError(0, "Unknown error");
+      // Parsed outside the retry loop so a malformed success body is surfaced
+      // rather than retried.
+      if (method === "HEAD" || succeeded.status === 204 || succeeded.status === 205) {
+        return undefined as T;
+      }
+      return (await succeeded.json()) as T;
+    } catch (err) {
+      throw await this.applyErrorHook(err, {
+        method,
+        url,
+        attempt: Math.min(attempt, maxAttempts - 1),
+      });
     }
-    throw lastError ?? new ApiError(0, "Unknown error");
+  }
+
+  /** Runs {@link ClientConfig.onError}, resolving the error actually thrown. */
+  private async applyErrorHook(
+    error: unknown,
+    context: RequestContext,
+  ): Promise<unknown> {
+    if (!this.config.onError) return error;
+    const replacement = await this.config.onError(error, context);
+    return replacement === undefined ? error : replacement;
   }
 
   protected httpGet<T>(
@@ -1466,14 +1780,47 @@ export class HttpClient {
     return this.request<T>("DELETE", path, options);
   }
 
-  protected httpHead(
+  /**
+   * Generic like the other verb helpers — a generated client renders
+   * \`this.httpHead<T>(…)\` uniformly — but defaulted to \`void\`, since a HEAD
+   * response has no body.
+   */
+  protected httpHead<T = void>(
     path: string,
     options?: RequestOptions & { query?: Record<string, unknown> },
-  ): Promise<void> {
-    return this.request<void>("HEAD", path, options);
+  ): Promise<T> {
+    return this.request<T>("HEAD", path, options);
   }
 }
 `;
+
+/**
+ * Top-level names exported by the static `client/ApiClient.ts` module, and
+ * whether each is type-only. The barrel needs this to re-export the module by
+ * explicit name when a star export would be ambiguous — and type-only names
+ * must go through `export type` so the emitted JavaScript does not reference a
+ * binding that exists only at compile time.
+ *
+ * Kept in sync with {@link API_CLIENT_CONTENT} by a test that re-reads the
+ * emitted file's own `export` declarations.
+ */
+export const API_CLIENT_EXPORTS: readonly { name: string; isType: boolean }[] =
+  [
+    { name: "RetryConfig", isType: true },
+    { name: "FetchFunction", isType: true },
+    { name: "HttpNext", isType: true },
+    { name: "HttpMiddleware", isType: true },
+    { name: "RequestContext", isType: true },
+    { name: "RequestHook", isType: true },
+    { name: "ResponseHook", isType: true },
+    { name: "ErrorHook", isType: true },
+    { name: "ClientConfig", isType: true },
+    { name: "RequestOptions", isType: true },
+    { name: "ApiError", isType: false },
+    { name: "RateLimitError", isType: false },
+    { name: "ServiceUnavailableError", isType: false },
+    { name: "HttpClient", isType: false },
+  ];
 
 // ─── client/ApiClientRx.ts — RxJS Observable transport ───────────────────────
 
@@ -1493,6 +1840,11 @@ import { HttpClient, type RequestOptions } from "./ApiClient.js";
  *   \`AbortController\`. A caller-supplied \`options.signal\` also aborts it.
  * - **Errors:** \`ApiError\` (and its subclasses) are delivered via
  *   \`subscriber.error\`, so \`catchError\` sees the same types as the Promise API.
+ * - **Extensibility:** a custom \`config.fetch\` transport, \`config.middleware\`
+ *   (and {@link HttpClient.useMiddleware}), and the
+ *   \`onRequest\`/\`onResponse\`/\`onError\` hooks all apply unchanged, because every
+ *   verb helper routes through the same \`HttpClient\` transport. \`onError\` fires
+ *   before the error reaches \`subscriber.error\`.
  */
 export class RxHttpClient extends HttpClient {
   /**
@@ -1583,19 +1935,266 @@ export class RxHttpClient extends HttpClient {
     );
   }
 
-  protected httpHead$(
+  protected httpHead$<T = void>(
     path: string,
     options?: RequestOptions & { query?: Record<string, unknown> },
-  ): Observable<void> {
-    return this.observe<void>(
-      (signal) => this.httpHead(path, { ...options, signal }),
+  ): Observable<T> {
+    return this.observe<T>(
+      (signal) => this.httpHead<T>(path, { ...options, signal }),
       options?.signal,
     );
   }
 }
 `;
 
+/**
+ * Top-level names exported by the static `client/ApiClientRx.ts` module.
+ * See {@link API_CLIENT_EXPORTS}.
+ */
+export const RX_API_CLIENT_EXPORTS: readonly {
+  name: string;
+  isType: boolean;
+}[] = [{ name: "RxHttpClient", isType: false }];
+
+/**
+ * Module basenames under `client/` that the static infrastructure occupies. A
+ * generated client class named after one of these would have its file
+ * overwritten, so the generated one is renamed instead.
+ */
+const INFRASTRUCTURE_MODULE_NAMES: readonly string[] = [
+  "ApiClient",
+  "ApiClientRx",
+];
+
+/**
+ * Returns `base`, or `base` with the lowest numeric suffix that is not already
+ * taken. Used wherever a generated name has to step aside for one that cannot
+ * move.
+ */
+function uniqueName(base: string, taken: ReadonlySet<string>): string {
+  if (!taken.has(base)) return base;
+  let suffix = 2;
+  while (taken.has(`${base}${suffix}`)) suffix++;
+  return `${base}${suffix}`;
+}
+
+/**
+ * Allocates the class (and file) name for a generated client out of a shared
+ * pool, so no two generated clients — of either flavor — land on the same path,
+ * and none lands on a static infrastructure module or a declared type name.
+ *
+ * Collisions are real: `interface Foo` emits `FooObservableClient` while
+ * `interface FooObservable` emits its Promise client to that same name, and a
+ * model named `WidgetsClient` would be both imported and declared by
+ * `WidgetsClient`. Neither the infrastructure path nor a declared type can
+ * move, so the generated client is renamed and a warning reported.
+ *
+ * Mutates `taken`, claiming whatever name it returns.
+ */
+function allocateClientModuleName(
+  program: Program,
+  preferred: string,
+  target: Interface | Namespace,
+  taken: Set<string>,
+): string {
+  const resolved = uniqueName(preferred, taken);
+  taken.add(resolved);
+  if (resolved !== preferred) {
+    reportDiagnostic(program, {
+      code: "client-module-name-collision",
+      format: { preferred, resolved },
+      target,
+    });
+  }
+  return resolved;
+}
+
+/** Reads the top-level `export` declarations out of a generated module. */
+function collectExportedNames(source: string): Set<string> {
+  const names = new Set<string>();
+  const pattern =
+    /^export\s+(?:interface|type|class|enum|const|function)\s+(\w+)/gm;
+  for (const match of source.matchAll(pattern)) names.add(match[1]);
+  return names;
+}
+
+/** A module the barrel re-exports, and the names it declares. */
+interface BarrelModule {
+  /** Relative import path, as it appears in the barrel. */
+  path: string;
+  /** Top-level exports of the module. */
+  exports: readonly { name: string; isType: boolean }[];
+}
+
+/**
+ * Resolves one module's contribution to the barrel.
+ *
+ * The barrel star-exports every generated module, so two modules exporting the
+ * same name make the star export ambiguous and the package fails to compile
+ * (TS2308). Modules are processed in priority order — declared TypeSpec types
+ * first, then per-interface generated clients and endpoints, then the static
+ * client infrastructure — and a later module aliases any name an earlier one
+ * has already claimed.
+ *
+ * Returns `undefined` when nothing collides, so the common case keeps its
+ * simpler `export *` line and byte-identical output.
+ */
+function resolveBarrelModule(
+  program: Program,
+  module: BarrelModule,
+  claimed: Set<string>,
+): IndexNamedExportView | undefined {
+  if (!module.exports.some((e) => claimed.has(e.name))) {
+    for (const e of module.exports) claimed.add(e.name);
+    return undefined;
+  }
+
+  const values: IndexBindingView[] = [];
+  const types: IndexBindingView[] = [];
+
+  for (const { name, isType } of module.exports) {
+    let alias: string | undefined;
+    if (claimed.has(name)) {
+      alias = uniqueName(`Client${name}`, claimed);
+      reportDiagnostic(program, {
+        code: "generated-export-name-collision",
+        format: { name, alias, module: module.path },
+        target: NoTarget,
+      });
+    }
+    claimed.add(alias ?? name);
+    (isType ? types : values).push(alias ? { name, alias } : { name });
+  }
+
+  return { from: module.path, values, types };
+}
+
 // ─── client/{Name}Client.ts generation ───────────────────────────────────────
+
+/**
+ * Members every generated `*Client` inherits from `HttpClient`. An operation
+ * method with any of these names would shadow the inherited member with an
+ * incompatible signature, so the generated package would fail to type-check —
+ * and, for `useMiddleware`, middleware registration would become unreachable.
+ *
+ * Private base members are included: TypeScript rejects a subclass member that
+ * shares a name with a private member of its base.
+ */
+const BASE_CLIENT_MEMBERS: readonly string[] = [
+  // Every own property of Object.prototype — the complete set, as returned by
+  // Object.getOwnPropertyNames(Object.prototype). TypeScript does not
+  // type-check class members against Object's apparent members, so these
+  // compile; the damage is at runtime. An async `toString`/`valueOf` breaks
+  // coercion of the client (`${client}` throws), and a method named
+  // `__proto__` shadows the accessor, so `client.__proto__` stops returning
+  // the instance prototype.
+  "constructor",
+  "toString",
+  "toLocaleString",
+  "valueOf",
+  "hasOwnProperty",
+  "isPrototypeOf",
+  "propertyIsEnumerable",
+  "__proto__",
+  "__defineGetter__",
+  "__defineSetter__",
+  "__lookupGetter__",
+  "__lookupSetter__",
+  // Not inherited, but a method named `then` makes every client instance a
+  // thenable: `await client` would fire a request with the resolver as query.
+  "then",
+  "config",
+  "middleware",
+  "useMiddleware",
+  "buildUrl",
+  "request",
+  "applyErrorHook",
+  "httpGet",
+  "httpPost",
+  "httpPut",
+  "httpPatch",
+  "httpDelete",
+  "httpHead",
+];
+
+/**
+ * Members declared only on `RxHttpClient`, which exists solely for the
+ * Observable flavor. A Promise-only build must not reserve these — an
+ * operation named `observe` is perfectly valid there.
+ */
+const RX_CLIENT_MEMBERS: readonly string[] = [
+  "observe",
+  "httpGet$",
+  "httpPost$",
+  "httpPut$",
+  "httpPatch$",
+  "httpDelete$",
+  "httpHead$",
+];
+
+/**
+ * The names an operation method may not take, given which client flavors are
+ * being emitted.
+ *
+ * When an Observable client is emitted the Rx members are reserved for *both*
+ * flavors, so that a `client-style: both` build exposes the same method names
+ * on its Promise and Observable clients rather than diverging.
+ */
+function reservedClientMembers(
+  emitObservableClient: boolean,
+): ReadonlySet<string> {
+  return new Set(
+    emitObservableClient
+      ? [...BASE_CLIENT_MEMBERS, ...RX_CLIENT_MEMBERS]
+      : BASE_CLIENT_MEMBERS,
+  );
+}
+
+/**
+ * Resolves the method name to emit for an operation. Operation names are used
+ * verbatim unless they collide with an inherited base-class member, in which
+ * case an `Operation` suffix is appended (and numbered, if that too is taken by
+ * a sibling operation).
+ *
+ * Only the client method is renamed — the generated `*Endpoints` entry keeps
+ * the original operation name, since a plain `as const` object inherits
+ * nothing and therefore cannot collide.
+ */
+function clientMethodName(
+  operationName: string,
+  siblingNames: ReadonlySet<string>,
+  reserved: ReadonlySet<string>,
+): string {
+  if (!reserved.has(operationName)) return operationName;
+  let candidate = `${operationName}Operation`;
+  let suffix = 2;
+  while (siblingNames.has(candidate) || reserved.has(candidate)) {
+    candidate = `${operationName}Operation${suffix++}`;
+  }
+  return candidate;
+}
+
+/**
+ * Warns once per operation whose client method had to be renamed. Reported
+ * here rather than inside the view builder, which runs twice when both client
+ * flavors are emitted.
+ */
+function reportReservedClientMethodNames(
+  program: Program,
+  ops: HttpOperation[],
+  reserved: ReadonlySet<string>,
+): void {
+  const siblingNames = new Set(ops.map((op) => op.operation.name));
+  for (const op of ops) {
+    const renamed = clientMethodName(op.operation.name, siblingNames, reserved);
+    if (renamed === op.operation.name) continue;
+    reportDiagnostic(program, {
+      code: "reserved-client-method-name",
+      format: { name: op.operation.name, renamed },
+      target: op.operation,
+    });
+  }
+}
 
 /**
  * Builds the shared per-interface client view (method list + model imports).
@@ -1612,34 +2211,218 @@ function buildClientView(
   models: Map<string, Model>,
   enums: Map<string, Enum>,
   renameMap: Map<string, string>,
+  reserved: ReadonlySet<string>,
 ): ClientView {
   const endpointsClassName = `${name}Endpoints`;
-  const modelImportSet = new Set<string>();
-  const methods: import("./renderer.js").ClientMethodView[] = ops.map((op) =>
-    buildClientMethodView(
-      op,
-      endpointsClassName,
-      requestTypes,
-      discriminatedRequestUnions,
-      program,
-      models,
-      enums,
-      modelImportSet,
-      renameMap,
-    ),
+  const siblingNames = new Set(ops.map((op) => op.operation.name));
+
+  const buildMethods = (
+    modelImportSet: Set<string>,
+    localNames: ClientLocalNames,
+    rename: Map<string, string>,
+  ) =>
+    ops.map((op) =>
+      buildClientMethodView(
+        op,
+        requestTypes,
+        discriminatedRequestUnions,
+        program,
+        models,
+        enums,
+        modelImportSet,
+        rename,
+        siblingNames,
+        reserved,
+        localNames,
+      ),
+    );
+
+  // The client's own model imports are only known once the method views have
+  // been built, but the names those views reference depend on them — a model
+  // named `RequestOptions` forces the infrastructure import to be aliased, and
+  // a model named `Promise` must itself be aliased or it shadows the global
+  // every return type is wrapped in. So build once to discover the imports,
+  // resolve every local name, then build again for real. Both passes are pure
+  // string work.
+  const discovered = new Set<string>();
+  buildMethods(
+    discovered,
+    defaultClientLocalNames(endpointsClassName),
+    renameMap,
   );
+  const localNames = resolveClientLocalNames(
+    endpointsClassName,
+    className,
+    discovered,
+  );
+  const globalAliases = resolveShadowedGlobalAliases(
+    discovered,
+    new Set([className, ...Object.values(localNames)]),
+  );
+
+  // Keyed as name-only aliases so generic models keep their arguments; see
+  // {@link RENAME_ALIAS}.
+  const clientRenameMap = new Map([
+    ...renameMap,
+    ...[...globalAliases].map(
+      ([name, alias]) => [`${RENAME_ALIAS}${name}`, alias] as const,
+    ),
+  ]);
+  const modelImportSet = new Set<string>();
+  const methods = buildMethods(modelImportSet, localNames, clientRenameMap);
 
   return {
     className,
     endpointsClassName,
     methods,
-    modelImports: [...modelImportSet],
+    modelImports: [...modelImportSet].map((name) => {
+      const alias = globalAliases.get(name);
+      return alias ? `${name} as ${alias}` : name;
+    }),
+    ...localNames,
+  };
+}
+
+/**
+ * Globals that `models.ts` references as the target of a scalar mapping:
+ * `utcDateTime`/`offsetDateTime` → `Date`, `bytes` → `Uint8Array`.
+ *
+ * A generated type of the same name shadows the global *within that file*, so
+ * a sibling model's `utcDateTime` property would silently resolve to the
+ * user's own `Date` interface. It still compiles, which is what makes it
+ * dangerous — the property is simply typed as the wrong thing.
+ *
+ * `Record` is not listed: TypeSpec rejects a `model Record` declaration before
+ * the emitter ever sees it, since that shadows its own built-in template.
+ */
+const MODEL_SCALAR_GLOBALS: readonly string[] = ["Date", "Uint8Array"];
+
+/**
+ * For each scalar global shadowed by a generated type, picks a local alias and
+ * the declaration that recovers the real global.
+ *
+ * A plain `type GlobalDate = Date` would not work: module-scope declarations
+ * are hoisted, so it would resolve to the shadowing interface too. Going
+ * through `globalThis` sidesteps the type namespace entirely.
+ *
+ * The declaration deliberately names no type other than the global itself:
+ * `InstanceType<…>` would break for a spec that also declares `model
+ * InstanceType`, which shadows that utility in this very file. Reading
+ * `.prototype` off the constructor value has no such dependency — and
+ * `globalThis` is resolved in the *value* namespace, so even a `model
+ * globalThis` cannot shadow it.
+ */
+function resolveShadowedScalarGlobals(
+  generatedTypeNames: ReadonlySet<string>,
+): { aliases: Map<string, string>; declarations: string[] } {
+  const aliases = new Map<string, string>();
+  const declarations: string[] = [];
+  const claimed = new Set(generatedTypeNames);
+  for (const global of MODEL_SCALAR_GLOBALS) {
+    if (!generatedTypeNames.has(global)) continue;
+    const alias = uniqueName(`Global${global}`, claimed);
+    claimed.add(alias);
+    aliases.set(global, alias);
+    declarations.push(
+      `/** The global \`${global}\`, aliased because a generated type shadows that name. */\n` +
+        `type ${alias} = typeof globalThis.${global}.prototype;`,
+    );
+  }
+  return { aliases, declarations };
+}
+
+/**
+ * Global identifiers the generated client text references by name. A model
+ * import with one of these names would shadow the global inside the client
+ * module — `import type { Promise }` turns every `Promise<T>` return type into
+ * a reference to the user's model, which is not generic (TS2315).
+ */
+const CLIENT_REFERENCED_GLOBALS: readonly string[] = [
+  "Promise",
+  "Record",
+  "Date",
+  "Uint8Array",
+];
+
+/**
+ * For each model import that shadows a referenced global, picks a local alias
+ * (`Promise` → `PromiseModel`). Returned as a rename map so the same alias is
+ * used in both the import specifier and every type reference.
+ */
+function resolveShadowedGlobalAliases(
+  modelImports: ReadonlySet<string>,
+  taken: ReadonlySet<string>,
+): Map<string, string> {
+  const aliases = new Map<string, string>();
+  const claimed = new Set([...modelImports, ...taken]);
+  for (const name of CLIENT_REFERENCED_GLOBALS) {
+    if (!modelImports.has(name)) continue;
+    const alias = uniqueName(`${name}Model`, claimed);
+    claimed.add(alias);
+    aliases.set(name, alias);
+  }
+  return aliases;
+}
+
+/**
+ * Local names a generated client module uses for the symbols it imports from
+ * outside `models.ts`. Each is the imported name unless a model of the same
+ * name is also imported, in which case the *infrastructure* symbol is aliased
+ * — the user's model keeps the plain name, matching how the barrel resolves
+ * the same clash.
+ */
+interface ClientLocalNames {
+  /** Local name for `HttpClient` from `./ApiClient.js`. */
+  baseClassName: string;
+  /** Local name for `RxHttpClient` from `./ApiClientRx.js`. */
+  rxBaseClassName: string;
+  /** Local name for `RequestOptions` from `./ApiClient.js`. */
+  requestOptionsName: string;
+  /** Local name for `Observable` from `rxjs`. */
+  observableName: string;
+  /** Local name for the `*Endpoints` object. */
+  endpointsLocalName: string;
+}
+
+/** The local names used when nothing collides. */
+function defaultClientLocalNames(endpointsClassName: string): ClientLocalNames {
+  return {
+    baseClassName: "HttpClient",
+    rxBaseClassName: "RxHttpClient",
+    requestOptionsName: "RequestOptions",
+    observableName: "Observable",
+    endpointsLocalName: endpointsClassName,
+  };
+}
+
+/**
+ * Aliases each imported symbol that a model import — or the generated class
+ * itself — would shadow. `interface Http` declares `class HttpClient`, so its
+ * base-class import must become `HttpClient as ClientHttpClient`.
+ */
+function resolveClientLocalNames(
+  endpointsClassName: string,
+  className: string,
+  modelImports: ReadonlySet<string>,
+): ClientLocalNames {
+  const taken = new Set([...modelImports, className]);
+  const local = (imported: string): string => {
+    if (!taken.has(imported)) return imported;
+    const alias = uniqueName(`Client${imported}`, taken);
+    taken.add(alias);
+    return alias;
+  };
+  return {
+    baseClassName: local("HttpClient"),
+    rxBaseClassName: local("RxHttpClient"),
+    requestOptionsName: local("RequestOptions"),
+    observableName: local("Observable"),
+    endpointsLocalName: local(endpointsClassName),
   };
 }
 
 function buildClientMethodView(
   op: HttpOperation,
-  endpointsClassName: string,
   requestTypes: Map<string, RequestType>,
   discriminatedRequestUnions: Map<string, DiscriminatedRequestUnion>,
   program: Program,
@@ -1647,6 +2430,9 @@ function buildClientMethodView(
   enums: Map<string, Enum>,
   modelImportSet: Set<string>,
   renameMap: Map<string, string>,
+  siblingNames: ReadonlySet<string>,
+  reserved: ReadonlySet<string>,
+  localNames: ClientLocalNames,
 ): import("./renderer.js").ClientMethodView {
   const pathParams = op.parameters.parameters
     .filter((p) => p.type === "path")
@@ -1698,7 +2484,14 @@ function buildClientMethodView(
         bodyType = resolvedRequestTypeName;
         modelImportSet.add(resolvedRequestTypeName);
       } else if (bodyModel.name && !isSynthesizedMergePatchModel(bodyModel)) {
-        bodyType = bodyModel.name;
+        // Through the rename map like every other type reference, so a model
+        // aliased to dodge a shadowed global (`Promise` → `PromiseModel`) is
+        // aliased here too. Both rewrite kinds are consulted, in the same order
+        // mapTsType uses. The import specifier is derived from the raw name.
+        bodyType =
+          renameMap.get(bodyModel.name) ??
+          renameMap.get(`${RENAME_ALIAS}${bodyModel.name}`) ??
+          bodyModel.name;
         modelImportSet.add(bodyModel.name);
       }
     }
@@ -1733,12 +2526,12 @@ function buildClientMethodView(
     ? `{ ${queryFields}; [key: string]: unknown }`
     : `Record<string, unknown>`;
   paramParts.push(`query?: ${queryType}`);
-  paramParts.push(`options?: RequestOptions`);
+  paramParts.push(`options?: ${localNames.requestOptionsName}`);
   const methodParams = paramParts.join(", ");
 
   // Build endpoint call expression
   const pathParamArgs = pathParams.map((p) => p.name).join(", ");
-  const endpointCall = `${endpointsClassName}.${op.operation.name}(${pathParamArgs})`;
+  const endpointCall = `${localNames.endpointsLocalName}.${op.operation.name}(${pathParamArgs})`;
 
   // Build method body. The Promise flavor calls the base verb helpers
   // (`this.get`, `this.post`, …); the Observable flavor calls the `$`-suffixed
@@ -1763,7 +2556,9 @@ function buildClientMethodView(
 
   return {
     doc: getDoc(program, op.operation) ?? undefined,
-    name: op.operation.name,
+    // The endpoint call above keeps the original operation name; only the
+    // method name is renamed when it would shadow an inherited base member.
+    name: clientMethodName(op.operation.name, siblingNames, reserved),
     methodParams,
     methodBody,
     methodBodyObservable,
@@ -1821,7 +2616,11 @@ function collectModelNamesFromType(type: Type, into: Set<string>): void {
     if (m.name && !m.templateMapper?.args) {
       into.add(m.name);
     } else if (m.name && m.templateMapper?.args) {
-      into.add(m.name);
+      // Mirrors mapTsType's own `Array<T>` shortcut, which renders the native
+      // `T[]` and never names the model. Adding it here anyway would import a
+      // type the emitted code does not reference — and, when that model is the
+      // only one in the spec, from a models.ts that is never written.
+      if (!isNativeArrayShortcut(m)) into.add(m.name);
       for (const arg of m.templateMapper.args) {
         if ((arg as { entityKind?: string }).entityKind === "Type") {
           collectModelNamesFromType(arg as Type, into);
@@ -1929,6 +2728,35 @@ function buildTsConfig(): string {
 
 // ─── Type mapping ────────────────────────────────────────────────────────────
 
+/**
+ * Three kinds of rewrite share one rename map during rendering, distinguished
+ * by key prefix. Keeping them separate matters: they are not interchangeable.
+ *
+ * | Key              | Meaning                                                |
+ * | ---------------- | ------------------------------------------------------ |
+ * | `<name>`         | Whole-type substitution. A synthesized MergePatch model |
+ * |                  | becomes its canonical output name; template arguments   |
+ * |                  | are dropped, because the replacement is already concrete. |
+ * | `alias:<name>`   | Name-only rewrite. The type is unchanged, so generic    |
+ * |                  | arguments are preserved.                                 |
+ * | `scalar:<name>`  | Rewrite of a scalar mapping's target (the global `Date` |
+ * |                  | a `utcDateTime` maps to), never of a declared type.     |
+ */
+const RENAME_ALIAS = "alias:";
+/** See {@link RENAME_ALIAS}. */
+const RENAME_SCALAR = "scalar:";
+
+/**
+ * Whether a templated model renders as the native `T[]` rather than by name.
+ *
+ * Shared by the type mapper and the import collector so the two cannot
+ * disagree about whether a name is referenced — a disagreement emits an import
+ * of a type that never appears in the file.
+ */
+function isNativeArrayShortcut(m: Model): boolean {
+  return m.name === "Array" && (m.templateMapper?.args?.length ?? 0) === 1;
+}
+
 function mapTsType(
   type: Type,
   program: Program,
@@ -1937,8 +2765,10 @@ function mapTsType(
   renameMap?: Map<string, string>,
 ): string {
   switch (type.kind) {
-    case "Scalar":
-      return mapScalar(type as Scalar, program);
+    case "Scalar": {
+      const mapped = mapScalar(type as Scalar, program);
+      return renameMap?.get(`${RENAME_SCALAR}${mapped}`) ?? mapped;
+    }
 
     case "Model": {
       const m = type as Model;
@@ -1955,8 +2785,15 @@ function mapTsType(
 
       // During the rendering phase, synthesized MergePatch model names are
       // rewritten to their canonical output names (e.g. PetPatchRequest or Tag).
+      // This is a whole-type substitution: the replacement already names a
+      // concrete type, so any template arguments are deliberately dropped.
       const renamed = renameMap?.get(m.name);
       if (renamed !== undefined) return renamed;
+
+      // A name-only alias, by contrast, renames the reference but leaves the
+      // type itself alone — so a generic model must keep its arguments, or
+      // `Date<string>` would be emitted as a bare `DateModel`.
+      const aliased = renameMap?.get(`${RENAME_ALIAS}${m.name}`) ?? m.name;
 
       if (m.templateMapper?.args) {
         const args = m.templateMapper.args
@@ -1965,14 +2802,14 @@ function mapTsType(
               (a as { entityKind?: string }).entityKind === "Type",
           )
           .map((a) => mapTsType(a, program, models, enums, renameMap));
-        if (m.name === "Array" && args.length === 1) return `${args[0]}[]`;
+        if (isNativeArrayShortcut(m)) return `${args[0]}[]`;
         const decl = m.namespace?.models.get(m.name);
         models.set(m.name, decl ?? m);
-        return args.length > 0 ? `${m.name}<${args.join(", ")}>` : m.name;
+        return args.length > 0 ? `${aliased}<${args.join(", ")}>` : aliased;
       }
 
       models.set(m.name, m);
-      return m.name;
+      return aliased;
     }
 
     case "Enum": {

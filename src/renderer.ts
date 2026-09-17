@@ -125,6 +125,30 @@ export interface FileView {
 export interface IndexView {
   /** Ordered list of relative import paths (with `.js` extension). */
   exports: string[];
+  /**
+   * Modules re-exported by explicit name rather than with `export *`. Used when
+   * a star export would be ambiguous because another module already exports the
+   * same name — TypeScript rejects that with TS2308.
+   */
+  namedExports?: IndexNamedExportView[];
+}
+
+/** A single binding in an explicit re-export list. */
+export interface IndexBindingView {
+  /** Name as exported by the source module. */
+  name: string;
+  /** Name to re-export it under, when it must differ to avoid a collision. */
+  alias?: string;
+}
+
+/** One module re-exported by explicit name from the barrel. */
+export interface IndexNamedExportView {
+  /** Relative import path (with `.js` extension). */
+  from: string;
+  /** Runtime bindings, emitted as `export { … } from`. */
+  values: IndexBindingView[];
+  /** Type-only bindings, emitted as `export type { … } from`. */
+  types: IndexBindingView[];
 }
 
 /** View model for a single HTTP client method. */
@@ -157,6 +181,22 @@ export interface ClientView {
   methods: ClientMethodView[];
   /** Deduplicated model type names imported from `"../models.js"`. */
   modelImports: string[];
+  /**
+   * Local name for `HttpClient`. Equals `"HttpClient"` unless a model of that
+   * name is imported, in which case the infrastructure import is aliased.
+   */
+  baseClassName: string;
+  /** Local name for `RxHttpClient`; see {@link ClientView.baseClassName}. */
+  rxBaseClassName: string;
+  /** Local name for `RequestOptions`; see {@link ClientView.baseClassName}. */
+  requestOptionsName: string;
+  /** Local name for rxjs `Observable`; see {@link ClientView.baseClassName}. */
+  observableName: string;
+  /**
+   * Local name for the endpoints object; see {@link ClientView.baseClassName}.
+   * `endpointsClassName` remains the name to import, and the module path.
+   */
+  endpointsLocalName: string;
 }
 
 // ---------------------------------------------------------------------------

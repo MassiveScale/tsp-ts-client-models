@@ -1956,6 +1956,542 @@ describe("emitter", () => {
     ok(content.includes("RetryConfig"), "Expected RetryConfig interface");
   });
 
+  it("generates the extensibility surface in client/ApiClient.ts", async () => {
+    const results = await emit(`
+      import "@typespec/http";
+      using Http;
+
+      @service(#{ title: "Test API" })
+      namespace TestApi;
+
+      model Widget { id: string; name: string; }
+
+      @route("/widgets")
+      interface Widgets {
+        @get list(): Widget[];
+      }
+    `);
+
+    const apiClientFile = Object.keys(results).find((k) =>
+      k.includes("client/ApiClient.ts"),
+    );
+    ok(apiClientFile, "Expected client/ApiClient.ts");
+    const content = results[apiClientFile];
+
+    for (const symbol of [
+      "export type FetchFunction",
+      "export type HttpNext",
+      "export type HttpMiddleware",
+      "export interface RequestContext",
+      "export type RequestHook",
+      "export type ResponseHook",
+      "export type ErrorHook",
+    ]) {
+      ok(content.includes(symbol), `Expected ${symbol}`);
+    }
+
+    for (const member of [
+      "fetch?: FetchFunction;",
+      "middleware?: HttpMiddleware[];",
+      "onRequest?: RequestHook;",
+      "onResponse?: ResponseHook;",
+      "onError?: ErrorHook;",
+    ]) {
+      ok(content.includes(member), `Expected ClientConfig.${member}`);
+    }
+
+    ok(
+      content.includes("useMiddleware(middleware: HttpMiddleware): this"),
+      "Expected HttpClient.useMiddleware()",
+    );
+    ok(
+      content.includes("function composeMiddleware("),
+      "Expected the middleware composer",
+    );
+    ok(
+      content.includes("this.config.fetch ?? ((request) => fetch(request))"),
+      "Expected the global fetch fallback",
+    );
+  });
+
+  it("renames an operation that collides with an inherited base member", async () => {
+    const [results, diags] = await emitWithDiagnostics(`
+      import "@typespec/http";
+      using Http;
+
+      @service(#{ title: "Test API" })
+      namespace TestApi;
+
+      model Widget { id: string; name: string; }
+
+      @route("/widgets")
+      interface Widgets {
+        @route("/request") @get request(): Widget[];
+        @route("/config") @get config(): Widget[];
+        @route("/mw") @get useMiddleware(): Widget[];
+        @route("/normal") @get list(): Widget[];
+      }
+    `);
+
+    const clientFile = Object.keys(results).find((k) =>
+      k.includes("client/WidgetsClient.ts"),
+    );
+    ok(clientFile, "Expected client/WidgetsClient.ts");
+    const client = results[clientFile];
+
+    for (const renamed of [
+      "requestOperation(",
+      "configOperation(",
+      "useMiddlewareOperation(",
+    ]) {
+      ok(client.includes(renamed), `Expected renamed method ${renamed}`);
+    }
+    ok(client.includes("async list("), "Non-colliding names stay verbatim");
+    ok(
+      !client.includes("listOperation("),
+      "Non-colliding names are never suffixed",
+    );
+
+    // The endpoints object inherits nothing, so it keeps the original names —
+    // and the renamed methods must still call through to them.
+    const endpointsFile = Object.keys(results).find((k) =>
+      k.includes("endpoints/WidgetsEndpoints.ts"),
+    );
+    ok(endpointsFile, "Expected endpoints/WidgetsEndpoints.ts");
+    ok(
+      results[endpointsFile].includes("request:"),
+      "Endpoints keep the original operation name",
+    );
+    ok(
+      client.includes("WidgetsEndpoints.request()"),
+      "Renamed method still calls the original endpoint entry",
+    );
+
+    const warnings = diags.filter(
+      (d) =>
+        d.code ===
+        "@massivescale/tsp-ts-client-models/reserved-client-method-name",
+    );
+    strictEqual(warnings.length, 3, "Expected one warning per renamed method");
+    ok(
+      warnings.every((d) => d.severity === "warning"),
+      "Collision reports are warnings, not errors",
+    );
+  });
+
+  it("reports the reserved-name warning once when both client flavors are emitted", async () => {
+    const [, diags] = await emitWithDiagnostics(
+      `
+      import "@typespec/http";
+      using Http;
+
+      @service(#{ title: "Test API" })
+      namespace TestApi;
+
+      model Widget { id: string; name: string; }
+
+      @route("/widgets")
+      interface Widgets {
+        @get request(): Widget[];
+      }
+    `,
+      { "client-style": "both" },
+    );
+
+    const warnings = diags.filter(
+      (d) =>
+        d.code ===
+        "@massivescale/tsp-ts-client-models/reserved-client-method-name",
+    );
+    strictEqual(warnings.length, 1, "Expected exactly one warning");
+  });
+
+  it("reserves RxHttpClient members only when an Observable client is emitted", async () => {
+    const spec = `
+      import "@typespec/http";
+      using Http;
+
+      @service(#{ title: "Test API" })
+      namespace TestApi;
+
+      model Widget { id: string; name: string; }
+
+      @route("/widgets")
+      interface Widgets {
+        @route("/a") @get observe(): Widget[];
+        @route("/b") @get request(): Widget[];
+      }
+    `;
+
+    const reservedCode =
+      "@massivescale/tsp-ts-client-models/reserved-client-method-name";
+
+    // Promise only: RxHttpClient is not the base, so `observe` is a fine name.
+    const [promiseResults, promiseDiags] = await emitWithDiagnostics(spec, {
+      "client-style": "promise",
+    });
+    const promiseKey = Object.keys(promiseResults).find((k) =>
+      k.endsWith("client/WidgetsClient.ts"),
+    );
+    ok(promiseKey, "Expected client/WidgetsClient.ts");
+    ok(
+      promiseResults[promiseKey].includes("async observe("),
+      "A Promise-only client must not rename `observe`",
+    );
+    ok(
+      promiseResults[promiseKey].includes("async requestOperation("),
+      "Base members are still reserved",
+    );
+    const promiseWarnings = promiseDiags.filter((d) => d.code === reservedCode);
+    strictEqual(
+      promiseWarnings.length,
+      1,
+      "Only the genuine base-member collision should warn",
+    );
+    ok(
+      promiseWarnings[0].message.includes("request"),
+      "The warning is about `request`, not `observe`",
+    );
+
+    // Observable in the mix: `observe` really is inherited, so it is renamed —
+    // in both flavors, so the two clients keep matching method names.
+    for (const style of ["observable", "both"] as const) {
+      const [results, diags] = await emitWithDiagnostics(spec, {
+        "client-style": style,
+      });
+      strictEqual(
+        diags.filter((d) => d.code === reservedCode).length,
+        2,
+        `Expected both collisions to warn for client-style ${style}`,
+      );
+      for (const key of Object.keys(results).filter((k) =>
+        /client\/Widgets(Observable)?Client\.ts$/.test(k),
+      )) {
+        ok(
+          results[key].includes("observeOperation("),
+          `Expected observeOperation in ${key}`,
+        );
+      }
+    }
+  });
+
+  it("emits no dangling {@link} targets in the client infrastructure", async () => {
+    const results = await emit(
+      `
+      import "@typespec/http";
+      using Http;
+
+      @service(#{ title: "Test API" })
+      namespace TestApi;
+
+      model Widget { id: string; name: string; }
+
+      @route("/widgets")
+      interface Widgets { @get list(): Widget[]; }
+    `,
+      { "client-style": "both" },
+    );
+
+    const sources = Object.keys(results)
+      .filter((k) => /client\/ApiClient(Rx)?\.ts$/.test(k))
+      .map((k) => results[k]);
+    const combined = sources.join("\n");
+
+    // Every member declared at class/interface body level across both modules.
+    const declared = new Set<string>();
+    for (const m of combined.matchAll(
+      /^ {2}(?:public |protected |private )?(?:readonly )?(\w+)\??[<(:]/gm,
+    )) {
+      declared.add(m[1]);
+    }
+
+    const links = [...combined.matchAll(/\{@link\s+(\w+)\.(\w+)\}/g)];
+    ok(links.length > 0, "Expected some member links to check");
+    for (const [, owner, member] of links) {
+      ok(
+        declared.has(member),
+        `{@link ${owner}.${member}} points at a member that is not declared`,
+      );
+    }
+  });
+
+  it("leaves an operation named use alone, since the base member is useMiddleware", async () => {
+    const [results, diags] = await emitWithDiagnostics(`
+      import "@typespec/http";
+      using Http;
+
+      @service(#{ title: "Test API" })
+      namespace TestApi;
+
+      model Widget { id: string; name: string; }
+
+      @route("/widgets")
+      interface Widgets {
+        @get use(): Widget[];
+      }
+    `);
+
+    const clientFile = Object.keys(results).find((k) =>
+      k.includes("client/WidgetsClient.ts"),
+    );
+    ok(clientFile, "Expected client/WidgetsClient.ts");
+    ok(
+      results[clientFile].includes("async use("),
+      "`use` is a perfectly good operation name again",
+    );
+    strictEqual(
+      diags.filter(
+        (d) =>
+          d.code ===
+          "@massivescale/tsp-ts-client-models/reserved-client-method-name",
+      ).length,
+      0,
+      "No collision, no warning",
+    );
+  });
+
+  it("does not rename operations when client generation is disabled", async () => {
+    const [results, diags] = await emitWithDiagnostics(
+      `
+      import "@typespec/http";
+      using Http;
+
+      @service(#{ title: "Test API" })
+      namespace TestApi;
+
+      model Widget { id: string; name: string; }
+
+      @route("/widgets")
+      interface Widgets {
+        @get request(): Widget[];
+      }
+    `,
+      { "generate-http-client": false },
+    );
+
+    strictEqual(
+      diags.filter(
+        (d) =>
+          d.code ===
+          "@massivescale/tsp-ts-client-models/reserved-client-method-name",
+      ).length,
+      0,
+      "No client, no collision",
+    );
+    const endpointsFile = Object.keys(results).find((k) =>
+      k.includes("endpoints/WidgetsEndpoints.ts"),
+    );
+    ok(endpointsFile, "Expected endpoints/WidgetsEndpoints.ts");
+    ok(
+      results[endpointsFile].includes("request:"),
+      "Endpoint name is untouched",
+    );
+  });
+
+  it("keeps plain star exports in the barrel when nothing collides", async () => {
+    const results = await emit(`
+      import "@typespec/http";
+      using Http;
+
+      @service(#{ title: "Test API" })
+      namespace TestApi;
+
+      model Widget { id: string; name: string; }
+
+      @route("/widgets")
+      interface Widgets { @get list(): Widget[]; }
+    `);
+
+    const indexFile = Object.keys(results).find((k) => k.endsWith("index.ts"));
+    ok(indexFile, "Expected index.ts");
+    const body = results[indexFile]
+      .split("\n")
+      .filter((l) => l.startsWith("export"))
+      .join("\n");
+
+    strictEqual(
+      body,
+      [
+        'export * from "./models.js";',
+        'export * from "./endpoints/WidgetsEndpoints.js";',
+        'export * from "./client/ApiClient.js";',
+        'export * from "./client/WidgetsClient.js";',
+      ].join("\n"),
+      "The no-collision barrel must stay a plain list of star exports",
+    );
+  });
+
+  it("aliases a client infrastructure export that collides with a model", async () => {
+    const [results, diags] = await emitWithDiagnostics(`
+      import "@typespec/http";
+      using Http;
+
+      @service(#{ title: "Test API" })
+      namespace TestApi;
+
+      model RequestContext { id: string; }
+      model Widget { id: string; ctx: RequestContext; }
+
+      @route("/widgets")
+      interface Widgets { @get list(): Widget[]; }
+    `);
+
+    const indexFile = Object.keys(results).find((k) => k.endsWith("index.ts"));
+    ok(indexFile, "Expected index.ts");
+    const index = results[indexFile];
+
+    ok(
+      index.includes('export * from "./models.js";'),
+      "The model keeps the plain name — it is the package's actual API",
+    );
+    ok(
+      !index.includes('export * from "./client/ApiClient.js";'),
+      "The ambiguous star export must be replaced",
+    );
+    ok(
+      index.includes("  RequestContext as ClientRequestContext,"),
+      "The infrastructure export is aliased",
+    );
+    // Type-only names must not be re-exported as runtime bindings.
+    ok(index.includes("export type {"), "Expected a type-only re-export group");
+    const valueGroup = index.slice(
+      index.indexOf("export {"),
+      index.indexOf("export type {"),
+    );
+    ok(valueGroup.includes("ApiError,"), "Classes go in the value group");
+    ok(
+      !valueGroup.includes("RequestContext"),
+      "Interfaces must not go in the value group",
+    );
+
+    const warnings = diags.filter(
+      (d) =>
+        d.code ===
+        "@massivescale/tsp-ts-client-models/generated-export-name-collision",
+    );
+    strictEqual(warnings.length, 1, "Expected one collision warning");
+    ok(
+      warnings[0].message.includes("ClientRequestContext"),
+      "The warning names the alias",
+    );
+  });
+
+  it("numbers an alias that would itself collide", async () => {
+    const [results] = await emitWithDiagnostics(`
+      import "@typespec/http";
+      using Http;
+
+      @service(#{ title: "Test API" })
+      namespace TestApi;
+
+      model RequestContext { id: string; }
+      model ClientRequestContext { id: string; }
+      model Widget { id: string; a: RequestContext; b: ClientRequestContext; }
+
+      @route("/widgets")
+      interface Widgets { @get list(): Widget[]; }
+    `);
+
+    const indexFile = Object.keys(results).find((k) => k.endsWith("index.ts"));
+    ok(indexFile, "Expected index.ts");
+    ok(
+      results[indexFile].includes("  RequestContext as ClientRequestContext2,"),
+      "Expected the alias to be numbered past the taken name",
+    );
+  });
+
+  it("serializes the request body inside the error-handled block", async () => {
+    const results = await emit(`
+      import "@typespec/http";
+      using Http;
+
+      @service(#{ title: "Test API" })
+      namespace TestApi;
+
+      model Widget { id: string; name: string; }
+
+      @route("/widgets")
+      interface Widgets {
+        @get list(): Widget[];
+      }
+    `);
+
+    const apiClientFile = Object.keys(results).find((k) =>
+      k.includes("client/ApiClient.ts"),
+    );
+    ok(apiClientFile, "Expected client/ApiClient.ts");
+    const content = results[apiClientFile];
+
+    const tryStart = content.indexOf("    try {\n      url = this.buildUrl(");
+    const stringify = content.indexOf("JSON.stringify(options.body)");
+    ok(tryStart > -1, "Expected the outer try block");
+    ok(
+      stringify > tryStart,
+      "Body serialization must sit inside the try so onError sees its failures",
+    );
+  });
+
+  it("composes middleware inside the retry loop so layers see every attempt", async () => {
+    const results = await emit(`
+      import "@typespec/http";
+      using Http;
+
+      @service(#{ title: "Test API" })
+      namespace TestApi;
+
+      model Widget { id: string; name: string; }
+
+      @route("/widgets")
+      interface Widgets {
+        @get list(): Widget[];
+      }
+    `);
+
+    const apiClientFile = Object.keys(results).find((k) =>
+      k.includes("client/ApiClient.ts"),
+    );
+    ok(apiClientFile, "Expected client/ApiClient.ts");
+    const content = results[apiClientFile];
+
+    const loopStart = content.indexOf("for (; attempt < maxAttempts");
+    const dispatchCall = content.indexOf("await dispatch(request)");
+    ok(loopStart > -1, "Expected the retry loop");
+    ok(
+      dispatchCall > loopStart,
+      "The middleware chain must be dispatched inside the retry loop",
+    );
+  });
+
+  it("throws typed subclasses for 429 and 503 responses", async () => {
+    const results = await emit(`
+      import "@typespec/http";
+      using Http;
+
+      @service(#{ title: "Test API" })
+      namespace TestApi;
+
+      model Widget { id: string; name: string; }
+
+      @route("/widgets")
+      interface Widgets {
+        @get list(): Widget[];
+      }
+    `);
+
+    const apiClientFile = Object.keys(results).find((k) =>
+      k.includes("client/ApiClient.ts"),
+    );
+    ok(apiClientFile, "Expected client/ApiClient.ts");
+    const content = results[apiClientFile];
+
+    ok(content.includes("function toApiError("), "Expected the error factory");
+    ok(content.includes("new RateLimitError("), "Expected RateLimitError use");
+    ok(
+      content.includes("new ServiceUnavailableError("),
+      "Expected ServiceUnavailableError use",
+    );
+  });
+
   it("generates a typed client class per interface", async () => {
     const results = await emit(`
       import "@typespec/http";
@@ -2225,6 +2761,10 @@ describe("emitter", () => {
     );
     ok(rxFile, "Expected client/ApiClientRx.ts");
     const rx = results[rxFile];
+    ok(
+      rx.includes("**Extensibility:**"),
+      "Expected RxHttpClient to document that middleware and hooks still apply",
+    );
     ok(
       rx.includes("export class RxHttpClient extends HttpClient"),
       "Expected RxHttpClient extending HttpClient",
