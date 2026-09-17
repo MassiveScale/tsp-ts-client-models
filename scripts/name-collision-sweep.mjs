@@ -105,16 +105,11 @@ cases.push([
   `${HEADER} model Widget { id: string; } @route("/a") interface Foo { @get list(): Widget[]; } @route("/b") interface FooObservable { @get list(): Widget[]; }`,
 ]);
 
-// Operation names that shadow inherited or prototype members.
+// Operation names that shadow inherited or prototype members. The
+// Object.prototype set is taken from the runtime rather than hand-listed, so
+// it cannot drift out of sync with what a client actually inherits.
 for (const op of [
-  "toString",
-  "toLocaleString",
-  "valueOf",
-  "hasOwnProperty",
-  "isPrototypeOf",
-  "propertyIsEnumerable",
-  "constructor",
-  "__proto__",
+  ...Object.getOwnPropertyNames(Object.prototype),
   "then",
   "prototype",
   "length",
@@ -134,7 +129,7 @@ for (const op of [
 ]) {
   cases.push([
     `operation ${op}`,
-    `${HEADER} model Widget { id: string; } @route("/x") interface Widgets { @route("/a") @get ${op}(): Widget[]; @route("/b") @get list(): Widget[]; }`,
+    `${HEADER} model Widget { id: string; } @route("/x") interface Widgets { @route("/a") @get \`${op}\`(): Widget[]; @route("/b") @get list(): Widget[]; }`,
   ]);
 }
 
@@ -177,6 +172,8 @@ for (const model of [
   "WidgetsClient",
   "WidgetsObservableClient",
   "WidgetsEndpoints",
+  "InstanceType",
+  "globalThis",
 ]) {
   cases.push([
     `model ${model} as response/body`,
@@ -186,6 +183,10 @@ for (const model of [
   // built-in whose mapping could be shadowed. A shadowing type is only
   // dangerous when something else in the file actually uses the global, and
   // the bare case above does not — which is how the models.ts `Date` bug hid.
+  cases.push([
+    `generic model ${model}<T> as response`,
+    `${HEADER} model ${model}<T> { value: T; } @route("/x") interface Widgets { @get list(): ${model}<string>; }`,
+  ]);
   cases.push([
     `model ${model} + sibling using every built-in`,
     `${HEADER} model ${model} { id: string; } model Sibling { when: utcDateTime; blob: bytes; tags: Record<string>; list: string[]; shadow: ${model}; } @route("/x") interface Widgets { @get list(): Sibling[]; @post create(@body b: ${model}): Sibling; }`,

@@ -451,7 +451,7 @@ describe("generated package compiles", () => {
         const models = files[modelsKey];
         ok(
           models.includes(
-            `type Global${global} = InstanceType<typeof globalThis.${global}>;`,
+            `type Global${global} = typeof globalThis.${global}.prototype;`,
           ),
           "Expected the global alias declaration",
         );
@@ -470,6 +470,85 @@ describe("generated package compiles", () => {
       },
     );
   }
+
+  // Regression: the shadow alias is a name-only rewrite, so it must not swallow
+  // the model's generic arguments — `Date<string>` became a bare `DateModel`,
+  // which then failed as a use of a generic type without arguments.
+  it(
+    "keeps generic arguments when aliasing a model that shadows a global",
+    { timeout: TYPE_CHECK_TIMEOUT },
+    async () => {
+      const { errors, files } = await emitAndTypeCheck(`
+        import "@typespec/http";
+        using Http;
+
+        @service(#{ title: "Test API" })
+        namespace TestApi;
+
+        model Date<T> { value: T; }
+
+        @route("/widgets")
+        interface Widgets { @get list(): Date<string>; }
+      `);
+
+      deepStrictEqual(errors, []);
+
+      const key = Object.keys(files).find((k) =>
+        k.endsWith("client/WidgetsClient.ts"),
+      );
+      ok(key, "Expected client/WidgetsClient.ts");
+      ok(
+        files[key].includes("Promise<DateModel<string>>"),
+        "The alias must carry the generic argument through",
+      );
+    },
+  );
+
+  // Regression: the shadow alias used `InstanceType<…>`, which a spec declaring
+  // `model InstanceType` shadows in that very file — TS2315.
+  it(
+    "builds the shadow alias without depending on another global name",
+    { timeout: TYPE_CHECK_TIMEOUT },
+    async () => {
+      const { errors, files } = await emitAndTypeCheck(
+        `
+        import "@typespec/http";
+        using Http;
+
+        @service(#{ title: "Test API" })
+        namespace TestApi;
+
+        model InstanceType { id: string; }
+        model globalThis { id: string; }
+        model Date { id: string; }
+        model Widget { real: utcDateTime; a: InstanceType; b: globalThis; c: Date; }
+
+        @route("/widgets")
+        interface Widgets { @get list(): Widget[]; }
+      `,
+        undefined,
+        `import type { Widget } from "./models.js";
+         declare const w: Widget;
+         export const t: number = w.real.getTime();
+        `,
+      );
+
+      deepStrictEqual(errors, []);
+
+      const key = Object.keys(files).find((k) => k.endsWith("models.ts"));
+      ok(key, "Expected models.ts");
+      ok(
+        files[key].includes(
+          "type GlobalDate = typeof globalThis.Date.prototype;",
+        ),
+        "Expected the alias to read .prototype off the constructor",
+      );
+      ok(
+        !files[key].includes("InstanceType<"),
+        "The alias must not depend on the InstanceType utility",
+      );
+    },
+  );
 
   // Regression: `interface Http` declares `class HttpClient`, the same name as
   // the base class it imports — TS2440 and a self-referential extends clause.
@@ -584,17 +663,15 @@ describe("generated package compiles", () => {
     "renames operations named after Object.prototype members and then",
     { timeout: TYPE_CHECK_TIMEOUT },
     async () => {
+      // Every own property of Object.prototype, plus `then`.
       const names = [
-        "toString",
-        "toLocaleString",
-        "valueOf",
-        "hasOwnProperty",
-        "isPrototypeOf",
-        "propertyIsEnumerable",
+        ...Object.getOwnPropertyNames(Object.prototype).filter(
+          (n) => n !== "constructor",
+        ),
         "then",
       ];
       const ops = names
-        .map((n, i) => `@route("/${i}") @get ${n}(): Widget[];`)
+        .map((n, i) => `@route("/${i}") @get \`${n}\`(): Widget[];`)
         .join("\n");
       const { errors, files } = await emitAndTypeCheck(`
         import "@typespec/http";

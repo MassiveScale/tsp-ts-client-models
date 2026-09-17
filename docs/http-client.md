@@ -215,7 +215,9 @@ export interface Date {
 }
 ```
 
-A plain `type GlobalDate = Date` would not work — module-scope declarations are hoisted, so it would resolve to the shadowing interface too. Going through `globalThis` sidesteps the type namespace. The alias is not exported, so it never reaches the package barrel.
+A plain `type GlobalDate = Date` would not work — module-scope declarations are hoisted, so it would resolve to the shadowing interface too. Going through `globalThis` sidesteps the type namespace, and reading `.prototype` off the constructor keeps the alias from depending on any other name: an `InstanceType<…>` form would itself break for a spec that declares `model InstanceType`. The alias is not exported, so it never reaches the package barrel.
+
+Aliasing is name-only, so a generic model keeps its arguments — `Date<string>` becomes `DateModel<string>`, not a bare `DateModel`.
 
 `Record` needs no such handling: TypeSpec rejects a `model Record` declaration outright, since it shadows TypeSpec's own built-in template.
 

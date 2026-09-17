@@ -2081,10 +2081,13 @@ function resolveBarrelModule(
  * shares a name with a private member of its base.
  */
 const BASE_CLIENT_MEMBERS: readonly string[] = [
-  // Inherited from Object.prototype. TypeScript does not type-check class
-  // members against Object's apparent members, so these compile — but an async
-  // `toString`/`valueOf` breaks string and number coercion of the client, and
-  // the rest are equally unreasonable to override with an HTTP call.
+  // Every own property of Object.prototype — the complete set, as returned by
+  // Object.getOwnPropertyNames(Object.prototype). TypeScript does not
+  // type-check class members against Object's apparent members, so these
+  // compile; the damage is at runtime. An async `toString`/`valueOf` breaks
+  // coercion of the client (`${client}` throws), and a method named
+  // `__proto__` shadows the accessor, so `client.__proto__` stops returning
+  // the instance prototype.
   "constructor",
   "toString",
   "toLocaleString",
@@ -2092,6 +2095,11 @@ const BASE_CLIENT_MEMBERS: readonly string[] = [
   "hasOwnProperty",
   "isPrototypeOf",
   "propertyIsEnumerable",
+  "__proto__",
+  "__defineGetter__",
+  "__defineSetter__",
+  "__lookupGetter__",
+  "__lookupSetter__",
   // Not inherited, but a method named `then` makes every client instance a
   // thenable: `await client` would fire a request with the resolver as query.
   "then",
@@ -2252,7 +2260,14 @@ function buildClientView(
     new Set([className, ...Object.values(localNames)]),
   );
 
-  const clientRenameMap = new Map([...renameMap, ...globalAliases]);
+  // Keyed as name-only aliases so generic models keep their arguments; see
+  // {@link RENAME_ALIAS}.
+  const clientRenameMap = new Map([
+    ...renameMap,
+    ...[...globalAliases].map(
+      ([name, alias]) => [`${RENAME_ALIAS}${name}`, alias] as const,
+    ),
+  ]);
   const modelImportSet = new Set<string>();
   const methods = buildMethods(modelImportSet, localNames, clientRenameMap);
 
@@ -2289,6 +2304,13 @@ const MODEL_SCALAR_GLOBALS: readonly string[] = ["Date", "Uint8Array"];
  * A plain `type GlobalDate = Date` would not work: module-scope declarations
  * are hoisted, so it would resolve to the shadowing interface too. Going
  * through `globalThis` sidesteps the type namespace entirely.
+ *
+ * The declaration deliberately names no type other than the global itself:
+ * `InstanceType<…>` would break for a spec that also declares `model
+ * InstanceType`, which shadows that utility in this very file. Reading
+ * `.prototype` off the constructor value has no such dependency — and
+ * `globalThis` is resolved in the *value* namespace, so even a `model
+ * globalThis` cannot shadow it.
  */
 function resolveShadowedScalarGlobals(
   generatedTypeNames: ReadonlySet<string>,
@@ -2303,7 +2325,7 @@ function resolveShadowedScalarGlobals(
     aliases.set(global, alias);
     declarations.push(
       `/** The global \`${global}\`, aliased because a generated type shadows that name. */\n` +
-        `type ${alias} = InstanceType<typeof globalThis.${global}>;`,
+        `type ${alias} = typeof globalThis.${global}.prototype;`,
     );
   }
   return { aliases, declarations };
@@ -2464,8 +2486,12 @@ function buildClientMethodView(
       } else if (bodyModel.name && !isSynthesizedMergePatchModel(bodyModel)) {
         // Through the rename map like every other type reference, so a model
         // aliased to dodge a shadowed global (`Promise` → `PromiseModel`) is
-        // aliased here too. The import specifier is derived from the raw name.
-        bodyType = renameMap.get(bodyModel.name) ?? bodyModel.name;
+        // aliased here too. Both rewrite kinds are consulted, in the same order
+        // mapTsType uses. The import specifier is derived from the raw name.
+        bodyType =
+          renameMap.get(bodyModel.name) ??
+          renameMap.get(`${RENAME_ALIAS}${bodyModel.name}`) ??
+          bodyModel.name;
         modelImportSet.add(bodyModel.name);
       }
     }
@@ -2590,7 +2616,11 @@ function collectModelNamesFromType(type: Type, into: Set<string>): void {
     if (m.name && !m.templateMapper?.args) {
       into.add(m.name);
     } else if (m.name && m.templateMapper?.args) {
-      into.add(m.name);
+      // Mirrors mapTsType's own `Array<T>` shortcut, which renders the native
+      // `T[]` and never names the model. Adding it here anyway would import a
+      // type the emitted code does not reference — and, when that model is the
+      // only one in the spec, from a models.ts that is never written.
+      if (!isNativeArrayShortcut(m)) into.add(m.name);
       for (const arg of m.templateMapper.args) {
         if ((arg as { entityKind?: string }).entityKind === "Type") {
           collectModelNamesFromType(arg as Type, into);
@@ -2698,6 +2728,35 @@ function buildTsConfig(): string {
 
 // ─── Type mapping ────────────────────────────────────────────────────────────
 
+/**
+ * Three kinds of rewrite share one rename map during rendering, distinguished
+ * by key prefix. Keeping them separate matters: they are not interchangeable.
+ *
+ * | Key              | Meaning                                                |
+ * | ---------------- | ------------------------------------------------------ |
+ * | `<name>`         | Whole-type substitution. A synthesized MergePatch model |
+ * |                  | becomes its canonical output name; template arguments   |
+ * |                  | are dropped, because the replacement is already concrete. |
+ * | `alias:<name>`   | Name-only rewrite. The type is unchanged, so generic    |
+ * |                  | arguments are preserved.                                 |
+ * | `scalar:<name>`  | Rewrite of a scalar mapping's target (the global `Date` |
+ * |                  | a `utcDateTime` maps to), never of a declared type.     |
+ */
+const RENAME_ALIAS = "alias:";
+/** See {@link RENAME_ALIAS}. */
+const RENAME_SCALAR = "scalar:";
+
+/**
+ * Whether a templated model renders as the native `T[]` rather than by name.
+ *
+ * Shared by the type mapper and the import collector so the two cannot
+ * disagree about whether a name is referenced — a disagreement emits an import
+ * of a type that never appears in the file.
+ */
+function isNativeArrayShortcut(m: Model): boolean {
+  return m.name === "Array" && (m.templateMapper?.args?.length ?? 0) === 1;
+}
+
 function mapTsType(
   type: Type,
   program: Program,
@@ -2708,11 +2767,7 @@ function mapTsType(
   switch (type.kind) {
     case "Scalar": {
       const mapped = mapScalar(type as Scalar, program);
-      // Scalar aliases are keyed under a `scalar:` prefix so they cannot be
-      // confused with the model-name rewrites sharing this map: a model really
-      // named `Date` must keep resolving to itself, while the *global* Date a
-      // `utcDateTime` maps to is what gets aliased out of its way.
-      return renameMap?.get(`scalar:${mapped}`) ?? mapped;
+      return renameMap?.get(`${RENAME_SCALAR}${mapped}`) ?? mapped;
     }
 
     case "Model": {
@@ -2730,8 +2785,15 @@ function mapTsType(
 
       // During the rendering phase, synthesized MergePatch model names are
       // rewritten to their canonical output names (e.g. PetPatchRequest or Tag).
+      // This is a whole-type substitution: the replacement already names a
+      // concrete type, so any template arguments are deliberately dropped.
       const renamed = renameMap?.get(m.name);
       if (renamed !== undefined) return renamed;
+
+      // A name-only alias, by contrast, renames the reference but leaves the
+      // type itself alone — so a generic model must keep its arguments, or
+      // `Date<string>` would be emitted as a bare `DateModel`.
+      const aliased = renameMap?.get(`${RENAME_ALIAS}${m.name}`) ?? m.name;
 
       if (m.templateMapper?.args) {
         const args = m.templateMapper.args
@@ -2740,14 +2802,14 @@ function mapTsType(
               (a as { entityKind?: string }).entityKind === "Type",
           )
           .map((a) => mapTsType(a, program, models, enums, renameMap));
-        if (m.name === "Array" && args.length === 1) return `${args[0]}[]`;
+        if (isNativeArrayShortcut(m)) return `${args[0]}[]`;
         const decl = m.namespace?.models.get(m.name);
         models.set(m.name, decl ?? m);
-        return args.length > 0 ? `${m.name}<${args.join(", ")}>` : m.name;
+        return args.length > 0 ? `${aliased}<${args.join(", ")}>` : aliased;
       }
 
       models.set(m.name, m);
-      return m.name;
+      return aliased;
     }
 
     case "Enum": {
