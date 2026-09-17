@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import { ok, strictEqual, deepStrictEqual, rejects } from "node:assert";
-import ts from "typescript";
+import * as ts from "typescript";
 import { emit } from "./test-host.js";
 
 /**
