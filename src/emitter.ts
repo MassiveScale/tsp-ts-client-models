@@ -1478,6 +1478,7 @@ function composeMiddleware(
 }
 
 export class HttpClient {
+  /** Middleware layers registered for this client. */
   private readonly middleware: HttpMiddleware[];
 
   constructor(protected readonly config: ClientConfig) {
