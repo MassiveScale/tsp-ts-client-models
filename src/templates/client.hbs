@@ -1,9 +1,9 @@
-import { HttpClient, type RequestOptions } from "./ApiClient.js";
-import { {{endpointsClassName}} } from "../endpoints/{{endpointsClassName}}.js";
+import { HttpClient{{#unless (eq baseClassName "HttpClient")}} as {{baseClassName}}{{/unless}}, type RequestOptions{{#unless (eq requestOptionsName "RequestOptions")}} as {{requestOptionsName}}{{/unless}} } from "./ApiClient.js";
+import { {{endpointsClassName}}{{#unless (eq endpointsLocalName endpointsClassName)}} as {{endpointsLocalName}}{{/unless}} } from "../endpoints/{{endpointsClassName}}.js";
 {{#if modelImports.length}}
 import type { {{#each modelImports}}{{this}}{{#unless @last}}, {{/unless}}{{/each}} } from "../models.js";
 {{/if}}
-export class {{className}} extends HttpClient {
+export class {{className}} extends {{baseClassName}} {
 {{#each methods}}
 {{renderDoc doc "  "}}  async {{name}}({{methodParams}}): Promise<{{responseType}}> {
     {{methodBody}}

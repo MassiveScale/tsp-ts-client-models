@@ -156,11 +156,15 @@ So `@get observe(): Widget[]` generates `client.observe()` under the default sty
 
 The `*Endpoints` object is a plain `as const` and inherits nothing, so its keys always keep the original operation name. Rename the operation in TypeSpec if you want the method name back.
 
-### Infrastructure name collisions
+### Export name collisions
 
-`index.ts` star-exports every generated module, so a model or enum sharing a name with a client infrastructure export — `RequestContext`, `ClientConfig`, `ApiError`, `RetryConfig`, `HttpMiddleware`, and the rest of [`ApiClient.ts`](#apiclientts) — would make the re-export ambiguous and the package would not compile (TS2308).
+`index.ts` star-exports every generated module, so two modules exporting the same name would make the re-export ambiguous and the package would not compile (TS2308). This happens when a TypeSpec declaration is named after something the emitter also generates — an infrastructure export like `RequestContext`, `ClientConfig` or `ApiError`, an endpoint object like `WidgetsEndpoints`, or a client class like `WidgetsClient`.
 
-When that happens the barrel re-exports `ApiClient.ts` by explicit name instead of with a star, and aliases the infrastructure name with a `Client` prefix. **Your model keeps the plain name**, since that is the API the package exists to expose:
+The barrel resolves it by priority. Whichever module comes first keeps the plain name; later ones are re-exported explicitly, with a `Client` prefix:
+
+1. **Declared TypeSpec types** (`models.ts`) — always keep the plain name.
+2. **Generated endpoint objects and client classes.**
+3. **Static client infrastructure** (`ApiClient.ts`, `ApiClientRx.ts`).
 
 ```typespec
 model RequestContext { id: string; }
@@ -175,13 +179,21 @@ export type {
 } from "./client/ApiClient.js";
 ```
 
-A `client-infrastructure-name-collision` warning reports each substitution. To use the infrastructure type under its original name, import it from the module directly:
+A `generated-export-name-collision` warning reports each substitution. The aliased name is a normal root export, so the infrastructure type is still reachable:
 
 ```typescript
-import type { RequestContext } from "@my-org/my-api-client/client/ApiClient.js";
+import type { ClientRequestContext } from "@my-org/my-api-client";
 ```
 
+> The generated package's `exports` map only exposes the package root, so `@my-org/my-api-client/client/ApiClient.js` is **not** importable — use the aliased root export above. Rename the TypeSpec declaration if you would rather have the plain name back.
+
+The same applies inside a generated client module: if a model used as a response or request body is named `HttpClient`, `RequestOptions`, `Observable`, or after the interface's own `*Endpoints` object, the client's _infrastructure_ import is aliased and the model keeps the plain name in the method signatures.
+
 When nothing collides, the barrel stays a plain list of `export *` lines.
+
+### Client module name collisions
+
+An interface named `Api` would generate `client/ApiClient.ts` — the path the static infrastructure occupies. Since every generated client imports that file as `./ApiClient.js`, the infrastructure cannot move; the generated client is emitted as `ApiClient2` instead, with a `client-module-name-collision` warning. Rename the interface to avoid it.
 
 ## Query parameters
 

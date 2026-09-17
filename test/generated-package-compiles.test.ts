@@ -152,6 +152,156 @@ describe("generated package compiles", () => {
     );
   }
 
+  // Regression: a model used directly as a response/body is imported into the
+  // generated client module, where client.hbs already imports an
+  // infrastructure symbol of that name — TS2300, duplicate identifier.
+  for (const infrastructureName of [
+    "RequestOptions",
+    "HttpClient",
+    "WidgetsEndpoints",
+  ]) {
+    it(
+      `compiles when ${infrastructureName} is a model used as a response`,
+      { timeout: TYPE_CHECK_TIMEOUT },
+      async () => {
+        const { errors, files } = await emitAndTypeCheck(`
+          import "@typespec/http";
+          using Http;
+
+          @service(#{ title: "Test API" })
+          namespace TestApi;
+
+          model ${infrastructureName} { id: string; }
+
+          @route("/widgets")
+          interface Widgets {
+            @get list(): ${infrastructureName}[];
+            @post create(@body body: ${infrastructureName}): ${infrastructureName};
+          }
+        `);
+
+        deepStrictEqual(errors, []);
+
+        const clientKey = Object.keys(files).find((k) =>
+          k.endsWith("client/WidgetsClient.ts"),
+        );
+        ok(clientKey, "Expected client/WidgetsClient.ts");
+        // The model keeps the plain name; the infrastructure import yields.
+        ok(
+          files[clientKey].includes(`as Client${infrastructureName}`),
+          `Expected the infrastructure import of ${infrastructureName} to be aliased`,
+        );
+      },
+    );
+  }
+
+  it(
+    "compiles when a model used as a response collides in the Observable flavor",
+    { timeout: TYPE_CHECK_TIMEOUT },
+    async () => {
+      const { errors } = await emitAndTypeCheck(
+        `
+        import "@typespec/http";
+        using Http;
+
+        @service(#{ title: "Test API" })
+        namespace TestApi;
+
+        model Observable { id: string; }
+        model RxHttpClient { name: string; }
+        model RequestOptions { tag: string; }
+
+        @route("/widgets")
+        interface Widgets {
+          @route("/a") @get list(): Observable[];
+          @route("/b") @get other(): RxHttpClient[];
+          @route("/c") @get third(): RequestOptions[];
+        }
+      `,
+        { "client-style": "both" },
+      );
+
+      deepStrictEqual(errors, []);
+    },
+  );
+
+  // Regression: `interface RxHttp` emits client/RxHttpClient.ts exporting
+  // RxHttpClient, which the static ApiClientRx.ts also exports — TS2308.
+  it(
+    "compiles when a generated client class collides with an infrastructure export",
+    { timeout: TYPE_CHECK_TIMEOUT },
+    async () => {
+      const { errors, files } = await emitAndTypeCheck(
+        `
+        import "@typespec/http";
+        using Http;
+
+        @service(#{ title: "Test API" })
+        namespace TestApi;
+
+        model Widget { id: string; }
+
+        @route("/rxhttp")
+        interface RxHttp { @get list(): Widget[]; }
+      `,
+        { "client-style": "both" },
+      );
+
+      deepStrictEqual(errors, []);
+
+      const indexKey = Object.keys(files).find((k) => k.endsWith("index.ts"));
+      ok(indexKey, "Expected index.ts");
+      ok(
+        files[indexKey].includes("RxHttpClient as ClientRxHttpClient"),
+        "The infrastructure export yields to the generated client class",
+      );
+    },
+  );
+
+  // Regression: `interface Api` wrote client/ApiClient.ts, which the static
+  // infrastructure file then silently overwrote — the client vanished.
+  it(
+    "keeps a generated client whose file name collides with the infrastructure",
+    { timeout: TYPE_CHECK_TIMEOUT },
+    async () => {
+      const { errors, files } = await emitAndTypeCheck(`
+        import "@typespec/http";
+        using Http;
+
+        @service(#{ title: "Test API" })
+        namespace TestApi;
+
+        model Widget { id: string; }
+
+        @route("/api")
+        interface Api { @get list(): Widget[]; }
+      `);
+
+      deepStrictEqual(errors, []);
+
+      const infraKey = Object.keys(files).find((k) =>
+        k.endsWith("client/ApiClient.ts"),
+      );
+      ok(infraKey, "Expected the infrastructure client/ApiClient.ts");
+      ok(
+        files[infraKey].includes("export class HttpClient"),
+        "The infrastructure file must be intact",
+      );
+
+      const generatedKey = Object.keys(files).find((k) =>
+        k.endsWith("client/ApiClient2.ts"),
+      );
+      ok(
+        generatedKey,
+        "The generated client must be emitted under a free name",
+      );
+      ok(
+        files[generatedKey].includes("export class ApiClient2 extends"),
+        "Expected the renamed generated client class",
+      );
+    },
+  );
+
   it(
     "compiles when a model collides with an Observable-flavor export",
     { timeout: TYPE_CHECK_TIMEOUT },

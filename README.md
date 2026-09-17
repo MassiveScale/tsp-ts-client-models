@@ -135,7 +135,42 @@ Each template receives the corresponding view model as its Handlebars context.
 | `namedExports[].*[].name`  | `string`                  | Name as exported by the source module.                                                            |
 | `namedExports[].*[].alias` | `string \| undefined`     | Name to re-export it under, when it must differ to avoid a collision.                             |
 
-`namedExports` is only populated when a client infrastructure export (e.g. `RequestContext`) shares a name with a generated model or enum — see [Name collisions](docs/http-client.md#reserved-method-names). A custom `index` template that ignores it will emit a package that fails to compile in that case.
+`namedExports` is only populated when two generated modules export the same name — see [Export name collisions](docs/http-client.md#export-name-collisions). A custom `index` template that ignores it will emit a package that fails to compile in that case.
+
+**`client`** / **`clientObservable`** — `ClientView`
+
+| Field                            | Type                  | Description                                                                            |
+| -------------------------------- | --------------------- | -------------------------------------------------------------------------------------- |
+| `className`                      | `string`              | Generated class name, e.g. `WidgetsClient`.                                            |
+| `endpointsClassName`             | `string`              | Name to **import** from the endpoints module, and the module's file name.              |
+| `endpointsLocalName`             | `string`              | Name the method bodies **reference**. Differs from the above only on a name collision. |
+| `baseClassName`                  | `string`              | Local name for `HttpClient` — `"HttpClient"` unless aliased.                           |
+| `rxBaseClassName`                | `string`              | Local name for `RxHttpClient`.                                                         |
+| `requestOptionsName`             | `string`              | Local name for `RequestOptions`, as already embedded in `methodParams`.                |
+| `observableName`                 | `string`              | Local name for rxjs `Observable`.                                                      |
+| `modelImports[]`                 | `string[]`            | Deduplicated model type names imported from `../models.js`.                            |
+| `methods[]`                      | `ClientMethodView[]`  | Ordered list of client methods.                                                        |
+| `methods[].doc`                  | `string \| undefined` | Per-operation `@doc` text.                                                             |
+| `methods[].name`                 | `string`              | Method name (suffixed when the operation name is reserved).                            |
+| `methods[].methodParams`         | `string`              | Full parameter list, already rendered.                                                 |
+| `methods[].methodBody`           | `string`              | Promise-flavor body, already rendered.                                                 |
+| `methods[].methodBodyObservable` | `string`              | Observable-flavor body, already rendered.                                              |
+| `methods[].responseType`         | `string`              | Unwrapped response type; the template applies `Promise<…>` / `Observable<…>`.          |
+
+The five local-name fields exist because a model used as a response or body can be named `HttpClient`, `RequestOptions`, `Observable`, or after the interface's own `*Endpoints` object. When that happens the model keeps the plain name and the **infrastructure import is aliased**, so a template must import under the declared name and reference the local one:
+
+```handlebars
+import { HttpClient{{#unless (eq baseClassName "HttpClient")}}
+  as
+  {{baseClassName}}{{/unless}}
+} from "./ApiClient.js"; export class
+{{className}}
+extends
+{{baseClassName}}
+{
+```
+
+A template that hardcodes `HttpClient`/`RequestOptions` still works for every spec without such a model, and emits a package that fails to compile for one that has it.
 
 ### Built-in Handlebars helpers
 

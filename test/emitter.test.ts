@@ -2367,7 +2367,7 @@ describe("emitter", () => {
     const warnings = diags.filter(
       (d) =>
         d.code ===
-        "@massivescale/tsp-ts-client-models/client-infrastructure-name-collision",
+        "@massivescale/tsp-ts-client-models/generated-export-name-collision",
     );
     strictEqual(warnings.length, 1, "Expected one collision warning");
     ok(

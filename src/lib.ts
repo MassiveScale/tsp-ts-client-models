@@ -145,10 +145,16 @@ export const $lib = createTypeSpecLibrary({
         missingTag: paramMessage`Request type "${"name"}" collision: operation "${"op"}" has no @tag for disambiguation. Add @tag to all conflicting operations.`,
       },
     },
-    "client-infrastructure-name-collision": {
+    "client-module-name-collision": {
       severity: "warning",
       messages: {
-        default: paramMessage`"${"name"}" is both a generated type name and a client infrastructure export. The infrastructure export is re-exported from the package root as "${"alias"}" to keep the barrel unambiguous; import it from "${"module"}" to use its original name, or rename the TypeSpec type.`,
+        default: paramMessage`The generated client for this interface would be written to "client/${"preferred"}.ts", which the emitter's own client infrastructure occupies. It was emitted as "${"resolved"}" instead. Rename the interface to keep the name you intended.`,
+      },
+    },
+    "generated-export-name-collision": {
+      severity: "warning",
+      messages: {
+        default: paramMessage`"${"name"}" is exported by more than one generated module. The copy in "${"module"}" is re-exported from the package root as "${"alias"}" so the barrel stays unambiguous. Rename the colliding TypeSpec declaration to avoid the alias.`,
       },
     },
     "reserved-client-method-name": {

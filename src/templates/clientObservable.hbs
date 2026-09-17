@@ -1,13 +1,13 @@
-import { Observable } from "rxjs";
-import { RxHttpClient } from "./ApiClientRx.js";
-import { type RequestOptions } from "./ApiClient.js";
-import { {{endpointsClassName}} } from "../endpoints/{{endpointsClassName}}.js";
+import { Observable{{#unless (eq observableName "Observable")}} as {{observableName}}{{/unless}} } from "rxjs";
+import { RxHttpClient{{#unless (eq rxBaseClassName "RxHttpClient")}} as {{rxBaseClassName}}{{/unless}} } from "./ApiClientRx.js";
+import { type RequestOptions{{#unless (eq requestOptionsName "RequestOptions")}} as {{requestOptionsName}}{{/unless}} } from "./ApiClient.js";
+import { {{endpointsClassName}}{{#unless (eq endpointsLocalName endpointsClassName)}} as {{endpointsLocalName}}{{/unless}} } from "../endpoints/{{endpointsClassName}}.js";
 {{#if modelImports.length}}
 import type { {{#each modelImports}}{{this}}{{#unless @last}}, {{/unless}}{{/each}} } from "../models.js";
 {{/if}}
-export class {{className}} extends RxHttpClient {
+export class {{className}} extends {{rxBaseClassName}} {
 {{#each methods}}
-{{renderDoc doc "  "}}  {{name}}({{methodParams}}): Observable<{{responseType}}> {
+{{renderDoc doc "  "}}  {{name}}({{methodParams}}): {{../observableName}}<{{responseType}}> {
     {{methodBodyObservable}}
   }
 {{/each}}

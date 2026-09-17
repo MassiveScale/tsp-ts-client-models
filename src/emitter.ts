@@ -455,6 +455,9 @@ async function emitVersion(
   // Emit endpoint files and (optionally) client files; collect exports for index
   const endpointExports: string[] = [];
   const clientExports: string[] = [];
+  // Per-interface modules the barrel re-exports, in emit order. They outrank
+  // the static client infrastructure but yield to declared TypeSpec types.
+  const generatedModules: BarrelModule[] = [];
 
   for (const { name, container, ops } of byContainer.values()) {
     const vOps = version
@@ -475,6 +478,10 @@ async function emitVersion(
     const relPath = `endpoints/${name}Endpoints.ts`;
     await writeFile(program, resolvePath(vDir, relPath), content);
     endpointExports.push(`./endpoints/${name}Endpoints.js`);
+    generatedModules.push({
+      path: `./endpoints/${name}Endpoints.js`,
+      exports: [{ name: className, isType: false }],
+    });
 
     // Which names are off-limits depends on which base class the generated
     // client extends, so a Promise-only build does not reserve RxHttpClient's
@@ -486,9 +493,17 @@ async function emitVersion(
     }
 
     if (generateClient && emitPromiseClient) {
+      // `interface Api` would otherwise emit client/ApiClient.ts, which the
+      // static infrastructure file silently overwrites — the generated client
+      // would vanish without a diagnostic.
+      const clientClassName = resolveClientModuleName(
+        program,
+        `${name}Client`,
+        container,
+      );
       const view = buildClientView(
         name,
-        `${name}Client`,
+        clientClassName,
         vOps,
         requestTypes,
         discriminatedRequestUnions,
@@ -500,10 +515,14 @@ async function emitVersion(
       );
       await writeFile(
         program,
-        resolvePath(vDir, `client/${name}Client.ts`),
+        resolvePath(vDir, `client/${clientClassName}.ts`),
         renderer.renderClient(view),
       );
-      clientExports.push(`./client/${name}Client.js`);
+      clientExports.push(`./client/${clientClassName}.js`);
+      generatedModules.push({
+        path: `./client/${clientClassName}.js`,
+        exports: [{ name: clientClassName, isType: false }],
+      });
     }
 
     if (generateClient && emitObservableClient) {
@@ -525,6 +544,10 @@ async function emitVersion(
         renderer.renderObservableClient(view),
       );
       clientExports.push(`./client/${name}ObservableClient.js`);
+      generatedModules.push({
+        path: `./client/${name}ObservableClient.js`,
+        exports: [{ name: `${name}ObservableClient`, isType: false }],
+      });
     }
   }
 
@@ -578,30 +601,29 @@ async function emitVersion(
     generatedTypeNames = collectExportedNames(content);
     await writeFile(program, resolvePath(vDir, "models.ts"), content);
   }
-
   // Emit index.ts
   const exports: string[] = [];
   if (hasModels) exports.push("./models.js");
   exports.push(...endpointExports);
   exports.push(...clientExports);
 
-  // A client infrastructure export sharing a name with a generated type makes
-  // the barrel's star export ambiguous (TS2308). Those modules switch to an
-  // explicit, aliased re-export; everything else keeps its `export *` line.
+  // Two modules exporting the same name make the barrel's star export
+  // ambiguous (TS2308). Resolve in priority order — declared TypeSpec types,
+  // then per-interface generated modules, then the static infrastructure — so
+  // the name a consumer is most likely to reach for stays unaliased. A module
+  // that has to alias switches to an explicit re-export; the rest keep their
+  // `export *` line.
+  const claimed = new Set<string>(generatedTypeNames);
   const namedExports: IndexNamedExportView[] = [];
-  for (const [path, moduleExports] of [
-    ["./client/ApiClient.js", API_CLIENT_EXPORTS],
-    ["./client/ApiClientRx.js", RX_API_CLIENT_EXPORTS],
-  ] as const) {
-    if (!exports.includes(path)) continue;
-    const named = buildInfrastructureExport(
-      program,
-      path,
-      moduleExports,
-      generatedTypeNames,
-    );
+  const infrastructureModules: BarrelModule[] = [
+    { path: "./client/ApiClient.js", exports: API_CLIENT_EXPORTS },
+    { path: "./client/ApiClientRx.js", exports: RX_API_CLIENT_EXPORTS },
+  ];
+  for (const module of [...generatedModules, ...infrastructureModules]) {
+    if (!exports.includes(module.path)) continue;
+    const named = resolveBarrelModule(program, module, claimed);
     if (!named) continue;
-    exports.splice(exports.indexOf(path), 1);
+    exports.splice(exports.indexOf(module.path), 1);
     namedExports.push(named);
   }
 
@@ -1872,6 +1894,51 @@ export const RX_API_CLIENT_EXPORTS: readonly {
   isType: boolean;
 }[] = [{ name: "RxHttpClient", isType: false }];
 
+/**
+ * Module basenames under `client/` that the static infrastructure occupies. A
+ * generated client class named after one of these would have its file
+ * overwritten, so the generated one is renamed instead.
+ */
+const INFRASTRUCTURE_MODULE_NAMES: readonly string[] = [
+  "ApiClient",
+  "ApiClientRx",
+];
+
+/**
+ * Returns `base`, or `base` with the lowest numeric suffix that is not already
+ * taken. Used wherever a generated name has to step aside for one that cannot
+ * move.
+ */
+function uniqueName(base: string, taken: ReadonlySet<string>): string {
+  if (!taken.has(base)) return base;
+  let suffix = 2;
+  while (taken.has(`${base}${suffix}`)) suffix++;
+  return `${base}${suffix}`;
+}
+
+/**
+ * Resolves the class (and file) name for a generated client, stepping aside
+ * when it would land on one of the static infrastructure modules. The
+ * infrastructure file name cannot move — every generated client imports it as
+ * `./ApiClient.js` — so the generated one is renamed and a warning reported.
+ */
+function resolveClientModuleName(
+  program: Program,
+  preferred: string,
+  target: Interface | Namespace,
+): string {
+  const taken = new Set(INFRASTRUCTURE_MODULE_NAMES);
+  const resolved = uniqueName(preferred, taken);
+  if (resolved !== preferred) {
+    reportDiagnostic(program, {
+      code: "client-module-name-collision",
+      format: { preferred, resolved },
+      target,
+    });
+  }
+  return resolved;
+}
+
 /** Reads the top-level `export` declarations out of a generated module. */
 function collectExportedNames(source: string): Set<string> {
   const names = new Set<string>();
@@ -1881,53 +1948,55 @@ function collectExportedNames(source: string): Set<string> {
   return names;
 }
 
+/** A module the barrel re-exports, and the names it declares. */
+interface BarrelModule {
+  /** Relative import path, as it appears in the barrel. */
+  path: string;
+  /** Top-level exports of the module. */
+  exports: readonly { name: string; isType: boolean }[];
+}
+
 /**
- * Builds the barrel entry for a client infrastructure module.
+ * Resolves one module's contribution to the barrel.
  *
- * The barrel star-exports every generated module, so an infrastructure export
- * whose name is also a model, enum, or request type name makes the star export
- * ambiguous and the generated package fails to compile (TS2308). When that
- * happens the module is re-exported by explicit name instead, and the colliding
- * infrastructure name is aliased — the user's own type keeps the plain name,
- * since that is the API the package exists to expose.
+ * The barrel star-exports every generated module, so two modules exporting the
+ * same name make the star export ambiguous and the package fails to compile
+ * (TS2308). Modules are processed in priority order — declared TypeSpec types
+ * first, then per-interface generated clients and endpoints, then the static
+ * client infrastructure — and a later module aliases any name an earlier one
+ * has already claimed.
  *
  * Returns `undefined` when nothing collides, so the common case keeps its
  * simpler `export *` line and byte-identical output.
  */
-function buildInfrastructureExport(
+function resolveBarrelModule(
   program: Program,
-  from: string,
-  moduleExports: readonly { name: string; isType: boolean }[],
-  generatedTypeNames: ReadonlySet<string>,
+  module: BarrelModule,
+  claimed: Set<string>,
 ): IndexNamedExportView | undefined {
-  if (!moduleExports.some((e) => generatedTypeNames.has(e.name))) {
+  if (!module.exports.some((e) => claimed.has(e.name))) {
+    for (const e of module.exports) claimed.add(e.name);
     return undefined;
   }
 
-  const taken = new Set([
-    ...generatedTypeNames,
-    ...moduleExports.map((e) => e.name),
-  ]);
   const values: IndexBindingView[] = [];
   const types: IndexBindingView[] = [];
 
-  for (const { name, isType } of moduleExports) {
+  for (const { name, isType } of module.exports) {
     let alias: string | undefined;
-    if (generatedTypeNames.has(name)) {
-      alias = `Client${name}`;
-      let suffix = 2;
-      while (taken.has(alias)) alias = `Client${name}${suffix++}`;
-      taken.add(alias);
+    if (claimed.has(name)) {
+      alias = uniqueName(`Client${name}`, claimed);
       reportDiagnostic(program, {
-        code: "client-infrastructure-name-collision",
-        format: { name, alias, module: from },
+        code: "generated-export-name-collision",
+        format: { name, alias, module: module.path },
         target: NoTarget,
       });
     }
+    claimed.add(alias ?? name);
     (isType ? types : values).push(alias ? { name, alias } : { name });
   }
 
-  return { from, values, types };
+  return { from: module.path, values, types };
 }
 
 // ─── client/{Name}Client.ts generation ───────────────────────────────────────
@@ -2054,35 +2123,103 @@ function buildClientView(
   reserved: ReadonlySet<string>,
 ): ClientView {
   const endpointsClassName = `${name}Endpoints`;
-  const modelImportSet = new Set<string>();
   const siblingNames = new Set(ops.map((op) => op.operation.name));
-  const methods: import("./renderer.js").ClientMethodView[] = ops.map((op) =>
-    buildClientMethodView(
-      op,
-      endpointsClassName,
-      requestTypes,
-      discriminatedRequestUnions,
-      program,
-      models,
-      enums,
-      modelImportSet,
-      renameMap,
-      siblingNames,
-      reserved,
-    ),
-  );
+
+  const buildMethods = (
+    modelImportSet: Set<string>,
+    localNames: ClientLocalNames,
+  ) =>
+    ops.map((op) =>
+      buildClientMethodView(
+        op,
+        requestTypes,
+        discriminatedRequestUnions,
+        program,
+        models,
+        enums,
+        modelImportSet,
+        renameMap,
+        siblingNames,
+        reserved,
+        localNames,
+      ),
+    );
+
+  // The client's own model imports are only known once the method views have
+  // been built, but the local names those views reference depend on them — a
+  // model named `RequestOptions` forces the infrastructure import to be
+  // aliased. So build once to discover the imports, resolve the local names,
+  // then build again for real. Both passes are pure string work.
+  const discovered = new Set<string>();
+  buildMethods(discovered, defaultClientLocalNames(endpointsClassName));
+  const localNames = resolveClientLocalNames(endpointsClassName, discovered);
+
+  const modelImportSet = new Set<string>();
+  const methods = buildMethods(modelImportSet, localNames);
 
   return {
     className,
     endpointsClassName,
     methods,
     modelImports: [...modelImportSet],
+    ...localNames,
+  };
+}
+
+/**
+ * Local names a generated client module uses for the symbols it imports from
+ * outside `models.ts`. Each is the imported name unless a model of the same
+ * name is also imported, in which case the *infrastructure* symbol is aliased
+ * — the user's model keeps the plain name, matching how the barrel resolves
+ * the same clash.
+ */
+interface ClientLocalNames {
+  /** Local name for `HttpClient` from `./ApiClient.js`. */
+  baseClassName: string;
+  /** Local name for `RxHttpClient` from `./ApiClientRx.js`. */
+  rxBaseClassName: string;
+  /** Local name for `RequestOptions` from `./ApiClient.js`. */
+  requestOptionsName: string;
+  /** Local name for `Observable` from `rxjs`. */
+  observableName: string;
+  /** Local name for the `*Endpoints` object. */
+  endpointsLocalName: string;
+}
+
+/** The local names used when nothing collides. */
+function defaultClientLocalNames(endpointsClassName: string): ClientLocalNames {
+  return {
+    baseClassName: "HttpClient",
+    rxBaseClassName: "RxHttpClient",
+    requestOptionsName: "RequestOptions",
+    observableName: "Observable",
+    endpointsLocalName: endpointsClassName,
+  };
+}
+
+/** Aliases each imported symbol that a model import would shadow. */
+function resolveClientLocalNames(
+  endpointsClassName: string,
+  modelImports: ReadonlySet<string>,
+): ClientLocalNames {
+  const taken = new Set(modelImports);
+  const local = (imported: string): string => {
+    if (!taken.has(imported)) return imported;
+    const alias = uniqueName(`Client${imported}`, taken);
+    taken.add(alias);
+    return alias;
+  };
+  return {
+    baseClassName: local("HttpClient"),
+    rxBaseClassName: local("RxHttpClient"),
+    requestOptionsName: local("RequestOptions"),
+    observableName: local("Observable"),
+    endpointsLocalName: local(endpointsClassName),
   };
 }
 
 function buildClientMethodView(
   op: HttpOperation,
-  endpointsClassName: string,
   requestTypes: Map<string, RequestType>,
   discriminatedRequestUnions: Map<string, DiscriminatedRequestUnion>,
   program: Program,
@@ -2092,6 +2229,7 @@ function buildClientMethodView(
   renameMap: Map<string, string>,
   siblingNames: ReadonlySet<string>,
   reserved: ReadonlySet<string>,
+  localNames: ClientLocalNames,
 ): import("./renderer.js").ClientMethodView {
   const pathParams = op.parameters.parameters
     .filter((p) => p.type === "path")
@@ -2178,12 +2316,12 @@ function buildClientMethodView(
     ? `{ ${queryFields}; [key: string]: unknown }`
     : `Record<string, unknown>`;
   paramParts.push(`query?: ${queryType}`);
-  paramParts.push(`options?: RequestOptions`);
+  paramParts.push(`options?: ${localNames.requestOptionsName}`);
   const methodParams = paramParts.join(", ");
 
   // Build endpoint call expression
   const pathParamArgs = pathParams.map((p) => p.name).join(", ");
-  const endpointCall = `${endpointsClassName}.${op.operation.name}(${pathParamArgs})`;
+  const endpointCall = `${localNames.endpointsLocalName}.${op.operation.name}(${pathParamArgs})`;
 
   // Build method body. The Promise flavor calls the base verb helpers
   // (`this.get`, `this.post`, …); the Observable flavor calls the `$`-suffixed

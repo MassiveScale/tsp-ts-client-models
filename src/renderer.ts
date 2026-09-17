@@ -181,6 +181,22 @@ export interface ClientView {
   methods: ClientMethodView[];
   /** Deduplicated model type names imported from `"../models.js"`. */
   modelImports: string[];
+  /**
+   * Local name for `HttpClient`. Equals `"HttpClient"` unless a model of that
+   * name is imported, in which case the infrastructure import is aliased.
+   */
+  baseClassName: string;
+  /** Local name for `RxHttpClient`; see {@link ClientView.baseClassName}. */
+  rxBaseClassName: string;
+  /** Local name for `RequestOptions`; see {@link ClientView.baseClassName}. */
+  requestOptionsName: string;
+  /** Local name for rxjs `Observable`; see {@link ClientView.baseClassName}. */
+  observableName: string;
+  /**
+   * Local name for the endpoints object; see {@link ClientView.baseClassName}.
+   * `endpointsClassName` remains the name to import, and the module path.
+   */
+  endpointsLocalName: string;
 }
 
 // ---------------------------------------------------------------------------
