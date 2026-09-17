@@ -678,11 +678,14 @@ describe("generated ApiClient transport", () => {
       ["NaN", undefined],
       // Overflows to Infinity at Number().
       [`1${"0".repeat(400)}`, undefined],
-      // Finite as seconds (1e306) but Infinity once multiplied by 1000 — the
-      // conversion, not the input, is what has to be checked.
+      // Finite as seconds (1e306) but Infinity once multiplied by 1000.
       [`1${"0".repeat(306)}`, undefined],
-      // The largest value that still survives the conversion.
-      [`1${"0".repeat(305)}`, 1e308],
+      // Finite even in milliseconds (1e308), but far beyond what a timer can
+      // represent — setTimeout would wrap it to ~1ms and retry immediately.
+      [`1${"0".repeat(305)}`, undefined],
+      // The exact boundary: 2^31-1 ms is the largest delay a timer honors.
+      ["2147483.647", 2147483647],
+      ["2147483.648", undefined],
     ];
 
     for (const [header, expected] of retryAfterCases) {
@@ -713,10 +716,15 @@ describe("generated ApiClient transport", () => {
       });
     }
 
-    // Each of these would hang the call forever on delay(Infinity) if the
-    // header were trusted: the first overflows at Number(), the second only
-    // after being multiplied into milliseconds.
-    for (const header of ["Infinity", `1${"0".repeat(306)}`]) {
+    // Trusting any of these breaks the retry: the first two hang the call
+    // forever on delay(Infinity), while the third wraps past the timer maximum
+    // and fires again almost immediately — the opposite of what the server
+    // asked for. All three must fall back to exponential backoff.
+    for (const header of [
+      "Infinity",
+      `1${"0".repeat(306)}`,
+      `1${"0".repeat(305)}`,
+    ]) {
       it(`ignores Retry-After ${JSON.stringify(header.slice(0, 12))}… instead of stalling the retry`, async () => {
         const { HttpClient } = await loadApiClient();
         const transport = sequence(

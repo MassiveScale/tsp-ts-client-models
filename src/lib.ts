@@ -148,7 +148,7 @@ export const $lib = createTypeSpecLibrary({
     "client-module-name-collision": {
       severity: "warning",
       messages: {
-        default: paramMessage`The generated client for this interface would be written to "client/${"preferred"}.ts", which the emitter's own client infrastructure occupies. It was emitted as "${"resolved"}" instead. Rename the interface to keep the name you intended.`,
+        default: paramMessage`The generated client for this interface would be written to "client/${"preferred"}.ts", but that name is already taken — by the emitter's client infrastructure, by another generated client, or by a declared type of the same name. It was emitted as "${"resolved"}" instead. Rename the interface, or the type it collides with, to keep the name you intended.`,
       },
     },
     "generated-export-name-collision": {

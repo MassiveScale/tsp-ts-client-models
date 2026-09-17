@@ -258,6 +258,103 @@ describe("generated package compiles", () => {
     },
   );
 
+  // Regression: `interface Foo` emits FooObservableClient while `interface
+  // FooObservable` emits its *Promise* client to that same path. The second
+  // write overwrote the first, silently dropping one client from the package.
+  it(
+    "keeps both clients when two interfaces contend for one module name",
+    { timeout: TYPE_CHECK_TIMEOUT },
+    async () => {
+      const { errors, files } = await emitAndTypeCheck(
+        `
+        import "@typespec/http";
+        using Http;
+
+        @service(#{ title: "Test API" })
+        namespace TestApi;
+
+        model Widget { id: string; }
+
+        @route("/foo") interface Foo { @get list(): Widget[]; }
+        @route("/fooobs") interface FooObservable { @get list(): Widget[]; }
+      `,
+        { "client-style": "both" },
+      );
+
+      deepStrictEqual(errors, []);
+
+      // Four distinct client modules, none overwriting another.
+      const clientFiles = Object.keys(files)
+        .filter((k) => /client\/(?!ApiClient)/.test(k))
+        .map((k) => k.slice(k.lastIndexOf("/") + 1))
+        .sort();
+      deepStrictEqual(clientFiles, [
+        "FooClient.ts",
+        "FooObservableClient.ts",
+        "FooObservableClient2.ts",
+        "FooObservableObservableClient.ts",
+      ]);
+
+      // Every interface still has a client of each flavor.
+      const declared = clientFiles.map((f) => {
+        const key = Object.keys(files).find((k) => k.endsWith(`/${f}`));
+        ok(key, `Expected ${f}`);
+        return /export class (\w+)/.exec(files[key])?.[1];
+      });
+      deepStrictEqual(declared, [
+        "FooClient",
+        "FooObservableClient",
+        "FooObservableClient2",
+        "FooObservableObservableClient",
+      ]);
+    },
+  );
+
+  // Regression: a model named after the client class was imported into the
+  // very module that declares it — TS2440, conflicting local declaration.
+  for (const [style, clientFile] of [
+    ["promise", "client/WidgetsClient2.ts"],
+    ["observable", "client/WidgetsObservableClient2.ts"],
+  ] as const) {
+    it(
+      `compiles when a model is named after the ${style} client class`,
+      { timeout: TYPE_CHECK_TIMEOUT },
+      async () => {
+        const modelName =
+          style === "promise" ? "WidgetsClient" : "WidgetsObservableClient";
+        const { errors, files } = await emitAndTypeCheck(
+          `
+          import "@typespec/http";
+          using Http;
+
+          @service(#{ title: "Test API" })
+          namespace TestApi;
+
+          model ${modelName} { id: string; }
+
+          @route("/widgets")
+          interface Widgets { @get list(): ${modelName}[]; }
+        `,
+          { "client-style": style },
+        );
+
+        deepStrictEqual(errors, []);
+
+        // The declared model keeps the plain name; the client class steps aside.
+        const key = Object.keys(files).find((k) => k.endsWith(clientFile));
+        ok(key, `Expected ${clientFile}`);
+        const modelsKey = Object.keys(files).find((k) =>
+          k.endsWith("models.ts"),
+        );
+        ok(modelsKey, "Expected models.ts");
+        ok(
+          files[modelsKey].includes(`export interface ${modelName} `),
+          "The model must keep its declared name",
+        );
+      },
+    );
+  }
+
   // Regression: `interface Api` wrote client/ApiClient.ts, which the static
   // infrastructure file then silently overwrote — the client vanished.
   it(

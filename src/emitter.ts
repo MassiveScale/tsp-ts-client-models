@@ -452,12 +452,50 @@ async function emitVersion(
   const emitObservableClient =
     clientStyle === "observable" || clientStyle === "both";
 
+  // models.ts is rendered up front — before any client — because a generated
+  // client class must be allocated around the type names it exports. A client
+  // class named after a model would both import and declare that name. The
+  // collection passes above are what discover types, so rendering here sees
+  // exactly what rendering later would.
+  const hasModels =
+    [...models.values()].some((m) => isEmittable(m, nsFullName)) ||
+    [...enums.values()].some((e) => isEmittableEnum(e, nsFullName)) ||
+    requestTypes.size > 0;
+
+  let modelsContent: string | undefined;
+  let generatedTypeNames: ReadonlySet<string> = new Set<string>();
+  if (hasModels) {
+    modelsContent = buildModelsFile(
+      nsFullName,
+      models,
+      enums,
+      requestTypes,
+      requestTypeBaseModels,
+      readResponseModelNames,
+      discriminatedUnions,
+      discriminatedRequestUnions,
+      program,
+      renderer,
+      mergePatchRenameMap,
+    );
+    // Read back from the emitted text rather than recomputing the name set, so
+    // the collision checks can never disagree with what models.ts exports.
+    generatedTypeNames = collectExportedNames(modelsContent);
+  }
+
   // Emit endpoint files and (optionally) client files; collect exports for index
   const endpointExports: string[] = [];
   const clientExports: string[] = [];
   // Per-interface modules the barrel re-exports, in emit order. They outrank
   // the static client infrastructure but yield to declared TypeSpec types.
   const generatedModules: BarrelModule[] = [];
+  // One shared pool for every generated client module name, so the two flavors
+  // cannot claim the same file as each other, as the static infrastructure, or
+  // as a declared type.
+  const takenClientNames = new Set<string>([
+    ...INFRASTRUCTURE_MODULE_NAMES,
+    ...generatedTypeNames,
+  ]);
 
   for (const { name, container, ops } of byContainer.values()) {
     const vOps = version
@@ -493,13 +531,11 @@ async function emitVersion(
     }
 
     if (generateClient && emitPromiseClient) {
-      // `interface Api` would otherwise emit client/ApiClient.ts, which the
-      // static infrastructure file silently overwrites — the generated client
-      // would vanish without a diagnostic.
-      const clientClassName = resolveClientModuleName(
+      const clientClassName = allocateClientModuleName(
         program,
         `${name}Client`,
         container,
+        takenClientNames,
       );
       const view = buildClientView(
         name,
@@ -526,9 +562,15 @@ async function emitVersion(
     }
 
     if (generateClient && emitObservableClient) {
+      const observableClassName = allocateClientModuleName(
+        program,
+        `${name}ObservableClient`,
+        container,
+        takenClientNames,
+      );
       const view = buildClientView(
         name,
-        `${name}ObservableClient`,
+        observableClassName,
         vOps,
         requestTypes,
         discriminatedRequestUnions,
@@ -540,13 +582,13 @@ async function emitVersion(
       );
       await writeFile(
         program,
-        resolvePath(vDir, `client/${name}ObservableClient.ts`),
+        resolvePath(vDir, `client/${observableClassName}.ts`),
         renderer.renderObservableClient(view),
       );
-      clientExports.push(`./client/${name}ObservableClient.js`);
+      clientExports.push(`./client/${observableClassName}.js`);
       generatedModules.push({
-        path: `./client/${name}ObservableClient.js`,
-        exports: [{ name: `${name}ObservableClient`, isType: false }],
+        path: `./client/${observableClassName}.js`,
+        exports: [{ name: observableClassName, isType: false }],
       });
     }
   }
@@ -574,33 +616,10 @@ async function emitVersion(
     clientExports.unshift("./client/ApiClient.js");
   }
 
-  // Emit models.ts if there's anything to export
-  const hasModels =
-    [...models.values()].some((m) => isEmittable(m, nsFullName)) ||
-    [...enums.values()].some((e) => isEmittableEnum(e, nsFullName)) ||
-    requestTypes.size > 0;
-
-  let generatedTypeNames: ReadonlySet<string> = new Set<string>();
-  if (hasModels) {
-    const content = buildModelsFile(
-      nsFullName,
-      models,
-      enums,
-      requestTypes,
-      requestTypeBaseModels,
-      readResponseModelNames,
-      discriminatedUnions,
-      discriminatedRequestUnions,
-      program,
-      renderer,
-      mergePatchRenameMap,
-    );
-    // Read back from the emitted text rather than recomputing the name set, so
-    // the barrel's collision check can never disagree with what models.ts
-    // actually exports.
-    generatedTypeNames = collectExportedNames(content);
-    await writeFile(program, resolvePath(vDir, "models.ts"), content);
+  if (modelsContent !== undefined) {
+    await writeFile(program, resolvePath(vDir, "models.ts"), modelsContent);
   }
+
   // Emit index.ts
   const exports: string[] = [];
   if (hasModels) exports.push("./models.js");
@@ -1501,6 +1520,14 @@ export class ServiceUnavailableError extends ApiError {
   }
 }
 
+/**
+ * Largest delay a timer can actually represent (2^31 - 1 ms, about 24.8 days).
+ * Node silently wraps anything larger to roughly 1ms — firing a "wait a
+ * century" retry almost immediately — and browsers clamp it the same way, so a
+ * header asking for more than this is treated as unusable rather than honored.
+ */
+const MAX_TIMER_DELAY_MS = 2147483647;
+
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -1509,19 +1536,19 @@ function delay(ms: number): Promise<void> {
  * Parses a \`Retry-After\` header value into milliseconds.
  *
  * Only the RFC 9110 \`delta-seconds\` form is honored, and the *entire* value
- * must be a non-negative number that is still finite once converted to
- * milliseconds. An HTTP-date, a trailing unit (\`"2seconds"\`), a negative
- * value, \`"Infinity"\`, or a digit string so large that multiplying by 1000
- * overflows all yield \`undefined\`, so the caller falls back to its own
- * exponential backoff rather than waiting for a delay that never elapses.
+ * must be a non-negative number that still lands within
+ * {@link MAX_TIMER_DELAY_MS} once converted to milliseconds. An HTTP-date, a
+ * trailing unit (\`"2seconds"\`), a negative value, \`"Infinity"\`, or a delay
+ * too large for a timer all yield \`undefined\`, so the caller falls back to its
+ * own exponential backoff.
  */
 function retryAfterMs(response: Response): number | undefined {
   const after = response.headers.get("Retry-After")?.trim();
   if (!after || !/^\\d+(\\.\\d+)?$/.test(after)) return undefined;
-  // Checked after the multiplication: a value can be finite in seconds and
-  // overflow to Infinity in milliseconds.
+  // Range-checked after the multiplication: a value can be perfectly ordinary
+  // in seconds and unusable as a millisecond timer.
   const ms = Number(after) * 1000;
-  return Number.isFinite(ms) ? ms : undefined;
+  return ms <= MAX_TIMER_DELAY_MS ? ms : undefined;
 }
 
 /** Builds the most specific {@link ApiError} subclass for a failed response. */
@@ -1917,18 +1944,26 @@ function uniqueName(base: string, taken: ReadonlySet<string>): string {
 }
 
 /**
- * Resolves the class (and file) name for a generated client, stepping aside
- * when it would land on one of the static infrastructure modules. The
- * infrastructure file name cannot move — every generated client imports it as
- * `./ApiClient.js` — so the generated one is renamed and a warning reported.
+ * Allocates the class (and file) name for a generated client out of a shared
+ * pool, so no two generated clients — of either flavor — land on the same path,
+ * and none lands on a static infrastructure module or a declared type name.
+ *
+ * Collisions are real: `interface Foo` emits `FooObservableClient` while
+ * `interface FooObservable` emits its Promise client to that same name, and a
+ * model named `WidgetsClient` would be both imported and declared by
+ * `WidgetsClient`. Neither the infrastructure path nor a declared type can
+ * move, so the generated client is renamed and a warning reported.
+ *
+ * Mutates `taken`, claiming whatever name it returns.
  */
-function resolveClientModuleName(
+function allocateClientModuleName(
   program: Program,
   preferred: string,
   target: Interface | Namespace,
+  taken: Set<string>,
 ): string {
-  const taken = new Set(INFRASTRUCTURE_MODULE_NAMES);
   const resolved = uniqueName(preferred, taken);
+  taken.add(resolved);
   if (resolved !== preferred) {
     reportDiagnostic(program, {
       code: "client-module-name-collision",

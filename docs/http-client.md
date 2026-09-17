@@ -193,7 +193,15 @@ When nothing collides, the barrel stays a plain list of `export *` lines.
 
 ### Client module name collisions
 
-An interface named `Api` would generate `client/ApiClient.ts` — the path the static infrastructure occupies. Since every generated client imports that file as `./ApiClient.js`, the infrastructure cannot move; the generated client is emitted as `ApiClient2` instead, with a `client-module-name-collision` warning. Rename the interface to avoid it.
+Generated client class names are allocated from one shared pool, so no two land on the same file. A client steps aside — taking a numeric suffix and reporting a `client-module-name-collision` warning — when its preferred name is already taken by:
+
+| Case                      | Example                                                                                              | Result                 |
+| ------------------------- | ---------------------------------------------------------------------------------------------------- | ---------------------- |
+| The static infrastructure | `interface Api` → `client/ApiClient.ts`                                                              | `ApiClient2`           |
+| Another generated client  | `interface Foo` (Observable) and `interface FooObservable` (Promise) both want `FooObservableClient` | `FooObservableClient2` |
+| A declared type           | `model WidgetsClient` alongside `interface Widgets`                                                  | `WidgetsClient2`       |
+
+The infrastructure path cannot move (every client imports `./ApiClient.js`) and a declared type keeps its own name, so the generated client is what yields. Rename the interface — or the type it collides with — to get the plain name back.
 
 ## Query parameters
 
