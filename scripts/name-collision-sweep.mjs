@@ -22,12 +22,22 @@ export type TeardownLogic = (() => void) | void;
 export declare class Observable<T> { constructor(subscribe?: (s: Subscriber<T>) => TeardownLogic); subscribe(o?: unknown): { unsubscribe(): void }; }
 `;
 
+const EMITTER = "@massivescale/tsp-ts-client-models";
+
 async function typeCheck(code, options) {
   const [results, diags] = await emitWithDiagnostics(code, options);
-  const tspErrors = diags
-    .filter((d) => d.severity === "error")
-    .map((d) => `${d.code.split("/").pop()}: ${d.message}`);
-  if (tspErrors.length) return tspErrors;
+  const errors = diags.filter((d) => d.severity === "error");
+
+  // An error from the TypeSpec compiler itself means the spec is invalid, not
+  // that the emitter mishandled it — `model Record`, for instance, shadows
+  // TypeSpec's own built-in template and is rejected before the emitter runs.
+  // Those cases are skipped; errors raised by *this* emitter are failures.
+  if (errors.some((d) => !d.code.startsWith(EMITTER))) return { skipped: true };
+  if (errors.length) {
+    return {
+      errors: errors.map((d) => `${d.code.split("/").pop()}: ${d.message}`),
+    };
+  }
 
   const dir = await mkdtemp(join(tmpdir(), "tsp-sweep-"));
   try {
@@ -56,12 +66,14 @@ async function typeCheck(code, options) {
         paths: { rxjs: [join(dir, "stubs", "rxjs.d.ts")] },
       },
     );
-    return ts
-      .getPreEmitDiagnostics(program)
-      .map(
-        (d) =>
-          `TS${d.code}: ${ts.flattenDiagnosticMessageText(d.messageText, " ")}`,
-      );
+    return {
+      errors: ts
+        .getPreEmitDiagnostics(program)
+        .map(
+          (d) =>
+            `TS${d.code}: ${ts.flattenDiagnosticMessageText(d.messageText, " ")}`,
+        ),
+    };
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -170,6 +182,14 @@ for (const model of [
     `model ${model} as response/body`,
     `${HEADER} model ${model} { id: string; } @route("/x") interface Widgets { @get list(@query since?: utcDateTime): ${model}[]; @post create(@body b: ${model}): ${model}; }`,
   ]);
+  // The same name again, but with a sibling model that exercises every
+  // built-in whose mapping could be shadowed. A shadowing type is only
+  // dangerous when something else in the file actually uses the global, and
+  // the bare case above does not — which is how the models.ts `Date` bug hid.
+  cases.push([
+    `model ${model} + sibling using every built-in`,
+    `${HEADER} model ${model} { id: string; } model Sibling { when: utcDateTime; blob: bytes; tags: Record<string>; list: string[]; shadow: ${model}; } @route("/x") interface Widgets { @get list(): Sibling[]; @post create(@body b: ${model}): Sibling; }`,
+  ]);
 }
 
 // Enum names that shadow, referenced from a model.
@@ -182,16 +202,23 @@ for (const e of ["Promise", "Record", "HttpClient", "WidgetsClient"]) {
 
 let failures = 0;
 let checks = 0;
+let skipped = 0;
 for (const [label, code] of cases) {
   for (const style of ["promise", "both"]) {
     checks++;
-    const errors = await typeCheck(code, { "client-style": style });
-    if (errors.length === 0) continue;
+    const result = await typeCheck(code, { "client-style": style });
+    if (result.skipped) {
+      skipped++;
+      continue;
+    }
+    if (result.errors.length === 0) continue;
     failures++;
     console.log(`FAIL [${style}] ${label}`);
-    for (const e of errors) console.log(`    ${e}`);
+    for (const e of result.errors) console.log(`    ${e}`);
   }
 }
 
-console.log(`\n${checks} checks, ${failures} failures`);
+console.log(
+  `\n${checks} checks, ${failures} failures, ${skipped} skipped (spec rejected by TypeSpec itself)`,
+);
 process.exitCode = failures ? 1 : 0;

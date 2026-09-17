@@ -78,14 +78,22 @@ function typeCheck(dir: string): string[] {
     );
 }
 
-/** Emits a spec, type-checks it, and cleans up. */
+/**
+ * Emits a spec, type-checks it, and cleans up.
+ *
+ * `probe` is an extra `.ts` file compiled alongside the package. It is how a
+ * test asserts what a generated type actually *means* rather than only that it
+ * parses — a property typed as the wrong thing still compiles.
+ */
 async function emitAndTypeCheck(
   code: string,
   options?: EmitterOptions,
+  probe?: string,
 ): Promise<{ errors: string[]; files: Record<string, string> }> {
   const [results] = await emitWithDiagnostics(code, options);
   const dir = await materialize(results);
   try {
+    if (probe) await writeFile(join(dir, "probe.ts"), probe);
     return { errors: typeCheck(dir), files: results };
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -398,6 +406,70 @@ describe("generated package compiles", () => {
       );
     },
   );
+
+  // Regression: a generated type named after a global that a scalar maps to
+  // shadows it inside models.ts, so a sibling model's `utcDateTime` silently
+  // resolved to the user's own interface. It compiled — which is what made it
+  // dangerous — so the probe asserts the property is really a JS Date.
+  for (const [global, builtin, witness] of [
+    ["Date", "utcDateTime", "getTime()"],
+    ["Uint8Array", "bytes", "byteLength"],
+  ] as const) {
+    it(
+      `keeps the global ${global} usable when a model shadows it`,
+      { timeout: TYPE_CHECK_TIMEOUT },
+      async () => {
+        const { errors, files } = await emitAndTypeCheck(
+          `
+          import "@typespec/http";
+          using Http;
+
+          @service(#{ title: "Test API" })
+          namespace TestApi;
+
+          model ${global} { id: string; }
+          model Widget { real: ${builtin}; shadow: ${global}; }
+
+          @route("/widgets")
+          interface Widgets { @get list(): Widget[]; }
+        `,
+          undefined,
+          // `real` must be the global; `shadow` must be the user's model.
+          `import type { Widget } from "./models.js";
+           declare const w: Widget;
+           export const a = w.real.${witness};
+           export const b: string = w.shadow.id;
+          `,
+        );
+
+        deepStrictEqual(errors, []);
+
+        const modelsKey = Object.keys(files).find((k) =>
+          k.endsWith("models.ts"),
+        );
+        ok(modelsKey, "Expected models.ts");
+        const models = files[modelsKey];
+        ok(
+          models.includes(
+            `type Global${global} = InstanceType<typeof globalThis.${global}>;`,
+          ),
+          "Expected the global alias declaration",
+        );
+        ok(
+          models.includes(`real: Global${global};`),
+          "The scalar property must use the alias",
+        );
+        ok(
+          models.includes(`shadow: ${global};`),
+          "A reference to the user's own model must not be aliased",
+        );
+        ok(
+          !/^export type Global/m.test(models),
+          "The alias must not be exported into the barrel",
+        );
+      },
+    );
+  }
 
   // Regression: `interface Http` declares `class HttpClient`, the same name as
   // the base class it imports — TS2440 and a self-referential extends clause.

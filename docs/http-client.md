@@ -191,6 +191,34 @@ The same applies inside a generated client module: if a model used as a response
 
 The one case where the **model** import is aliased instead is a model named after a global the client text references — `Promise`, `Record`, `Date`, or `Uint8Array`. Importing `Promise` from `models.ts` would shadow the global that every return type is wrapped in, so the client imports it as `Promise as PromiseModel` and uses that alias in its signatures. The model's exported name is unchanged; only the client module's local binding differs.
 
+### Shadowed globals in `models.ts`
+
+The same clash happens inside `models.ts`, where the type is _declared_ rather than imported — and there it is quieter, because it still compiles. A model or enum named `Date` or `Uint8Array` shadows the global that `utcDateTime` and `bytes` map to, so a sibling model's property would silently be typed as the user's own interface:
+
+```typespec
+model Date { id: string; }
+model Widget { when: utcDateTime; shadow: Date; }
+```
+
+The emitter detects this, reports a `shadowed-global-type` warning, and declares a non-exported alias that recovers the real global:
+
+```typescript
+/** The global `Date`, aliased because a generated type shadows that name. */
+type GlobalDate = InstanceType<typeof globalThis.Date>;
+
+export interface Widget {
+  when: GlobalDate; // the JS Date, as intended
+  shadow: Date; // the user's own model, unchanged
+}
+export interface Date {
+  id: string;
+}
+```
+
+A plain `type GlobalDate = Date` would not work — module-scope declarations are hoisted, so it would resolve to the shadowing interface too. Going through `globalThis` sidesteps the type namespace. The alias is not exported, so it never reaches the package barrel.
+
+`Record` needs no such handling: TypeSpec rejects a `model Record` declaration outright, since it shadows TypeSpec's own built-in template.
+
 When nothing collides, the barrel stays a plain list of `export *` lines.
 
 ### Client module name collisions

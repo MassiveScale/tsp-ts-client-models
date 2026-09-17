@@ -151,6 +151,12 @@ export const $lib = createTypeSpecLibrary({
         default: paramMessage`The generated client for this interface would be written to "client/${"preferred"}.ts", but that name is already taken — by the emitter's client infrastructure, by another generated client, or by a declared type of the same name. It was emitted as "${"resolved"}" instead. Rename the interface, or the type it collides with, to keep the name you intended.`,
       },
     },
+    "shadowed-global-type": {
+      severity: "warning",
+      messages: {
+        default: paramMessage`A generated type is named "${"name"}", which shadows the global type of that name inside models.ts. Properties that map to the global (e.g. \`utcDateTime\` → \`Date\`, \`bytes\` → \`Uint8Array\`) now reference "${"alias"}" so they keep their intended type. Rename the TypeSpec declaration to avoid the alias.`,
+      },
+    },
     "generated-export-name-collision": {
       severity: "warning",
       messages: {

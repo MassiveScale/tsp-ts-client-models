@@ -481,6 +481,40 @@ async function emitVersion(
     // Read back from the emitted text rather than recomputing the name set, so
     // the collision checks can never disagree with what models.ts exports.
     generatedTypeNames = collectExportedNames(modelsContent);
+
+    // A generated type named after a global that scalars map to shadows it
+    // inside this very file. Re-render with those scalar references pointed at
+    // an alias instead. Rendering is pure, so a second pass is safe — and it
+    // only happens for the rare spec that triggers it.
+    const shadowed = resolveShadowedScalarGlobals(generatedTypeNames);
+    if (shadowed.aliases.size > 0) {
+      for (const [global, alias] of shadowed.aliases) {
+        reportDiagnostic(program, {
+          code: "shadowed-global-type",
+          format: { name: global, alias },
+          target: NoTarget,
+        });
+      }
+      modelsContent = buildModelsFile(
+        nsFullName,
+        models,
+        enums,
+        requestTypes,
+        requestTypeBaseModels,
+        readResponseModelNames,
+        discriminatedUnions,
+        discriminatedRequestUnions,
+        program,
+        renderer,
+        new Map([
+          ...mergePatchRenameMap,
+          ...[...shadowed.aliases].map(
+            ([global, alias]) => [`scalar:${global}`, alias] as const,
+          ),
+        ]),
+        shadowed.declarations,
+      );
+    }
   }
 
   // Emit endpoint files and (optionally) client files; collect exports for index
@@ -1115,8 +1149,9 @@ function buildModelsFile(
   program: Program,
   renderer: Renderer,
   renameMap: Map<string, string>,
+  prelude: string[] = [],
 ): string {
-  const parts: string[] = [];
+  const parts: string[] = [...prelude];
 
   for (const [, e] of enums) {
     if (!isEmittableEnum(e, nsFullName)) continue;
@@ -2234,6 +2269,47 @@ function buildClientView(
 }
 
 /**
+ * Globals that `models.ts` references as the target of a scalar mapping:
+ * `utcDateTime`/`offsetDateTime` → `Date`, `bytes` → `Uint8Array`.
+ *
+ * A generated type of the same name shadows the global *within that file*, so
+ * a sibling model's `utcDateTime` property would silently resolve to the
+ * user's own `Date` interface. It still compiles, which is what makes it
+ * dangerous — the property is simply typed as the wrong thing.
+ *
+ * `Record` is not listed: TypeSpec rejects a `model Record` declaration before
+ * the emitter ever sees it, since that shadows its own built-in template.
+ */
+const MODEL_SCALAR_GLOBALS: readonly string[] = ["Date", "Uint8Array"];
+
+/**
+ * For each scalar global shadowed by a generated type, picks a local alias and
+ * the declaration that recovers the real global.
+ *
+ * A plain `type GlobalDate = Date` would not work: module-scope declarations
+ * are hoisted, so it would resolve to the shadowing interface too. Going
+ * through `globalThis` sidesteps the type namespace entirely.
+ */
+function resolveShadowedScalarGlobals(
+  generatedTypeNames: ReadonlySet<string>,
+): { aliases: Map<string, string>; declarations: string[] } {
+  const aliases = new Map<string, string>();
+  const declarations: string[] = [];
+  const claimed = new Set(generatedTypeNames);
+  for (const global of MODEL_SCALAR_GLOBALS) {
+    if (!generatedTypeNames.has(global)) continue;
+    const alias = uniqueName(`Global${global}`, claimed);
+    claimed.add(alias);
+    aliases.set(global, alias);
+    declarations.push(
+      `/** The global \`${global}\`, aliased because a generated type shadows that name. */\n` +
+        `type ${alias} = InstanceType<typeof globalThis.${global}>;`,
+    );
+  }
+  return { aliases, declarations };
+}
+
+/**
  * Global identifiers the generated client text references by name. A model
  * import with one of these names would shadow the global inside the client
  * module — `import type { Promise }` turns every `Promise<T>` return type into
@@ -2630,8 +2706,14 @@ function mapTsType(
   renameMap?: Map<string, string>,
 ): string {
   switch (type.kind) {
-    case "Scalar":
-      return mapScalar(type as Scalar, program);
+    case "Scalar": {
+      const mapped = mapScalar(type as Scalar, program);
+      // Scalar aliases are keyed under a `scalar:` prefix so they cannot be
+      // confused with the model-name rewrites sharing this map: a model really
+      // named `Date` must keep resolving to itself, while the *global* Date a
+      // `utcDateTime` maps to is what gets aliased out of its way.
+      return renameMap?.get(`scalar:${mapped}`) ?? mapped;
+    }
 
     case "Model": {
       const m = type as Model;
