@@ -205,7 +205,7 @@ const client = new WidgetsClient({
   onError: (error, context) => appErrorHandler.report(error, context),
 });
 
-client.use(tracingMiddleware); // layers can also be added later
+client.useMiddleware(tracingMiddleware); // layers can also be added later
 ```
 
 `onRequest` and `onResponse` hooks are available for the simpler cases. Everything works identically on the Observable (RxJS) client. See [docs/client-extensibility.md](docs/client-extensibility.md) for the full pipeline and worked examples.

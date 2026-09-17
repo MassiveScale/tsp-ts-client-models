@@ -131,6 +131,24 @@ export class WidgetsClient extends HttpClient {
 - The response type is the TypeScript equivalent of the first 2xx response body. Operations with no body response use `void`.
 - Every method accepts an optional `query` parameter, regardless of HTTP verb — see [Query parameters](#query-parameters).
 
+### Reserved method names
+
+A generated client extends `HttpClient`, so an operation whose name matches an inherited member would shadow it with an incompatible signature and the generated package would not compile. Those operations get an `Operation` suffix on the **client method only**, and the emitter reports a `reserved-client-method-name` warning naming the substitution:
+
+```typespec
+@get request(): Widget[];   // collides with HttpClient.request
+```
+
+```typescript
+async requestOperation(…): Promise<Widget[]> {
+  return this.httpGet<Widget[]>(WidgetsEndpoints.request(), …); // endpoint name unchanged
+}
+```
+
+The reserved names are `constructor`, `config`, `middleware`, `useMiddleware`, `buildUrl`, `request`, `applyErrorHook`, `observe`, and the verb helpers `httpGet`/`httpPost`/`httpPut`/`httpPatch`/`httpDelete`/`httpHead` (plus their `$` variants on `RxHttpClient`).
+
+The `*Endpoints` object is a plain `as const` and inherits nothing, so its keys always keep the original operation name. Rename the operation in TypeSpec if you want the method name back.
+
 ## Query parameters
 
 Every generated client method accepts an optional `query` object, whether or not the TypeSpec operation declares any `@query` parameters, and regardless of HTTP verb (`GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `HEAD` all support it).
@@ -223,7 +241,7 @@ The method signatures, path/body/query parameters, and `RequestOptions` are iden
 - **Cold:** the underlying `fetch` fires on `subscribe`, not when the Observable is created. Each subscription triggers its own request; use `shareReplay`/`share` (or Angular's `async` pipe with a single subscription) if you need to share one result across subscribers.
 - **Cancellation:** unsubscribing aborts the in-flight request via `AbortController`. A `RequestOptions.signal` you pass also aborts it, and a configured `timeout` still applies.
 - **Errors:** `ApiError` / `RateLimitError` / `ServiceUnavailableError` are delivered via the Observable's error channel, so `catchError` sees the same types as the Promise client. Retry/backoff and timeout behavior are shared with `HttpClient` — `RxHttpClient` reuses the same transport.
-- **Extensibility:** `config.fetch`, `config.middleware`, `client.use()`, and the `onRequest`/`onResponse`/`onError` hooks all behave identically, for the same reason. `onError` fires before the error reaches `subscriber.error`, so a `catchError` downstream sees whatever the hook decided to throw.
+- **Extensibility:** `config.fetch`, `config.middleware`, `client.useMiddleware()`, and the `onRequest`/`onResponse`/`onError` hooks all behave identically, for the same reason. `onError` fires before the error reaches `subscriber.error`, so a `catchError` downstream sees whatever the hook decided to throw.
 
 ```typescript
 import { WidgetsObservableClient } from "@my-org/my-api-client";
@@ -256,7 +274,7 @@ const client = new WidgetsClient({
   onError: (error) => appErrorHandler.report(error),
 });
 
-client.use(tracingMiddleware); // also registerable after construction
+client.useMiddleware(tracingMiddleware); // also registerable after construction
 ```
 
 Middleware and the request/response hooks run **once per retry attempt**, so a layer that refreshes an expired token sees every attempt. `onError` runs **once**, after the last attempt fails. See [Extending the generated client](client-extensibility.md) for the full pipeline, worked examples (auth, refresh-on-401, caching, logging, test stubs, axios/Angular adapters), and the `Request`/`Response` rules for writing middleware.

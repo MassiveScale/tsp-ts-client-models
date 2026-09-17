@@ -145,6 +145,12 @@ export const $lib = createTypeSpecLibrary({
         missingTag: paramMessage`Request type "${"name"}" collision: operation "${"op"}" has no @tag for disambiguation. Add @tag to all conflicting operations.`,
       },
     },
+    "reserved-client-method-name": {
+      severity: "warning",
+      messages: {
+        default: paramMessage`Operation "${"name"}" collides with "${"name"}" inherited from the generated client base class, so the client method was emitted as "${"renamed"}" instead. Rename the operation to keep the method name you intended.`,
+      },
+    },
   },
   emitter: {
     options: EmitterOptionsSchema,

@@ -39,7 +39,7 @@ const client = new WidgetsClient({
 });
 
 // Middleware can also be added after construction.
-client.use(tracingMiddleware);
+client.useMiddleware(tracingMiddleware);
 ```
 
 ---
@@ -228,7 +228,7 @@ export type HttpMiddleware = (
 ) => Promise<Response>;
 ```
 
-Layers listed earlier wrap the ones listed later; `config.fetch` sits at the center. Layers added via `client.use()` go inside those from `config.middleware`.
+Layers listed earlier wrap the ones listed later; `config.fetch` sits at the center. Layers added via `client.useMiddleware()` go inside those from `config.middleware`.
 
 Unlike hooks, middleware can **not call `next` at all** (short-circuit), **call it more than once** (retry), or **wrap it in `try`/`catch`** (per-attempt error handling).
 
@@ -296,12 +296,12 @@ const cacheMiddleware: HttpMiddleware = async (request, next) => {
 
 ### Registering later
 
-`use()` appends a layer and returns the client, so registrations chain:
+`useMiddleware()` appends a layer and returns the client, so registrations chain. (It is named `useMiddleware` rather than `use` so that an API operation called `use` can keep its own method name; see [Reserved method names](http-client.md#reserved-method-names).)
 
 ```typescript
 const client = new WidgetsClient({ baseUrl })
-  .use(authMiddleware)
-  .use(loggingMiddleware);
+  .useMiddleware(authMiddleware)
+  .useMiddleware(loggingMiddleware);
 ```
 
 This is handy when a layer depends on something not available at construction time — a DI container, a router, a user session.

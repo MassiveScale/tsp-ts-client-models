@@ -2001,8 +2001,8 @@ describe("emitter", () => {
     }
 
     ok(
-      content.includes("use(middleware: HttpMiddleware): this"),
-      "Expected HttpClient.use()",
+      content.includes("useMiddleware(middleware: HttpMiddleware): this"),
+      "Expected HttpClient.useMiddleware()",
     );
     ok(
       content.includes("function composeMiddleware("),
@@ -2011,6 +2011,202 @@ describe("emitter", () => {
     ok(
       content.includes("this.config.fetch ?? ((request) => fetch(request))"),
       "Expected the global fetch fallback",
+    );
+  });
+
+  it("renames an operation that collides with an inherited base member", async () => {
+    const [results, diags] = await emitWithDiagnostics(`
+      import "@typespec/http";
+      using Http;
+
+      @service(#{ title: "Test API" })
+      namespace TestApi;
+
+      model Widget { id: string; name: string; }
+
+      @route("/widgets")
+      interface Widgets {
+        @route("/request") @get request(): Widget[];
+        @route("/config") @get config(): Widget[];
+        @route("/mw") @get useMiddleware(): Widget[];
+        @route("/normal") @get list(): Widget[];
+      }
+    `);
+
+    const clientFile = Object.keys(results).find((k) =>
+      k.includes("client/WidgetsClient.ts"),
+    );
+    ok(clientFile, "Expected client/WidgetsClient.ts");
+    const client = results[clientFile];
+
+    for (const renamed of [
+      "requestOperation(",
+      "configOperation(",
+      "useMiddlewareOperation(",
+    ]) {
+      ok(client.includes(renamed), `Expected renamed method ${renamed}`);
+    }
+    ok(client.includes("async list("), "Non-colliding names stay verbatim");
+    ok(
+      !client.includes("listOperation("),
+      "Non-colliding names are never suffixed",
+    );
+
+    // The endpoints object inherits nothing, so it keeps the original names —
+    // and the renamed methods must still call through to them.
+    const endpointsFile = Object.keys(results).find((k) =>
+      k.includes("endpoints/WidgetsEndpoints.ts"),
+    );
+    ok(endpointsFile, "Expected endpoints/WidgetsEndpoints.ts");
+    ok(
+      results[endpointsFile].includes("request:"),
+      "Endpoints keep the original operation name",
+    );
+    ok(
+      client.includes("WidgetsEndpoints.request()"),
+      "Renamed method still calls the original endpoint entry",
+    );
+
+    const warnings = diags.filter(
+      (d) =>
+        d.code ===
+        "@massivescale/tsp-ts-client-models/reserved-client-method-name",
+    );
+    strictEqual(warnings.length, 3, "Expected one warning per renamed method");
+    ok(
+      warnings.every((d) => d.severity === "warning"),
+      "Collision reports are warnings, not errors",
+    );
+  });
+
+  it("reports the reserved-name warning once when both client flavors are emitted", async () => {
+    const [, diags] = await emitWithDiagnostics(
+      `
+      import "@typespec/http";
+      using Http;
+
+      @service(#{ title: "Test API" })
+      namespace TestApi;
+
+      model Widget { id: string; name: string; }
+
+      @route("/widgets")
+      interface Widgets {
+        @get request(): Widget[];
+      }
+    `,
+      { "client-style": "both" },
+    );
+
+    const warnings = diags.filter(
+      (d) =>
+        d.code ===
+        "@massivescale/tsp-ts-client-models/reserved-client-method-name",
+    );
+    strictEqual(warnings.length, 1, "Expected exactly one warning");
+  });
+
+  it("leaves an operation named use alone, since the base member is useMiddleware", async () => {
+    const [results, diags] = await emitWithDiagnostics(`
+      import "@typespec/http";
+      using Http;
+
+      @service(#{ title: "Test API" })
+      namespace TestApi;
+
+      model Widget { id: string; name: string; }
+
+      @route("/widgets")
+      interface Widgets {
+        @get use(): Widget[];
+      }
+    `);
+
+    const clientFile = Object.keys(results).find((k) =>
+      k.includes("client/WidgetsClient.ts"),
+    );
+    ok(clientFile, "Expected client/WidgetsClient.ts");
+    ok(
+      results[clientFile].includes("async use("),
+      "`use` is a perfectly good operation name again",
+    );
+    strictEqual(
+      diags.filter(
+        (d) =>
+          d.code ===
+          "@massivescale/tsp-ts-client-models/reserved-client-method-name",
+      ).length,
+      0,
+      "No collision, no warning",
+    );
+  });
+
+  it("does not rename operations when client generation is disabled", async () => {
+    const [results, diags] = await emitWithDiagnostics(
+      `
+      import "@typespec/http";
+      using Http;
+
+      @service(#{ title: "Test API" })
+      namespace TestApi;
+
+      model Widget { id: string; name: string; }
+
+      @route("/widgets")
+      interface Widgets {
+        @get request(): Widget[];
+      }
+    `,
+      { "generate-http-client": false },
+    );
+
+    strictEqual(
+      diags.filter(
+        (d) =>
+          d.code ===
+          "@massivescale/tsp-ts-client-models/reserved-client-method-name",
+      ).length,
+      0,
+      "No client, no collision",
+    );
+    const endpointsFile = Object.keys(results).find((k) =>
+      k.includes("endpoints/WidgetsEndpoints.ts"),
+    );
+    ok(endpointsFile, "Expected endpoints/WidgetsEndpoints.ts");
+    ok(
+      results[endpointsFile].includes("request:"),
+      "Endpoint name is untouched",
+    );
+  });
+
+  it("serializes the request body inside the error-handled block", async () => {
+    const results = await emit(`
+      import "@typespec/http";
+      using Http;
+
+      @service(#{ title: "Test API" })
+      namespace TestApi;
+
+      model Widget { id: string; name: string; }
+
+      @route("/widgets")
+      interface Widgets {
+        @get list(): Widget[];
+      }
+    `);
+
+    const apiClientFile = Object.keys(results).find((k) =>
+      k.includes("client/ApiClient.ts"),
+    );
+    ok(apiClientFile, "Expected client/ApiClient.ts");
+    const content = results[apiClientFile];
+
+    const tryStart = content.indexOf("    try {\n      url = this.buildUrl(");
+    const stringify = content.indexOf("JSON.stringify(options.body)");
+    ok(tryStart > -1, "Expected the outer try block");
+    ok(
+      stringify > tryStart,
+      "Body serialization must sit inside the try so onError sees its failures",
     );
   });
 

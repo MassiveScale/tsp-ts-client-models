@@ -17,7 +17,7 @@ type Transport = (request: Request) => Promise<Response>;
 
 /** The subset of the generated `HttpClient` these tests drive. */
 interface HttpClientLike {
-  use(middleware: unknown): HttpClientLike;
+  useMiddleware(middleware: unknown): HttpClientLike;
   request<T>(
     method: string,
     path: string,
@@ -304,7 +304,7 @@ describe("generated ApiClient transport", () => {
       });
     });
 
-    it("appends use() layers inside config.middleware and returns the client", async () => {
+    it("appends useMiddleware() layers inside config.middleware and returns the client", async () => {
       const { HttpClient } = await loadApiClient();
       const order: string[] = [];
       const layer =
@@ -320,8 +320,12 @@ describe("generated ApiClient transport", () => {
         middleware: [layer("fromConfig")],
       });
 
-      const returned = client.use(layer("fromUse"));
-      strictEqual(returned, client, "use() returns the client for chaining");
+      const returned = client.useMiddleware(layer("fromUse"));
+      strictEqual(
+        returned,
+        client,
+        "useMiddleware() returns the client for chaining",
+      );
 
       await client.request("GET", "/widgets");
 
@@ -529,6 +533,86 @@ describe("generated ApiClient transport", () => {
       );
     });
 
+    it("onError sees a body that cannot be serialized", async () => {
+      const { HttpClient } = await loadApiClient();
+      const transport = sequence(jsonResponse({}));
+      let seen: unknown;
+      const client = new HttpClient({
+        baseUrl: "https://api.example.com",
+        retry: FAST_RETRY,
+        fetch: transport,
+        onError: (error: unknown) => {
+          seen = error;
+        },
+      });
+
+      const circular: Record<string, unknown> = {};
+      circular.self = circular;
+
+      await rejects(() =>
+        client.request("POST", "/widgets", { body: circular }),
+      );
+      ok(seen instanceof TypeError, "the serialization error reaches onError");
+      strictEqual(transport.calls.length, 0, "nothing was ever sent");
+    });
+
+    it("onError sees a BigInt body that cannot be serialized", async () => {
+      const { HttpClient } = await loadApiClient();
+      let seen: unknown;
+      const client = new HttpClient({
+        baseUrl: "https://api.example.com",
+        retry: FAST_RETRY,
+        fetch: sequence(jsonResponse({})),
+        onError: (error: unknown) => {
+          seen = error;
+        },
+      });
+
+      await rejects(() =>
+        client.request("POST", "/widgets", { body: { count: 1n } }),
+      );
+      ok(seen instanceof TypeError, "the serialization error reaches onError");
+    });
+
+    it("onError can replace a serialization failure", async () => {
+      const { HttpClient } = await loadApiClient();
+      const client = new HttpClient({
+        baseUrl: "https://api.example.com",
+        retry: FAST_RETRY,
+        fetch: sequence(jsonResponse({})),
+        onError: () => new Error("bad payload"),
+      });
+
+      await rejects(
+        () => client.request("POST", "/widgets", { body: { count: 1n } }),
+        /bad payload/,
+      );
+    });
+
+    it("onError receives a usable url when query serialization fails", async () => {
+      const { HttpClient } = await loadApiClient();
+      let context: Record<string, unknown> | undefined;
+      const client = new HttpClient({
+        baseUrl: "https://api.example.com",
+        retry: FAST_RETRY,
+        fetch: sequence(jsonResponse({})),
+        onError: (_error: unknown, ctx: Record<string, unknown>) => {
+          context = ctx;
+        },
+      });
+
+      // Stringifying this throws, so buildUrl fails before a full URL exists.
+      const hostile = {
+        toString() {
+          throw new TypeError("cannot stringify");
+        },
+      };
+      await rejects(() =>
+        client.request("GET", "/widgets", { query: { bad: hostile } }),
+      );
+      strictEqual(context?.url, "https://api.example.com/widgets");
+    });
+
     it("onError sees transport failures too", async () => {
       const { HttpClient } = await loadApiClient();
       let seen: unknown;
@@ -577,30 +661,72 @@ describe("generated ApiClient transport", () => {
       );
     });
 
-    it("leaves retryAfterMs undefined when Retry-After is unparseable", async () => {
-      const { HttpClient, RateLimitError } = await loadApiClient();
+    // Only the RFC 9110 delta-seconds form is accepted, and the *whole* value
+    // must parse. parseFloat would happily turn "2seconds" into 2s, "-1" into a
+    // negative delay, and "Infinity" into a retry that never fires.
+    const retryAfterCases: [string, number | undefined][] = [
+      ["2", 2000],
+      ["0", 0],
+      ["2.5", 2500],
+      ["  3  ", 3000],
+      ["Wed, 21 Oct 2026 07:28:00 GMT", undefined],
+      ["2seconds", undefined],
+      ["-1", undefined],
+      ["Infinity", undefined],
+      ["1e3", undefined],
+      ["", undefined],
+      ["NaN", undefined],
+      [`1${"0".repeat(400)}`, undefined],
+    ];
+
+    for (const [header, expected] of retryAfterCases) {
+      it(`parses Retry-After ${JSON.stringify(header)} as ${expected}`, async () => {
+        const { HttpClient, RateLimitError } = await loadApiClient();
+        const client = new HttpClient({
+          baseUrl: "https://api.example.com",
+          retry: FAST_RETRY,
+          fetch: sequence(
+            new Response(null, {
+              status: 429,
+              headers: { "Retry-After": header },
+            }),
+          ),
+        });
+
+        await rejects(
+          () => client.request("GET", "/widgets"),
+          (err: unknown) => {
+            ok(err instanceof RateLimitError);
+            strictEqual(
+              (err as { retryAfterMs?: number }).retryAfterMs,
+              expected,
+            );
+            return true;
+          },
+        );
+      });
+    }
+
+    it("ignores a malformed Retry-After instead of stalling the retry", async () => {
+      const { HttpClient } = await loadApiClient();
+      const transport = sequence(
+        new Response(null, {
+          status: 429,
+          headers: { "Retry-After": "Infinity" },
+        }),
+        jsonResponse({ recovered: true }),
+      );
       const client = new HttpClient({
         baseUrl: "https://api.example.com",
-        retry: FAST_RETRY,
-        fetch: sequence(
-          new Response(null, {
-            status: 429,
-            headers: { "Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT" },
-          }),
-        ),
+        retry: { maxAttempts: 2, baseDelayMs: 0 },
+        fetch: transport,
       });
 
-      await rejects(
-        () => client.request("GET", "/widgets"),
-        (err: unknown) => {
-          ok(err instanceof RateLimitError);
-          strictEqual(
-            (err as { retryAfterMs?: number }).retryAfterMs,
-            undefined,
-          );
-          return true;
-        },
-      );
+      // Would hang forever on delay(Infinity) if the header were trusted.
+      deepStrictEqual(await client.request("GET", "/widgets"), {
+        recovered: true,
+      });
+      strictEqual(transport.calls.length, 2);
     });
 
     it("throws ServiceUnavailableError for a 503", async () => {

@@ -474,6 +474,10 @@ async function emitVersion(
     await writeFile(program, resolvePath(vDir, relPath), content);
     endpointExports.push(`./endpoints/${name}Endpoints.js`);
 
+    if (generateClient) {
+      reportReservedClientMethodNames(program, vOps);
+    }
+
     if (generateClient && emitPromiseClient) {
       const view = buildClientView(
         name,
@@ -1444,12 +1448,20 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** Parses a \`Retry-After\` header value into milliseconds. */
+/**
+ * Parses a \`Retry-After\` header value into milliseconds.
+ *
+ * Only the RFC 9110 \`delta-seconds\` form is honored, and the *entire* value
+ * must be a non-negative finite number. An HTTP-date, a trailing unit
+ * (\`"2seconds"\`), a negative value, or \`"Infinity"\` all yield \`undefined\` so
+ * the caller falls back to its own exponential backoff — rather than becoming
+ * a bogus delay, or one that never elapses.
+ */
 function retryAfterMs(response: Response): number | undefined {
-  const after = response.headers.get("Retry-After");
-  if (!after) return undefined;
-  const seconds = parseFloat(after);
-  return Number.isNaN(seconds) ? undefined : seconds * 1000;
+  const after = response.headers.get("Retry-After")?.trim();
+  if (!after || !/^\\d+(\\.\\d+)?$/.test(after)) return undefined;
+  const seconds = Number(after);
+  return Number.isFinite(seconds) ? seconds * 1000 : undefined;
 }
 
 /** Builds the most specific {@link ApiError} subclass for a failed response. */
@@ -1488,8 +1500,12 @@ export class HttpClient {
   /**
    * Appends a middleware layer, inside any already registered. Returns the
    * client so registrations can be chained.
+   *
+   * Named \`useMiddleware\` rather than \`use\` so that an API operation called
+   * \`use\` does not shadow it. Operation names that would still collide with an
+   * inherited member are renamed at generation time.
    */
-  use(middleware: HttpMiddleware): this {
+  useMiddleware(middleware: HttpMiddleware): this {
     this.middleware.push(middleware);
     return this;
   }
@@ -1517,30 +1533,35 @@ export class HttpClient {
     const { maxAttempts = 3, baseDelayMs = 1000, retryOn = [429, 503] } =
       this.config.retry ?? {};
 
-    const url = this.buildUrl(path, options?.query);
-
-    const headers: Record<string, string> = {
-      "Content-Type": "application/json",
-      Accept: "application/json",
-      ...this.config.defaultHeaders,
-      ...options?.headers,
-    };
-
-    let signal = options?.signal;
-    if (this.config.timeout && !signal) {
-      signal = AbortSignal.timeout(this.config.timeout);
-    }
-
-    const body =
-      options?.body !== undefined ? JSON.stringify(options.body) : undefined;
-    const dispatch = composeMiddleware(
-      this.middleware,
-      this.config.fetch ?? ((request) => fetch(request)),
-    );
-
+    // Resolved without the query string up front so the error context always
+    // carries a URL, even if building the real one throws below.
+    let url = this.buildUrl(path);
     let attempt = 0;
     let lastError: unknown;
     try {
+      url = this.buildUrl(path, options?.query);
+
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        ...this.config.defaultHeaders,
+        ...options?.headers,
+      };
+
+      let signal = options?.signal;
+      if (this.config.timeout && !signal) {
+        signal = AbortSignal.timeout(this.config.timeout);
+      }
+
+      // Serialized inside the try so that an unserializable body (a circular
+      // reference, a BigInt) reaches onError like any other failure.
+      const body =
+        options?.body !== undefined ? JSON.stringify(options.body) : undefined;
+      const dispatch = composeMiddleware(
+        this.middleware,
+        this.config.fetch ?? ((request) => fetch(request)),
+      );
+
       let succeeded: Response | undefined;
       for (; attempt < maxAttempts; attempt++) {
         if (attempt > 0) await delay(baseDelayMs * Math.pow(2, attempt - 1));
@@ -1665,10 +1686,10 @@ import { HttpClient, type RequestOptions } from "./ApiClient.js";
  * - **Errors:** \`ApiError\` (and its subclasses) are delivered via
  *   \`subscriber.error\`, so \`catchError\` sees the same types as the Promise API.
  * - **Extensibility:** a custom \`config.fetch\` transport, \`config.middleware\`
- *   (and {@link HttpClient.use}), and the \`onRequest\`/\`onResponse\`/\`onError\`
- *   hooks all apply unchanged, because every verb helper routes through the
- *   same \`HttpClient\` transport. \`onError\` fires before the error reaches
- *   \`subscriber.error\`.
+ *   (and {@link HttpClient.useMiddleware}), and the
+ *   \`onRequest\`/\`onResponse\`/\`onError\` hooks all apply unchanged, because every
+ *   verb helper routes through the same \`HttpClient\` transport. \`onError\` fires
+ *   before the error reaches \`subscriber.error\`.
  */
 export class RxHttpClient extends HttpClient {
   /**
@@ -1774,6 +1795,86 @@ export class RxHttpClient extends HttpClient {
 // ─── client/{Name}Client.ts generation ───────────────────────────────────────
 
 /**
+ * Members a generated `*Client` class inherits from `HttpClient` (and, for the
+ * Observable flavor, `RxHttpClient`). An operation method with any of these
+ * names would shadow the inherited member with an incompatible signature, so
+ * the generated package would fail to type-check — and, for `useMiddleware`,
+ * middleware registration would become unreachable.
+ *
+ * Private base members are included: TypeScript rejects a subclass member that
+ * shares a name with a private member of its base.
+ */
+const RESERVED_CLIENT_MEMBERS: ReadonlySet<string> = new Set([
+  "constructor",
+  "config",
+  "middleware",
+  "useMiddleware",
+  "buildUrl",
+  "request",
+  "applyErrorHook",
+  "observe",
+  "httpGet",
+  "httpPost",
+  "httpPut",
+  "httpPatch",
+  "httpDelete",
+  "httpHead",
+  "httpGet$",
+  "httpPost$",
+  "httpPut$",
+  "httpPatch$",
+  "httpDelete$",
+  "httpHead$",
+]);
+
+/**
+ * Resolves the method name to emit for an operation. Operation names are used
+ * verbatim unless they collide with an inherited base-class member, in which
+ * case an `Operation` suffix is appended (and numbered, if that too is taken by
+ * a sibling operation).
+ *
+ * Only the client method is renamed — the generated `*Endpoints` entry keeps
+ * the original operation name, since a plain `as const` object inherits
+ * nothing and therefore cannot collide.
+ */
+function clientMethodName(
+  operationName: string,
+  siblingNames: ReadonlySet<string>,
+): string {
+  if (!RESERVED_CLIENT_MEMBERS.has(operationName)) return operationName;
+  let candidate = `${operationName}Operation`;
+  let suffix = 2;
+  while (
+    siblingNames.has(candidate) ||
+    RESERVED_CLIENT_MEMBERS.has(candidate)
+  ) {
+    candidate = `${operationName}Operation${suffix++}`;
+  }
+  return candidate;
+}
+
+/**
+ * Warns once per operation whose client method had to be renamed. Reported
+ * here rather than inside the view builder, which runs twice when both client
+ * flavors are emitted.
+ */
+function reportReservedClientMethodNames(
+  program: Program,
+  ops: HttpOperation[],
+): void {
+  const siblingNames = new Set(ops.map((op) => op.operation.name));
+  for (const op of ops) {
+    const renamed = clientMethodName(op.operation.name, siblingNames);
+    if (renamed === op.operation.name) continue;
+    reportDiagnostic(program, {
+      code: "reserved-client-method-name",
+      format: { name: op.operation.name, renamed },
+      target: op.operation,
+    });
+  }
+}
+
+/**
  * Builds the shared per-interface client view (method list + model imports).
  * The Promise and Observable client flavors differ only in `className` and the
  * template used, so this view is computed once and reused for both.
@@ -1791,6 +1892,7 @@ function buildClientView(
 ): ClientView {
   const endpointsClassName = `${name}Endpoints`;
   const modelImportSet = new Set<string>();
+  const siblingNames = new Set(ops.map((op) => op.operation.name));
   const methods: import("./renderer.js").ClientMethodView[] = ops.map((op) =>
     buildClientMethodView(
       op,
@@ -1802,6 +1904,7 @@ function buildClientView(
       enums,
       modelImportSet,
       renameMap,
+      siblingNames,
     ),
   );
 
@@ -1823,6 +1926,7 @@ function buildClientMethodView(
   enums: Map<string, Enum>,
   modelImportSet: Set<string>,
   renameMap: Map<string, string>,
+  siblingNames: ReadonlySet<string>,
 ): import("./renderer.js").ClientMethodView {
   const pathParams = op.parameters.parameters
     .filter((p) => p.type === "path")
@@ -1939,7 +2043,9 @@ function buildClientMethodView(
 
   return {
     doc: getDoc(program, op.operation) ?? undefined,
-    name: op.operation.name,
+    // The endpoint call above keeps the original operation name; only the
+    // method name is renamed when it would shadow an inherited base member.
+    name: clientMethodName(op.operation.name, siblingNames),
     methodParams,
     methodBody,
     methodBodyObservable,
