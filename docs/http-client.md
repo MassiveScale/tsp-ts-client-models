@@ -145,7 +145,14 @@ async requestOperation(…): Promise<Widget[]> {
 }
 ```
 
-The reserved names are `constructor`, `config`, `middleware`, `useMiddleware`, `buildUrl`, `request`, `applyErrorHook`, `observe`, and the verb helpers `httpGet`/`httpPost`/`httpPut`/`httpPatch`/`httpDelete`/`httpHead` (plus their `$` variants on `RxHttpClient`).
+Which names are reserved depends on the base class your client actually extends, so a Promise-only build does not give up names that exist only on `RxHttpClient`:
+
+| `client-style`               | Reserved                                                                                                                                                                                  |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `promise` (default)          | `HttpClient` members: `constructor`, `config`, `middleware`, `useMiddleware`, `buildUrl`, `request`, `applyErrorHook`, `httpGet`/`httpPost`/`httpPut`/`httpPatch`/`httpDelete`/`httpHead` |
+| `observable` &middot; `both` | The above, plus `RxHttpClient` members: `observe` and the `$` verb helpers (`httpGet$`, `httpPost$`, …)                                                                                   |
+
+So `@get observe(): Widget[]` generates `client.observe()` under the default style, and `client.observeOperation()` once an Observable client is in the mix. Under `both`, the larger set applies to _both_ generated clients, so the Promise and Observable flavors stay method-for-method interchangeable.
 
 The `*Endpoints` object is a plain `as const` and inherits nothing, so its keys always keep the original operation name. Rename the operation in TypeSpec if you want the method name back.
 

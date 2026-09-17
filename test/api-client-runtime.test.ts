@@ -676,7 +676,13 @@ describe("generated ApiClient transport", () => {
       ["1e3", undefined],
       ["", undefined],
       ["NaN", undefined],
+      // Overflows to Infinity at Number().
       [`1${"0".repeat(400)}`, undefined],
+      // Finite as seconds (1e306) but Infinity once multiplied by 1000 — the
+      // conversion, not the input, is what has to be checked.
+      [`1${"0".repeat(306)}`, undefined],
+      // The largest value that still survives the conversion.
+      [`1${"0".repeat(305)}`, 1e308],
     ];
 
     for (const [header, expected] of retryAfterCases) {
@@ -707,27 +713,31 @@ describe("generated ApiClient transport", () => {
       });
     }
 
-    it("ignores a malformed Retry-After instead of stalling the retry", async () => {
-      const { HttpClient } = await loadApiClient();
-      const transport = sequence(
-        new Response(null, {
-          status: 429,
-          headers: { "Retry-After": "Infinity" },
-        }),
-        jsonResponse({ recovered: true }),
-      );
-      const client = new HttpClient({
-        baseUrl: "https://api.example.com",
-        retry: { maxAttempts: 2, baseDelayMs: 0 },
-        fetch: transport,
-      });
+    // Each of these would hang the call forever on delay(Infinity) if the
+    // header were trusted: the first overflows at Number(), the second only
+    // after being multiplied into milliseconds.
+    for (const header of ["Infinity", `1${"0".repeat(306)}`]) {
+      it(`ignores Retry-After ${JSON.stringify(header.slice(0, 12))}… instead of stalling the retry`, async () => {
+        const { HttpClient } = await loadApiClient();
+        const transport = sequence(
+          new Response(null, {
+            status: 429,
+            headers: { "Retry-After": header },
+          }),
+          jsonResponse({ recovered: true }),
+        );
+        const client = new HttpClient({
+          baseUrl: "https://api.example.com",
+          retry: { maxAttempts: 2, baseDelayMs: 0 },
+          fetch: transport,
+        });
 
-      // Would hang forever on delay(Infinity) if the header were trusted.
-      deepStrictEqual(await client.request("GET", "/widgets"), {
-        recovered: true,
+        deepStrictEqual(await client.request("GET", "/widgets"), {
+          recovered: true,
+        });
+        strictEqual(transport.calls.length, 2);
       });
-      strictEqual(transport.calls.length, 2);
-    });
+    }
 
     it("throws ServiceUnavailableError for a 503", async () => {
       const { HttpClient, ServiceUnavailableError } = await loadApiClient();

@@ -180,35 +180,51 @@ describe("generated package compiles", () => {
     },
   );
 
-  // Regression: these are members of the generated HttpClient base, so an
+  const COLLIDING_OPS = `
+        @route("/a") @get buildUrl(): Widget[];
+        @route("/b") @get applyErrorHook(): Widget[];
+        @route("/c") @get request(): Widget[];
+        @route("/d") @get config(): Widget[];
+        @route("/e") @get useMiddleware(): Widget[];
+        @route("/f") @get httpGet(): Widget[];
+        @route("/g") @get observe(): Widget[];
+        @route("/h") @get httpGet$(): Widget[];
+        @route("/i") @get use(): Widget[];
+  `;
+
+  const collidingSpec = `
+    import "@typespec/http";
+    using Http;
+
+    @service(#{ title: "Test API" })
+    namespace TestApi;
+
+    model Widget { id: string; name: string; }
+
+    @route("/widgets")
+    interface Widgets {${COLLIDING_OPS}}
+  `;
+
+  /** Members of HttpClient — always reserved, whatever the client style. */
+  const BASE_COLLISIONS = [
+    "buildUrl",
+    "applyErrorHook",
+    "request",
+    "config",
+    "useMiddleware",
+    "httpGet",
+  ];
+  /** Members of RxHttpClient — only reserved when that base is emitted. */
+  const RX_COLLISIONS = ["observe", "httpGet$"];
+
+  // Regression: these are members of the generated client's base class, so an
   // operation of the same name produced an incompatible override (TS2416) or
   // clashed with a private base member.
   it(
-    "compiles when operations are named after inherited client members",
+    "compiles and renames only base members for the Promise flavor",
     { timeout: TYPE_CHECK_TIMEOUT },
     async () => {
-      const { errors, files } = await emitAndTypeCheck(`
-        import "@typespec/http";
-        using Http;
-
-        @service(#{ title: "Test API" })
-        namespace TestApi;
-
-        model Widget { id: string; name: string; }
-
-        @route("/widgets")
-        interface Widgets {
-          @route("/a") @get buildUrl(): Widget[];
-          @route("/b") @get applyErrorHook(): Widget[];
-          @route("/c") @get request(): Widget[];
-          @route("/d") @get config(): Widget[];
-          @route("/e") @get useMiddleware(): Widget[];
-          @route("/f") @get observe(): Widget[];
-          @route("/g") @get httpGet(): Widget[];
-          @route("/h") @get use(): Widget[];
-        }
-      `);
-
+      const { errors, files } = await emitAndTypeCheck(collidingSpec);
       deepStrictEqual(errors, []);
 
       const clientKey = Object.keys(files).find((k) =>
@@ -216,16 +232,16 @@ describe("generated package compiles", () => {
       );
       ok(clientKey, "Expected client/WidgetsClient.ts");
       const client = files[clientKey];
-      for (const renamed of [
-        "async buildUrlOperation(",
-        "async applyErrorHookOperation(",
-        "async requestOperation(",
-        "async configOperation(",
-        "async useMiddlewareOperation(",
-        "async observeOperation(",
-        "async httpGetOperation(",
-      ]) {
-        ok(client.includes(renamed), `Expected ${renamed}`);
+
+      for (const name of BASE_COLLISIONS) {
+        ok(client.includes(`async ${name}Operation(`), `Expected ${name}`);
+      }
+      // RxHttpClient is not the base here, so these names are free.
+      for (const name of RX_COLLISIONS) {
+        ok(
+          client.includes(`async ${name}(`),
+          `Promise-only clients must not reserve the Rx member ${name}`,
+        );
       }
       ok(
         client.includes("async use("),
@@ -235,27 +251,39 @@ describe("generated package compiles", () => {
   );
 
   it(
-    "compiles the Observable flavor when an operation shadows an Rx helper",
+    "compiles and renames Rx members too when an Observable client is emitted",
     { timeout: TYPE_CHECK_TIMEOUT },
     async () => {
-      const { errors } = await emitAndTypeCheck(
-        `
-        import "@typespec/http";
-        using Http;
+      const { errors, files } = await emitAndTypeCheck(collidingSpec, {
+        "client-style": "both",
+      });
+      deepStrictEqual(errors, []);
 
-        @service(#{ title: "Test API" })
-        namespace TestApi;
-
-        model Widget { id: string; name: string; }
-
-        @route("/widgets")
-        interface Widgets {
-          @route("/a") @get observe(): Widget[];
-          @route("/b") @get request(): Widget[];
+      for (const [file, prefix] of [
+        ["client/WidgetsClient.ts", "async "],
+        ["client/WidgetsObservableClient.ts", ""],
+      ] as const) {
+        const key = Object.keys(files).find((k) => k.endsWith(file));
+        ok(key, `Expected ${file}`);
+        // Both flavors rename the same set, so the two clients stay
+        // method-for-method interchangeable.
+        for (const name of [...BASE_COLLISIONS, ...RX_COLLISIONS]) {
+          ok(
+            files[key].includes(`${prefix}${name}Operation(`),
+            `Expected ${name}Operation in ${file}`,
+          );
         }
-      `,
-        { "client-style": "both" },
-      );
+      }
+    },
+  );
+
+  it(
+    "compiles the Observable-only flavor when an operation shadows an Rx helper",
+    { timeout: TYPE_CHECK_TIMEOUT },
+    async () => {
+      const { errors } = await emitAndTypeCheck(collidingSpec, {
+        "client-style": "observable",
+      });
 
       deepStrictEqual(errors, []);
     },

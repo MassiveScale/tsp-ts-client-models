@@ -476,8 +476,13 @@ async function emitVersion(
     await writeFile(program, resolvePath(vDir, relPath), content);
     endpointExports.push(`./endpoints/${name}Endpoints.js`);
 
+    // Which names are off-limits depends on which base class the generated
+    // client extends, so a Promise-only build does not reserve RxHttpClient's
+    // members.
+    const reservedMembers = reservedClientMembers(emitObservableClient);
+
     if (generateClient) {
-      reportReservedClientMethodNames(program, vOps);
+      reportReservedClientMethodNames(program, vOps, reservedMembers);
     }
 
     if (generateClient && emitPromiseClient) {
@@ -491,6 +496,7 @@ async function emitVersion(
         models,
         enums,
         mergePatchRenameMap,
+        reservedMembers,
       );
       await writeFile(
         program,
@@ -511,6 +517,7 @@ async function emitVersion(
         models,
         enums,
         mergePatchRenameMap,
+        reservedMembers,
       );
       await writeFile(
         program,
@@ -1423,7 +1430,7 @@ export interface ClientConfig {
   /**
    * Middleware applied to every request, outermost first. Each layer runs once
    * per retry attempt. Further layers can be appended later with
-   * {@link HttpClient.use}.
+   * {@link HttpClient.useMiddleware}.
    */
   middleware?: HttpMiddleware[];
   /** Runs before any middleware, once per retry attempt. */
@@ -1480,16 +1487,19 @@ function delay(ms: number): Promise<void> {
  * Parses a \`Retry-After\` header value into milliseconds.
  *
  * Only the RFC 9110 \`delta-seconds\` form is honored, and the *entire* value
- * must be a non-negative finite number. An HTTP-date, a trailing unit
- * (\`"2seconds"\`), a negative value, or \`"Infinity"\` all yield \`undefined\` so
- * the caller falls back to its own exponential backoff — rather than becoming
- * a bogus delay, or one that never elapses.
+ * must be a non-negative number that is still finite once converted to
+ * milliseconds. An HTTP-date, a trailing unit (\`"2seconds"\`), a negative
+ * value, \`"Infinity"\`, or a digit string so large that multiplying by 1000
+ * overflows all yield \`undefined\`, so the caller falls back to its own
+ * exponential backoff rather than waiting for a delay that never elapses.
  */
 function retryAfterMs(response: Response): number | undefined {
   const after = response.headers.get("Retry-After")?.trim();
   if (!after || !/^\\d+(\\.\\d+)?$/.test(after)) return undefined;
-  const seconds = Number(after);
-  return Number.isFinite(seconds) ? seconds * 1000 : undefined;
+  // Checked after the multiplication: a value can be finite in seconds and
+  // overflow to Infinity in milliseconds.
+  const ms = Number(after) * 1000;
+  return Number.isFinite(ms) ? ms : undefined;
 }
 
 /** Builds the most specific {@link ApiError} subclass for a failed response. */
@@ -1923,16 +1933,15 @@ function buildInfrastructureExport(
 // ─── client/{Name}Client.ts generation ───────────────────────────────────────
 
 /**
- * Members a generated `*Client` class inherits from `HttpClient` (and, for the
- * Observable flavor, `RxHttpClient`). An operation method with any of these
- * names would shadow the inherited member with an incompatible signature, so
- * the generated package would fail to type-check — and, for `useMiddleware`,
- * middleware registration would become unreachable.
+ * Members every generated `*Client` inherits from `HttpClient`. An operation
+ * method with any of these names would shadow the inherited member with an
+ * incompatible signature, so the generated package would fail to type-check —
+ * and, for `useMiddleware`, middleware registration would become unreachable.
  *
  * Private base members are included: TypeScript rejects a subclass member that
  * shares a name with a private member of its base.
  */
-const RESERVED_CLIENT_MEMBERS: ReadonlySet<string> = new Set([
+const BASE_CLIENT_MEMBERS: readonly string[] = [
   "constructor",
   "config",
   "middleware",
@@ -1940,20 +1949,46 @@ const RESERVED_CLIENT_MEMBERS: ReadonlySet<string> = new Set([
   "buildUrl",
   "request",
   "applyErrorHook",
-  "observe",
   "httpGet",
   "httpPost",
   "httpPut",
   "httpPatch",
   "httpDelete",
   "httpHead",
+];
+
+/**
+ * Members declared only on `RxHttpClient`, which exists solely for the
+ * Observable flavor. A Promise-only build must not reserve these — an
+ * operation named `observe` is perfectly valid there.
+ */
+const RX_CLIENT_MEMBERS: readonly string[] = [
+  "observe",
   "httpGet$",
   "httpPost$",
   "httpPut$",
   "httpPatch$",
   "httpDelete$",
   "httpHead$",
-]);
+];
+
+/**
+ * The names an operation method may not take, given which client flavors are
+ * being emitted.
+ *
+ * When an Observable client is emitted the Rx members are reserved for *both*
+ * flavors, so that a `client-style: both` build exposes the same method names
+ * on its Promise and Observable clients rather than diverging.
+ */
+function reservedClientMembers(
+  emitObservableClient: boolean,
+): ReadonlySet<string> {
+  return new Set(
+    emitObservableClient
+      ? [...BASE_CLIENT_MEMBERS, ...RX_CLIENT_MEMBERS]
+      : BASE_CLIENT_MEMBERS,
+  );
+}
 
 /**
  * Resolves the method name to emit for an operation. Operation names are used
@@ -1968,14 +2003,12 @@ const RESERVED_CLIENT_MEMBERS: ReadonlySet<string> = new Set([
 function clientMethodName(
   operationName: string,
   siblingNames: ReadonlySet<string>,
+  reserved: ReadonlySet<string>,
 ): string {
-  if (!RESERVED_CLIENT_MEMBERS.has(operationName)) return operationName;
+  if (!reserved.has(operationName)) return operationName;
   let candidate = `${operationName}Operation`;
   let suffix = 2;
-  while (
-    siblingNames.has(candidate) ||
-    RESERVED_CLIENT_MEMBERS.has(candidate)
-  ) {
+  while (siblingNames.has(candidate) || reserved.has(candidate)) {
     candidate = `${operationName}Operation${suffix++}`;
   }
   return candidate;
@@ -1989,10 +2022,11 @@ function clientMethodName(
 function reportReservedClientMethodNames(
   program: Program,
   ops: HttpOperation[],
+  reserved: ReadonlySet<string>,
 ): void {
   const siblingNames = new Set(ops.map((op) => op.operation.name));
   for (const op of ops) {
-    const renamed = clientMethodName(op.operation.name, siblingNames);
+    const renamed = clientMethodName(op.operation.name, siblingNames, reserved);
     if (renamed === op.operation.name) continue;
     reportDiagnostic(program, {
       code: "reserved-client-method-name",
@@ -2017,6 +2051,7 @@ function buildClientView(
   models: Map<string, Model>,
   enums: Map<string, Enum>,
   renameMap: Map<string, string>,
+  reserved: ReadonlySet<string>,
 ): ClientView {
   const endpointsClassName = `${name}Endpoints`;
   const modelImportSet = new Set<string>();
@@ -2033,6 +2068,7 @@ function buildClientView(
       modelImportSet,
       renameMap,
       siblingNames,
+      reserved,
     ),
   );
 
@@ -2055,6 +2091,7 @@ function buildClientMethodView(
   modelImportSet: Set<string>,
   renameMap: Map<string, string>,
   siblingNames: ReadonlySet<string>,
+  reserved: ReadonlySet<string>,
 ): import("./renderer.js").ClientMethodView {
   const pathParams = op.parameters.parameters
     .filter((p) => p.type === "path")
@@ -2173,7 +2210,7 @@ function buildClientMethodView(
     doc: getDoc(program, op.operation) ?? undefined,
     // The endpoint call above keeps the original operation name; only the
     // method name is renamed when it would shadow an inherited base member.
-    name: clientMethodName(op.operation.name, siblingNames),
+    name: clientMethodName(op.operation.name, siblingNames, reserved),
     methodParams,
     methodBody,
     methodBodyObservable,

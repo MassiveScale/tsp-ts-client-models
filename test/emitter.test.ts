@@ -2106,6 +2106,115 @@ describe("emitter", () => {
     strictEqual(warnings.length, 1, "Expected exactly one warning");
   });
 
+  it("reserves RxHttpClient members only when an Observable client is emitted", async () => {
+    const spec = `
+      import "@typespec/http";
+      using Http;
+
+      @service(#{ title: "Test API" })
+      namespace TestApi;
+
+      model Widget { id: string; name: string; }
+
+      @route("/widgets")
+      interface Widgets {
+        @route("/a") @get observe(): Widget[];
+        @route("/b") @get request(): Widget[];
+      }
+    `;
+
+    const reservedCode =
+      "@massivescale/tsp-ts-client-models/reserved-client-method-name";
+
+    // Promise only: RxHttpClient is not the base, so `observe` is a fine name.
+    const [promiseResults, promiseDiags] = await emitWithDiagnostics(spec, {
+      "client-style": "promise",
+    });
+    const promiseKey = Object.keys(promiseResults).find((k) =>
+      k.endsWith("client/WidgetsClient.ts"),
+    );
+    ok(promiseKey, "Expected client/WidgetsClient.ts");
+    ok(
+      promiseResults[promiseKey].includes("async observe("),
+      "A Promise-only client must not rename `observe`",
+    );
+    ok(
+      promiseResults[promiseKey].includes("async requestOperation("),
+      "Base members are still reserved",
+    );
+    const promiseWarnings = promiseDiags.filter((d) => d.code === reservedCode);
+    strictEqual(
+      promiseWarnings.length,
+      1,
+      "Only the genuine base-member collision should warn",
+    );
+    ok(
+      promiseWarnings[0].message.includes("request"),
+      "The warning is about `request`, not `observe`",
+    );
+
+    // Observable in the mix: `observe` really is inherited, so it is renamed —
+    // in both flavors, so the two clients keep matching method names.
+    for (const style of ["observable", "both"] as const) {
+      const [results, diags] = await emitWithDiagnostics(spec, {
+        "client-style": style,
+      });
+      strictEqual(
+        diags.filter((d) => d.code === reservedCode).length,
+        2,
+        `Expected both collisions to warn for client-style ${style}`,
+      );
+      for (const key of Object.keys(results).filter((k) =>
+        /client\/Widgets(Observable)?Client\.ts$/.test(k),
+      )) {
+        ok(
+          results[key].includes("observeOperation("),
+          `Expected observeOperation in ${key}`,
+        );
+      }
+    }
+  });
+
+  it("emits no dangling {@link} targets in the client infrastructure", async () => {
+    const results = await emit(
+      `
+      import "@typespec/http";
+      using Http;
+
+      @service(#{ title: "Test API" })
+      namespace TestApi;
+
+      model Widget { id: string; name: string; }
+
+      @route("/widgets")
+      interface Widgets { @get list(): Widget[]; }
+    `,
+      { "client-style": "both" },
+    );
+
+    const sources = Object.keys(results)
+      .filter((k) => /client\/ApiClient(Rx)?\.ts$/.test(k))
+      .map((k) => results[k]);
+    const combined = sources.join("\n");
+
+    // Every member declared at class/interface body level across both modules.
+    const declared = new Set<string>();
+    for (const m of combined.matchAll(
+      /^ {2}(?:public |protected |private )?(?:readonly )?(\w+)\??[<(:]/gm,
+    )) {
+      declared.add(m[1]);
+    }
+
+    const links = [...combined.matchAll(/\{@link\s+(\w+)\.(\w+)\}/g)];
+    ok(links.length > 0, "Expected some member links to check");
+    for (const [, owner, member] of links) {
+      ok(
+        declared.has(member),
+        `{@link ${owner}.${member}} points at a member that is not declared`,
+      );
+    }
+  });
+
   it("leaves an operation named use alone, since the base member is useMiddleware", async () => {
     const [results, diags] = await emitWithDiagnostics(`
       import "@typespec/http";
