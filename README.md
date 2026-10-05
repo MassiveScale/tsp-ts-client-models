@@ -338,7 +338,7 @@ The generated `fetch`/JSON client performs no per-field transformation, so a boo
 
 - Node.js 22 or later (LTS recommended)
 - npm 11+
-- TypeSpec 1.14.0+ (`@typespec/compiler` `^1.14.0`, `@typespec/http` `^1.14.0`, `@typespec/rest` / `@typespec/versioning` `^0.84.0`)
+- TypeSpec 1.15.0+ (`@typespec/compiler` `^1.15.0`, `@typespec/http` `^1.15.0`, `@typespec/versioning` `>=0.85.0 <1.0.0`; `@typespec/rest` `^0.85.0` for development)
 
 ### Setup
 

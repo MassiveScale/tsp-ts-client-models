@@ -1,4 +1,4 @@
-import "@typespec/rest";
+import "@typespec/http";
 import "./versioning.tsp";
 import "./common.tsp";
 import "./models.tsp";
