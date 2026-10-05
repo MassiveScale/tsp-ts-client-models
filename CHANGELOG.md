@@ -6,9 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Wider `@typespec/versioning` peer range.** The peer dependency is now `>=0.85.0 <1.0.0` (previously `^0.85.0`, which npm treats as `>=0.85.0 <0.86.0` for pre-1.0 packages). Projects on `@typespec/versioning` 0.86 and later 0.x releases can now install the emitter without a peer conflict. The emitter is verified against 0.85 and 0.86.
+
 ### Removed
 
-- **Unused dependencies in the examples.** `example/simple-api` no longer depends on `@typespec/rest`, `@typespec/openapi`, or `@typespec/openapi3`, and `example/versioned-api` no longer depends on `@typespec/rest`, `@typespec/openapi`, or `@typespec/openapi3`. Neither example emits OpenAPI, and neither uses anything from `@typespec/rest` — `versioned-api/routes.tsp` imported it only to pull in `@typespec/http` transitively, so it now imports `@typespec/http` directly. The emitter package itself is unchanged; all of its dependencies are in use.
+- **Unused dependencies in the examples.** Both `example/simple-api` and `example/versioned-api` no longer depend on `@typespec/rest`, `@typespec/openapi`, or `@typespec/openapi3`. Neither example emits OpenAPI, and neither uses anything from `@typespec/rest` — `versioned-api/routes.tsp` imported it only to pull in `@typespec/http` transitively, so it now imports `@typespec/http` directly. All of the emitter's own dependencies are in use.
 
 ## [0.8.0] — 2026-09-16
 

@@ -90,7 +90,7 @@ The project uses ESM (`"type": "module"`). All internal imports must use `.js` e
 
 ### TypeSpec Peer Dependency
 
-`@typespec/compiler` is declared as a peer dependency pinned to `^1.14.0`. The dev/test/example dependencies track the same 1.14.0 release train: `@typespec/http` `^1.14.0`, `@typespec/rest` and `@typespec/versioning` `^0.84.0`. When upgrading, bump the compiler, http, rest, and versioning packages together (compiler/http share the 1.x line; rest/versioning are on the 0.8x line) and keep the examples in sync.
+`@typespec/compiler` and `@typespec/http` are declared as peer dependencies pinned to `^1.15.0`; `@typespec/versioning` is a peer at `>=0.85.0 <1.0.0`. The dev/test/example dependencies track the 1.15.0 release train: `@typespec/http` `^1.15.0`, `@typespec/rest` and `@typespec/versioning` `^0.85.0`. When upgrading, bump the compiler, http, rest, and versioning packages together (compiler/http share the 1.x line; rest/versioning are on the 0.8x line) and keep the examples in sync.
 
 ### Diagnostics
 
