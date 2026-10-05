@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Removed
+
+- **Unused dependencies in the examples.** `example/simple-api` no longer depends on `@typespec/rest`, `@typespec/openapi`, or `@typespec/openapi3`, and `example/versioned-api` no longer depends on `@typespec/rest`, `@typespec/openapi`, or `@typespec/openapi3`. Neither example emits OpenAPI, and neither uses anything from `@typespec/rest` — `versioned-api/routes.tsp` imported it only to pull in `@typespec/http` transitively, so it now imports `@typespec/http` directly. The emitter package itself is unchanged; all of its dependencies are in use.
+
 ## [0.8.0] — 2026-09-16
 
 ### Added
