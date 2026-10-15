@@ -1695,6 +1695,11 @@ export interface TransportOptions extends Omit<RequestOptions, "headers"> {
    * with \`JSON.stringify\`; any other body is sent as-is.
    */
   contentType?: string;
+  /**
+   * How to read a success body: parsed as JSON (the default), as text, or as
+   * raw bytes. An empty JSON body resolves to \`undefined\`.
+   */
+  responseFormat?: "json" | "text" | "binary";
 }
 
 export class ApiError extends Error {
@@ -1825,6 +1830,21 @@ function isRawBody(body: unknown): body is BodyInit {
     ArrayBuffer.isView(body) ||
     (typeof ReadableStream !== "undefined" && body instanceof ReadableStream)
   );
+}
+
+/**
+ * Reads a success body in the format the operation declares. An empty JSON
+ * body — a \`201\` with no content, or a \`200\` from an operation that returns
+ * nothing — resolves to \`undefined\` rather than failing to parse.
+ */
+async function readBody(
+  response: Response,
+  format: TransportOptions["responseFormat"] = "json",
+): Promise<unknown> {
+  if (format === "binary") return new Uint8Array(await response.arrayBuffer());
+  const text = await response.text();
+  if (format === "text") return text;
+  return text.trim() === "" ? undefined : JSON.parse(text);
 }
 
 /**
@@ -1973,7 +1993,7 @@ export class HttpClient {
       if (method === "HEAD" || succeeded.status === 204 || succeeded.status === 205) {
         return undefined as T;
       }
-      return (await succeeded.json()) as T;
+      return (await readBody(succeeded, options?.responseFormat)) as T;
     } catch (err) {
       throw await this.applyErrorHook(err, {
         method,
@@ -2723,7 +2743,7 @@ function buildClientMethodView(
   );
 
   // Determine response type from first 2xx response body
-  const responseType = resolveResponseType(
+  const response = resolveResponseType(
     op,
     program,
     models,
@@ -2782,6 +2802,10 @@ function buildClientMethodView(
   if (body?.contentType) {
     transport.push(`contentType: ${JSON.stringify(body.contentType)}`);
   }
+  if (response.format) {
+    transport.push(`responseFormat: ${JSON.stringify(response.format)}`);
+  }
+  const responseType = response.type;
   const transportArg = `{ ${transport.join(", ")} }`;
 
   // The Promise flavor calls the base verb helpers (`this.httpGet`,
@@ -2990,26 +3014,36 @@ function resolveResponseType(
   enums: Map<string, Enum>,
   modelImportSet: Set<string>,
   renameMap: Map<string, string>,
-): string {
+): ResponseShape {
   for (const resp of op.responses) {
     if (!is2xxStatusCode(resp.statusCodes)) continue;
     for (const content of resp.responses) {
-      if (content.body) {
-        const tsType = mapTsType(
-          content.body.type,
-          program,
-          models,
-          enums,
-          renameMap,
-        );
-        if (tsType !== "void" && tsType !== "unknown") {
-          collectModelNamesFromType(content.body.type, modelImportSet);
-          return tsType;
-        }
+      if (!content.body) continue;
+      const bodyType = content.body.type;
+      const contentType = content.body.contentTypes[0];
+      const isJson = !contentType || /[/+]json\s*(;|$)/i.test(contentType);
+      const isBytes =
+        bodyType.kind === "Scalar" && builtinScalarName(bodyType) === "bytes";
+      if (!isJson && isBytes) return { type: "Uint8Array", format: "binary" };
+      const tsType = mapTsType(bodyType, program, models, enums, renameMap);
+      if (tsType !== "void" && tsType !== "unknown") {
+        collectModelNamesFromType(bodyType, modelImportSet);
+        return isJson ? { type: tsType } : { type: tsType, format: "text" };
       }
     }
   }
-  return "void";
+  return { type: "void" };
+}
+
+/** The success response a generated client method resolves to. */
+interface ResponseShape {
+  /** TypeScript type of the resolved value. */
+  type: string;
+  /**
+   * How the transport must read the body when it is not JSON: `text` for a
+   * textual media type, `binary` for raw `bytes`.
+   */
+  format?: "text" | "binary";
 }
 
 function collectModelNamesFromType(type: Type, into: Set<string>): void {

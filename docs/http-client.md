@@ -133,7 +133,7 @@ export class WidgetsClient extends HttpClient {
 - A path parameter whose name is a reserved word, or clashes with `body`, `query`, `headers` or `options`, gets a `Param` suffix (`default` → `defaultParam`). The route still uses the TypeSpec wire name.
 - If a request type was generated for the body model, the body parameter uses that type (e.g. `WidgetPostRequest`). Otherwise the raw model is used.
 - Every other body shape is supported too. See [Request bodies](#request-bodies).
-- The response type is the TypeScript equivalent of the first 2xx response body. Operations with no body response use `void`.
+- The response type is the TypeScript equivalent of the first 2xx response body. Operations with no body response use `void`. A JSON body is parsed, and an empty one (a `201` with no content, for example) resolves to `undefined`. A textual response such as `text/plain` resolves to the raw string. A `bytes` response with a non-JSON media type resolves to a `Uint8Array`.
 - Every method accepts a `query` parameter, regardless of HTTP verb. See [Query parameters](#query-parameters).
 - When an argument after an optional one is required, the optional one is typed `T | undefined`, and you pass `undefined` to skip it.
 

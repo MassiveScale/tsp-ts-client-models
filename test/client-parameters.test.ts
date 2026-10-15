@@ -297,6 +297,36 @@ describe("request bodies", () => {
   });
 });
 
+describe("response formats", () => {
+  it("reads a JSON response without a format hint", async () => {
+    const { client } = await emitWidgets(`@get list(): Widget[];`);
+    ok(!callLine(client, "list").includes("responseFormat"));
+  });
+
+  it("reads a text response as text", async () => {
+    const { client } = await emitWidgets(
+      `@get @route("readme") readme(): { @header contentType: "text/plain"; @body body: string };`,
+    );
+    ok(methodLine(client, "readme").includes("Promise<string>"));
+    ok(callLine(client, "readme").includes('responseFormat: "text"'));
+  });
+
+  it("reads a bytes response as binary", async () => {
+    const { client } = await emitWidgets(
+      `@get @route("raw") raw(): { @header contentType: "application/octet-stream"; @body body: bytes };`,
+    );
+    ok(methodLine(client, "raw").includes("Promise<Uint8Array>"));
+    ok(callLine(client, "raw").includes('responseFormat: "binary"'));
+  });
+
+  it("resolves an operation with no response body to void", async () => {
+    const { client } = await emitWidgets(
+      `@post create(@body body: Widget): { @statusCode _: 201 };`,
+    );
+    ok(methodLine(client, "create").includes("Promise<void>"));
+  });
+});
+
 describe("formatPropertyKey", () => {
   it("leaves a valid identifier bare", () =>
     strictEqual(formatPropertyKey("widgetId"), "widgetId"));

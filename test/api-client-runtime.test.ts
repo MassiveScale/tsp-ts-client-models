@@ -350,6 +350,73 @@ describe("generated ApiClient transport", () => {
     });
   });
 
+  describe("success bodies", () => {
+    /** Sends one GET that receives `response` and returns what it resolves to. */
+    async function receive(
+      response: Response,
+      options?: Record<string, unknown>,
+    ): Promise<unknown> {
+      const { HttpClient } = await loadApiClient();
+      const client = new HttpClient({
+        baseUrl: "https://api.example.com",
+        retry: FAST_RETRY,
+        fetch: sequence(response),
+      });
+      return client.request("POST", "/widgets", options);
+    }
+
+    it("resolves an empty 201 to undefined instead of failing to parse", async () => {
+      strictEqual(
+        await receive(new Response(null, { status: 201 })),
+        undefined,
+      );
+    });
+
+    it("resolves an empty 200 to undefined", async () => {
+      strictEqual(await receive(new Response("", { status: 200 })), undefined);
+    });
+
+    it("resolves a whitespace-only JSON body to undefined", async () => {
+      strictEqual(
+        await receive(new Response(" \n", { status: 200 })),
+        undefined,
+      );
+    });
+
+    it("parses a JSON body", async () => {
+      deepStrictEqual(await receive(jsonResponse({ id: "w1" }, 201)), {
+        id: "w1",
+      });
+    });
+
+    it("returns a text body as a string", async () => {
+      strictEqual(
+        await receive(new Response("hello", { status: 200 }), {
+          responseFormat: "text",
+        }),
+        "hello",
+      );
+    });
+
+    it("returns an empty text body as an empty string", async () => {
+      strictEqual(
+        await receive(new Response(null, { status: 200 }), {
+          responseFormat: "text",
+        }),
+        "",
+      );
+    });
+
+    it("returns a binary body as bytes", async () => {
+      const result = await receive(
+        new Response(new Uint8Array([7, 8]), { status: 200 }),
+        { responseFormat: "binary" },
+      );
+      ok(result instanceof Uint8Array);
+      deepStrictEqual([...result], [7, 8]);
+    });
+  });
+
   describe("middleware pipeline", () => {
     it("runs layers outermost-first and innermost-last", async () => {
       const { HttpClient } = await loadApiClient();
