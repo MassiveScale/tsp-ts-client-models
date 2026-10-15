@@ -6,6 +6,7 @@ import {
   toCalVer,
   deriveNpmVersion,
   resolveRoutePrefix,
+  GENERATED_TYPESCRIPT_RANGE,
 } from "../src/emitter.js";
 
 describe("emitter", () => {
@@ -1132,7 +1133,12 @@ describe("emitter", () => {
     strictEqual(pkg.types, "./dist/index.d.ts");
     deepStrictEqual(pkg.files, ["dist"]);
     deepStrictEqual(pkg.scripts, { build: "tsc" });
-    ok(pkg.devDependencies?.typescript, "Expected typescript devDependency");
+    strictEqual(pkg.devDependencies?.typescript, GENERATED_TYPESCRIPT_RANGE);
+    deepStrictEqual(
+      Object.keys(pkg.exports["."]),
+      ["types", "import"],
+      "The types condition must come first so TypeScript resolves it",
+    );
   });
 
   it("emits versioned exports when all-versions is true", async () => {
@@ -1171,6 +1177,7 @@ describe("emitter", () => {
     strictEqual(pkg.exports["./v1.0"].types, "./dist/v1.0/index.d.ts");
     strictEqual(pkg.exports["./v2.0"].import, "./dist/v2.0/index.js");
     strictEqual(pkg.exports["./v2.0"].types, "./dist/v2.0/index.d.ts");
+    deepStrictEqual(Object.keys(pkg.exports["./v1.0"]), ["types", "import"]);
     strictEqual(pkg.main, undefined, "No main for versioned output");
     deepStrictEqual(pkg.files, ["dist"]);
     deepStrictEqual(pkg.scripts, { build: "tsc" });
@@ -1371,13 +1378,19 @@ describe("emitter", () => {
       strictEqual(tryParseSemver("2022-10-15"), undefined));
     it("returns undefined for plain label", () =>
       strictEqual(tryParseSemver("preview"), undefined));
+    it("strips leading zeros, which npm rejects", () =>
+      strictEqual(tryParseSemver("v01.02.03"), "1.2.3"));
+    it("preserves build metadata", () =>
+      strictEqual(tryParseSemver("1.0.0+build.5"), "1.0.0+build.5"));
+    it("rejects a suffix with characters semver does not allow", () =>
+      strictEqual(tryParseSemver("1.0-preview_1"), undefined));
   });
 
   describe("toCalVer", () => {
-    it("formats as YYYY.MM.DD", () =>
-      strictEqual(toCalVer(new Date(2026, 4, 21)), "2026.05.21"));
-    it("zero-pads month and day", () =>
-      strictEqual(toCalVer(new Date(2026, 0, 3)), "2026.01.03"));
+    it("formats as YYYY.M.D", () =>
+      strictEqual(toCalVer(new Date(2026, 10, 21)), "2026.11.21"));
+    it("does not zero-pad month and day, which would be invalid semver", () =>
+      strictEqual(toCalVer(new Date(2026, 0, 3)), "2026.1.3"));
   });
 
   it("uses semver parsed from TypeSpec API version as npm version", async () => {
@@ -1435,7 +1448,7 @@ describe("emitter", () => {
     ok(pkgFile);
     match(
       JSON.parse(results[pkgFile]).version,
-      /^\d{4}\.\d{2}\.\d{2}$/,
+      /^\d{4}\.[1-9]\d?\.[1-9]\d?$/,
       "Expected CalVer fallback",
     );
   });
@@ -1460,7 +1473,7 @@ describe("emitter", () => {
     ok(pkgFile);
     match(
       JSON.parse(results[pkgFile]).version,
-      /^\d{4}\.\d{2}\.\d{2}$/,
+      /^\d{4}\.[1-9]\d?\.[1-9]\d?$/,
       "Expected CalVer for unversioned API",
     );
   });
@@ -2945,7 +2958,7 @@ describe("emitter", () => {
     });
 
     it("returns CalVer when no versions and no option", () => {
-      match(deriveNpmVersion(noVersions, {}), /^\d{4}\.\d{2}\.\d{2}$/);
+      match(deriveNpmVersion(noVersions, {}), /^\d{4}\.[1-9]\d?\.[1-9]\d?$/);
     });
   });
 });

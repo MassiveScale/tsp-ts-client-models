@@ -22,8 +22,10 @@ The output is a complete, buildable npm package (`package.json`, `tsconfig.json`
 Add the emitter to your TypeSpec project:
 
 ```bash
-npm install @massivescale/tsp-ts-client-models
+npm install --save-dev @massivescale/tsp-ts-client-models@beta
 ```
+
+The emitter is in beta and is published under the `beta` dist-tag. It requires Node.js 22 or later and TypeSpec 1.15 or later.
 
 Configure it in your `tspconfig.yaml`:
 
@@ -68,6 +70,8 @@ options:
       endpoints: "./templates/endpoints.hbs"
       clientObservable: "./templates/clientObservable.hbs" # RxJS client (client-style: observable|both)
 ```
+
+Relative paths are resolved from the TypeSpec project root (the folder containing `tspconfig.yaml`), so the same templates are found no matter which directory `tsp compile` runs from.
 
 ### Template view models
 

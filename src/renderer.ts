@@ -260,7 +260,9 @@ function loadTemplate(
   override: string | undefined,
 ): HandlebarsTemplateDelegate {
   const path = override ?? resolve(TEMPLATES_DIR, `${name}.hbs`);
-  const source = readFileSync(path, "utf-8");
+  // Normalize to LF so a template saved (or checked out) with CRLF line endings
+  // cannot leak mixed line endings into the generated files.
+  const source = readFileSync(path, "utf-8").replace(/\r\n?/g, "\n");
   return env.compile(source, { noEscape: true });
 }
 

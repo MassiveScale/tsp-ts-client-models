@@ -6,7 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **The generated package's CalVer fallback version is now valid semver.** When no `npm-version` is set and the API version is not semver-like, the generated `package.json` falls back to a date-based version. It was zero-padded (`2026.01.05`), and npm rejects leading zeros, so the generated package could not be installed or published for most of the year. It is now `2026.1.5`. Semver parsed from an API version also drops leading zeros (`v01.02` → `1.2.0`), and a pre-release suffix containing characters semver does not allow is no longer passed through.
+- **The generated `package.json` lists `types` before `import` in `exports`.** Conditions are matched in order, and TypeScript expects `types` first.
+- **The generated package pins TypeScript to `^5.9.0` instead of `latest`.** `latest` now resolves to TypeScript 7, which the generated code is not tested against, so the same spec could build differently from one day to the next.
+- **Template overrides are resolved from the TypeSpec project root.** Relative `templates` paths were resolved from the process working directory, so `tsp compile path/to/project` run from another folder could not find them.
+- **Templates with CRLF line endings no longer produce mixed line endings.** Template text is normalized to LF when loaded. A `.gitattributes` file now also checks the repository out with LF on every platform.
+
 ### Changed
+
+- **Ready to publish to npm as a beta.** The version is `0.9.0-beta.0`, published under the `beta` dist-tag with public access. The package now ships only the compiled emitter and its templates; tests, sources, examples and scripts are no longer included. It also declares `description`, `license`, `repository`, `homepage`, `bugs`, `keywords` and `engines` (Node.js 22 or later, matching TypeSpec itself). `prepublishOnly` runs lint, build and tests before every publish.
 
 - **Wider `@typespec/versioning` peer range.** The peer dependency is now `>=0.85.0 <1.0.0` (previously `^0.85.0`, which npm treats as `>=0.85.0 <0.86.0` for pre-1.0 packages). Projects on `@typespec/versioning` 0.86 and later 0.x releases can now install the emitter without a peer conflict. The emitter is verified against 0.85 and 0.86.
 

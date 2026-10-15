@@ -101,7 +101,10 @@ export async function $onEmit(
 // ─── Renderer factory ────────────────────────────────────────────────────────
 
 function buildRenderer(program: Program, options: EmitterOptions): Renderer {
-  const overrides = resolveTemplateOverrides(options.templates);
+  const overrides = resolveTemplateOverrides(
+    options.templates,
+    program.projectRoot,
+  );
   try {
     return createRenderer(overrides);
   } catch (e) {
@@ -116,13 +119,22 @@ function buildRenderer(program: Program, options: EmitterOptions): Renderer {
   }
 }
 
-function resolveTemplateOverrides(
-  templates?: TemplateOverrides,
+/**
+ * Resolves template override paths to absolute paths.
+ *
+ * Relative paths are resolved against the TypeSpec project root (the directory
+ * holding `tspconfig.yaml`, or the entrypoint's directory when there is none),
+ * not the process working directory, so `tsp compile path/to/project` run from
+ * elsewhere finds the same templates as running it from inside the project.
+ */
+export function resolveTemplateOverrides(
+  templates: TemplateOverrides | undefined,
+  projectRoot: string,
 ): TemplateOverrides {
   if (!templates) return {};
   const result: TemplateOverrides = {};
   for (const [key, val] of Object.entries(templates)) {
-    if (val) result[key as TemplateName] = resolve(process.cwd(), val);
+    if (val) result[key as TemplateName] = resolve(projectRoot, val);
   }
   return result;
 }
@@ -143,24 +155,30 @@ async function writeFile(
 
 /**
  * Attempts to parse a semver string from a TypeSpec version value.
- * Accepts an optional leading `v`/`V`, two-part (`1.2`) or three-part (`1.2.3`)
- * numeric versions, and preserves any pre-release suffix.
+ *
+ * Accepts an optional leading `v`/`V`, two-part (`1.2`) or three-part
+ * (`1.2.3`) numeric versions, and preserves any pre-release or build suffix.
+ * Leading zeros are stripped from every numeric part (`v1.02` → `1.2.0`),
+ * since npm rejects them as invalid semver.
  */
 export function tryParseSemver(value: string): string | undefined {
   const stripped = value.replace(/^[vV]/, "");
-  const match = stripped.match(/^(\d+)\.(\d+)(?:\.(\d+))?([-+].+)?$/);
+  const match = stripped.match(
+    /^(\d+)\.(\d+)(?:\.(\d+))?([-+][0-9A-Za-z.+-]+)?$/,
+  );
   if (!match) return undefined;
-  const patch = match[3] ?? "0";
-  const rest = match[4] ?? "";
-  return `${match[1]}.${match[2]}.${patch}${rest}`;
+  const part = (digits: string | undefined) => String(Number(digits ?? "0"));
+  return `${part(match[1])}.${part(match[2])}.${part(match[3])}${match[4] ?? ""}`;
 }
 
-/** Formats a date as a CalVer string (`YYYY.MM.DD`). */
+/**
+ * Formats a date as a CalVer string (`YYYY.M.D`).
+ *
+ * Month and day are deliberately not zero-padded: `2026.01.05` is not valid
+ * semver, and npm refuses to install or publish a package with that version.
+ */
 export function toCalVer(date: Date): string {
-  const y = date.getFullYear();
-  const m = String(date.getMonth() + 1).padStart(2, "0");
-  const d = String(date.getDate()).padStart(2, "0");
-  return `${y}.${m}.${d}`;
+  return `${date.getFullYear()}.${date.getMonth() + 1}.${date.getDate()}`;
 }
 
 /**
@@ -2649,6 +2667,9 @@ function nsToPackageName(nsFullName: string): string {
     .join("-");
 }
 
+/** TypeScript version range the generated package builds with. */
+export const GENERATED_TYPESCRIPT_RANGE = "^5.9.0";
+
 function buildPackageJson(
   nsFullName: string,
   versionsToEmit: Version[],
@@ -2670,15 +2691,17 @@ function buildPackageJson(
   if (useVersionedFolders && versionsToEmit.length > 0) {
     const exports: Record<string, Record<string, string>> = {};
     for (const v of versionsToEmit) {
+      // `types` must precede `import`: conditions match in order, and
+      // TypeScript stops at the first one it recognizes.
       exports[`./${v.value}`] = {
-        import: `./dist/${v.value}/index.js`,
         types: `./dist/${v.value}/index.d.ts`,
+        import: `./dist/${v.value}/index.js`,
       };
     }
     pkg.exports = exports;
   } else {
     pkg.exports = {
-      ".": { import: "./dist/index.js", types: "./dist/index.d.ts" },
+      ".": { types: "./dist/index.d.ts", import: "./dist/index.js" },
     };
     pkg.main = "./dist/index.js";
     pkg.types = "./dist/index.d.ts";
@@ -2686,7 +2709,9 @@ function buildPackageJson(
 
   pkg.files = ["dist"];
   pkg.scripts = { build: "tsc" };
-  pkg.devDependencies = { typescript: "latest" };
+  // Pinned to the TypeScript line the generated code is tested against, so a
+  // fresh install builds the same way today as it will after the next major.
+  pkg.devDependencies = { typescript: GENERATED_TYPESCRIPT_RANGE };
 
   // The Observable client flavor imports from `rxjs`. Declare it as an optional
   // peer dependency so consumers who only use the Promise client are never
