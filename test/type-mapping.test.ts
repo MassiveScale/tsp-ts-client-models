@@ -98,6 +98,45 @@ describe("inline types", () => {
   });
 });
 
+describe("write-only model suppression", () => {
+  const spec = (operations: string) => `
+    import "@typespec/http";
+    using Http;
+
+    @service(#{ title: "Test API" })
+    namespace TestApi;
+
+    model Widget { @visibility(Lifecycle.Read) id: string; name: string; }
+    model Gadget { @visibility(Lifecycle.Read) id: string; label: string; }
+    model Order { @visibility(Lifecycle.Read) id: string; gadget: Gadget; }
+
+    @route("/x") interface X { ${operations} }
+  `;
+
+  it("still suppresses a model used only as a filtered write body", async () => {
+    const out = await emit(spec(`@post create(@body body: Widget): void;`));
+    ok(out["models.ts"].includes("export interface WidgetPostRequest"));
+    ok(!out["models.ts"].includes("export interface Widget {"));
+  });
+
+  it("emits a model a POST returns", async () => {
+    const out = await emit(spec(`@post create(@body body: Widget): Widget;`));
+    ok(out["models.ts"].includes("export interface Widget {"));
+    ok(out["client/XClient.ts"].includes("Promise<Widget>"));
+  });
+
+  it("emits a model a request type's property references", async () => {
+    const out = await emit(spec(`@post create(@body body: Order): void;`));
+    ok(out["models.ts"].includes("export interface OrderPostRequest"));
+    ok(out["models.ts"].includes("export interface Gadget {"));
+  });
+
+  it("emits a model an array body references", async () => {
+    const out = await emit(spec(`@post create(@body body: Widget[]): void;`));
+    ok(out["models.ts"].includes("export interface Widget {"));
+  });
+});
+
 describe("types from other namespaces", () => {
   it("emits referenced types declared in a sibling namespace", async () => {
     const out = await emit(`

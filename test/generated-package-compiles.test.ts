@@ -1013,6 +1013,32 @@ describe("generated package compiles", () => {
   );
 
   it(
+    "compiles when write bodies share models with responses and each other",
+    { timeout: TYPE_CHECK_TIMEOUT },
+    async () => {
+      const { errors } = await emitAndTypeCheck(`
+        import "@typespec/http";
+        using Http;
+
+        @service(#{ title: "Test API" })
+        namespace TestApi;
+
+        model Widget { @visibility(Lifecycle.Read) id: string; name: string; }
+        model Gadget { @visibility(Lifecycle.Read) id: string; label: string; }
+        model Order { @visibility(Lifecycle.Read) id: string; gadget: Gadget; }
+
+        @route("/x") interface X {
+          @post create(@body body: Widget): Widget;
+          @post @route("orders") order(@body body: Order): void;
+          @post @route("bulk") bulk(@body body: Widget[]): void;
+        }
+      `);
+
+      deepStrictEqual(errors, []);
+    },
+  );
+
+  it(
     "rejects a call that omits a required header",
     { timeout: TYPE_CHECK_TIMEOUT },
     async () => {

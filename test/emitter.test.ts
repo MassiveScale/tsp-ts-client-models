@@ -9,6 +9,13 @@ import {
   GENERATED_TYPESCRIPT_RANGE,
 } from "../src/emitter.js";
 
+/** Returns the body of `export interface <name> { … }` from a models file. */
+function interfaceBlock(models: string, name: string): string {
+  const start = models.indexOf(`export interface ${name} {`);
+  ok(start >= 0, `Expected interface ${name}`);
+  return models.slice(start, models.indexOf("\n}", start));
+}
+
 describe("emitter", () => {
   // ─── Basic sanity ────────────────────────────────────────────────────────────
 
@@ -457,12 +464,18 @@ describe("emitter", () => {
       content.includes("export interface ItemPostRequest"),
       "Expected ItemPostRequest interface",
     );
-    ok(content.includes("name: string;"), "Expected name property");
-    ok(content.includes("count: number;"), "Expected count property");
-    ok(!content.includes("id: string"), "Read-only id should be excluded");
+    const request = interfaceBlock(content, "ItemPostRequest");
+    ok(request.includes("name: string;"), "Expected name property");
+    ok(request.includes("count: number;"), "Expected count property");
+    ok(!request.includes("id: string"), "Read-only id should be excluded");
     ok(
-      !content.includes("createdAt"),
+      !request.includes("createdAt"),
       "Read-only createdAt should be excluded",
+    );
+    // The operation returns Item, so Item itself must be declared too.
+    ok(
+      interfaceBlock(content, "Item").includes("id: string;"),
+      "Expected the response model Item",
     );
   });
 
@@ -497,10 +510,11 @@ describe("emitter", () => {
       content.includes("export interface ItemPatchRequest"),
       "Expected ItemPatchRequest",
     );
-    ok(content.includes("name: string;"), "Expected name");
-    ok(!content.includes("id: string"), "id should be excluded");
+    const request = interfaceBlock(content, "ItemPatchRequest");
+    ok(request.includes("name: string;"), "Expected name");
+    ok(!request.includes("id: string"), "id should be excluded");
     ok(
-      !content.includes("tenantId"),
+      !request.includes("tenantId"),
       "create-only tenantId should be excluded from patch",
     );
   });

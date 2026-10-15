@@ -554,16 +554,6 @@ async function emitVersion(
     DiscriminatedRequestUnion
   >();
 
-  // Determine which model names are needed for GET/HEAD responses BEFORE the
-  // full collection pass. Models that only appear as write-operation bodies (and
-  // never as read-operation responses) will be suppressed in favour of their
-  // filtered request types. Models that appear in both contexts are kept.
-  const readResponseModelNames = collectReadResponseModelNames(
-    program,
-    byContainer,
-    version,
-  );
-
   // First pass: collect all types and build request types
   for (const { ops } of byContainer.values()) {
     const vOps = version
@@ -590,6 +580,18 @@ async function emitVersion(
   // still discovered and emitted.
   const discriminatedUnions = new Map<string, string[]>();
   deepCollectTypes(models, enums, program, discriminatedUnions);
+
+  // A model whose only use is as a write body is replaced by its filtered
+  // request type and not emitted itself — unless something that is emitted
+  // still names it. Computed after the request types exist, since their
+  // properties are among those references.
+  const referencedModelNames = collectReferencedModelNames(
+    program,
+    byContainer,
+    version,
+    requestTypes,
+    requestTypeBaseModels,
+  );
 
   // Build a rename map so synthesized MergePatch type names are rewritten to
   // their canonical output names during rendering (e.g. PetMergePatchUpdateReplaceOnly
@@ -625,7 +627,7 @@ async function emitVersion(
       enums,
       requestTypes,
       requestTypeBaseModels,
-      readResponseModelNames,
+      referencedModelNames,
       discriminatedUnions,
       discriminatedRequestUnions,
       program,
@@ -655,7 +657,7 @@ async function emitVersion(
         enums,
         requestTypes,
         requestTypeBaseModels,
-        readResponseModelNames,
+        referencedModelNames,
         discriminatedUnions,
         discriminatedRequestUnions,
         program,
@@ -1203,32 +1205,70 @@ function registerDiscriminatedRequestUnion(
 
 // ─── Read-response model name collection ─────────────────────────────────────
 
-function collectReadResponseModelNames(
+/**
+ * Names of the models that emitted code references directly, so they must be
+ * declared in models.ts even when they also have a filtered request type:
+ *
+ * - any operation's response body, whatever the verb or status — a `POST`
+ *   that returns the created `Widget` needs `Widget`;
+ * - path, query, and header parameter types;
+ * - request bodies the client passes through unfiltered: inline models,
+ *   arrays, and named models with no request type of their own;
+ * - the properties of every synthesized request type, since only the top
+ *   level of a write body is visibility-filtered.
+ *
+ * Collection is transitive: a model those reference by property is needed too.
+ */
+function collectReferencedModelNames(
   program: Program,
-  byContainer: Map<
-    string,
-    { name: string; container: Interface | Namespace; ops: HttpOperation[] }
-  >,
+  byContainer: ContainerGroups,
   version: Version | undefined,
+  requestTypes: Map<string, RequestType>,
+  requestTypeBaseModels: Set<string>,
 ): Set<string> {
   const tmpModels = new Map<string, Model>();
   const tmpEnums = new Map<string, Enum>();
+  const reference = (type: Type) =>
+    mapTsType(type, program, tmpModels, tmpEnums);
   for (const { ops } of byContainer.values()) {
     const vOps = version
       ? ops.filter((op) => isOpInVersion(program, op, version))
       : ops;
     for (const op of vOps) {
-      if (op.verb !== "get" && op.verb !== "head") continue;
       for (const resp of op.responses) {
         for (const content of resp.responses) {
-          if (content.body)
-            mapTsType(content.body.type, program, tmpModels, tmpEnums);
+          if (content.body) reference(content.body.type);
         }
+      }
+      for (const param of op.parameters.parameters) {
+        reference(param.param.type);
+      }
+      const body = op.parameters.body?.type;
+      if (body && !isRequestTypedBody(body, requestTypeBaseModels)) {
+        reference(body);
       }
     }
   }
+  for (const { props } of requestTypes.values()) {
+    for (const prop of props.values()) reference(prop.type);
+  }
   deepCollectTypes(tmpModels, tmpEnums, program, new Map());
   return new Set(tmpModels.keys());
+}
+
+/**
+ * Whether the client sends this body as a synthesized request type instead
+ * of naming the model itself.
+ */
+function isRequestTypedBody(
+  body: Type,
+  requestTypeBaseModels: Set<string>,
+): boolean {
+  if (body.kind !== "Model" || !body.name) return false;
+  if (isArrayModelType(body) || isRecordModelType(body)) return false;
+  return requestTypeBaseModels.has(
+    getMergePatchBaseName(body.name) ?? body.name,
+  );
 }
 
 // ─── Discriminated union collection ──────────────────────────────────────────
@@ -1297,7 +1337,7 @@ function buildModelsFile(
   enums: Map<string, Enum>,
   requestTypes: Map<string, RequestType>,
   requestTypeBaseModels: Set<string>,
-  readResponseModelNames: Set<string>,
+  referencedModelNames: Set<string>,
   discriminatedUnions: Map<string, string[]>,
   discriminatedRequestUnions: Map<string, DiscriminatedRequestUnion>,
   program: Program,
@@ -1334,11 +1374,11 @@ function buildModelsFile(
       parts.push(renderer.renderUnion(unionView));
       continue;
     }
-    // Suppress models that have a request type and are NOT needed for any
-    // GET/HEAD response — they'll appear only via their filtered request type.
+    // Suppress models that have a request type and that nothing emitted
+    // references — they appear only via their filtered request type.
     if (
       requestTypeBaseModels.has(model.name!) &&
-      !readResponseModelNames.has(model.name!)
+      !referencedModelNames.has(model.name!)
     )
       continue;
     parts.push(
