@@ -32,13 +32,22 @@ import {
   NoTarget,
 } from "@typespec/compiler";
 import {
+  unsafe_MutatorWithNamespace,
+  unsafe_mutateSubgraphWithNamespace,
+} from "@typespec/compiler/experimental";
+import {
   getAllHttpServices,
+  getHttpService,
   HttpOperation,
   HttpStatusCodeRange,
   Visibility,
   resolveRequestVisibility,
 } from "@typespec/http";
-import { getAllVersions, Version } from "@typespec/versioning";
+import {
+  getAllVersions,
+  getVersioningMutators,
+  Version,
+} from "@typespec/versioning";
 import { resolve } from "node:path";
 import {
   createRenderer,
@@ -331,24 +340,8 @@ async function emitService(
   if (versionsToEmit === null) return;
 
   const useVersionedFolders = options["all-versions"] === true;
-
-  // Group operations by container (Interface or Namespace)
-  const byContainer = new Map<
-    string,
-    { name: string; container: Interface | Namespace; ops: HttpOperation[] }
-  >();
-  for (const op of operations) {
-    const c = op.container;
-    const key =
-      c.kind === "Interface" ? c.name : `__ns_${(c as Namespace).name}`;
-    const name = c.kind === "Interface" ? c.name : serviceNs.name;
-    if (!byContainer.has(key))
-      byContainer.set(key, { name, container: c, ops: [] });
-    const entry = byContainer.get(key);
-    if (entry) entry.ops.push(op);
-  }
-
   const prefixTemplate = options["route-prefix"] ?? "api/{version}";
+  const mutators = getVersioningMutators(program, serviceNs);
 
   if (versionsToEmit.length > 0) {
     for (const version of versionsToEmit) {
@@ -356,10 +349,17 @@ async function emitService(
         ? resolvePath(outputDir, version.value)
         : outputDir;
       const routePrefix = resolveRoutePrefix(prefixTemplate, version.value);
+      const snapshot =
+        mutators?.kind === "versioned"
+          ? mutators.snapshots.find((s) => s.version.name === version.name)
+          : undefined;
+      const versionOps = snapshot
+        ? projectOperations(program, serviceNs, snapshot.mutator)
+        : operations;
       await emitVersion(
         program,
         nsFullName,
-        byContainer,
+        groupOperationsByContainer(serviceNs, versionOps),
         vDir,
         version,
         routePrefix,
@@ -368,11 +368,17 @@ async function emitService(
       );
     }
   } else {
+    // A service that is not itself versioned can still pin a version of a
+    // versioned library it uses (`@useDependency`), which needs projecting too.
+    const unversionedOps =
+      mutators?.kind === "transient"
+        ? projectOperations(program, serviceNs, mutators.mutator)
+        : operations;
     const routePrefix = resolveRoutePrefix(prefixTemplate, undefined);
     await emitVersion(
       program,
       nsFullName,
-      byContainer,
+      groupOperationsByContainer(serviceNs, unversionedOps),
       outputDir,
       undefined,
       routePrefix,
@@ -396,13 +402,60 @@ async function emitService(
   );
 }
 
+/** Operations grouped by the interface or namespace that declares them. */
+type ContainerGroups = Map<
+  string,
+  { name: string; container: Interface | Namespace; ops: HttpOperation[] }
+>;
+
+/**
+ * Projects the service to one API version and returns its HTTP operations.
+ *
+ * The versioning mutator clones the service's type graph as it exists in that
+ * version: `@added`/`@removed` types, properties, enum members, operations and
+ * parameters appear or disappear, `@renamedFrom` and `@typeChangedFrom` take
+ * effect, and `@madeOptional`/`@madeRequired` change optionality. Everything
+ * downstream then reads a plain, version-free graph.
+ */
+function projectOperations(
+  program: Program,
+  serviceNs: Namespace,
+  mutator: unsafe_MutatorWithNamespace,
+): HttpOperation[] {
+  const projected = unsafe_mutateSubgraphWithNamespace(
+    program,
+    [mutator],
+    serviceNs,
+  ).type as Namespace;
+  // Diagnostics were already reported for the unprojected service; the
+  // projection would only repeat them.
+  const [service] = getHttpService(program, projected);
+  return service.operations;
+}
+
+/** Groups operations by the interface or namespace that declares them. */
+function groupOperationsByContainer(
+  serviceNs: Namespace,
+  operations: HttpOperation[],
+): ContainerGroups {
+  const byContainer: ContainerGroups = new Map();
+  for (const op of operations) {
+    const c = op.container;
+    const key =
+      c.kind === "Interface" ? c.name : `__ns_${(c as Namespace).name}`;
+    const name = c.kind === "Interface" ? c.name : serviceNs.name;
+    if (!byContainer.has(key))
+      byContainer.set(key, { name, container: c, ops: [] });
+    const entry = byContainer.get(key);
+    if (entry) entry.ops.push(op);
+  }
+  return byContainer;
+}
+
 async function emitVersion(
   program: Program,
   nsFullName: string,
-  byContainer: Map<
-    string,
-    { name: string; container: Interface | Namespace; ops: HttpOperation[] }
-  >,
+  byContainer: ContainerGroups,
   vDir: string,
   version: Version | undefined,
   routePrefix: string,
