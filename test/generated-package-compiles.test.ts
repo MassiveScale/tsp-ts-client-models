@@ -960,6 +960,59 @@ describe("generated package compiles", () => {
   );
 
   it(
+    "compiles generic, inline, tuple, and cross-namespace types",
+    { timeout: TYPE_CHECK_TIMEOUT },
+    async () => {
+      const { errors } = await emitAndTypeCheck(
+        `
+          import "@typespec/http";
+          using Http;
+
+          @service(#{ title: "Test API" })
+          namespace MyOrg.Api {
+            model Two<A, B> { a: B; b: A; }
+            model Opt<T> { v: T | null; }
+            model Phantom<T> { x: string; }
+            model Base<T> { b: T; }
+            model Sub<T> extends Base<T> { s: string; }
+            model Rec<T> { m: Record<T>; }
+            model Widget {
+              price: MyOrg.Shared.Money;
+              pair: [string, int32];
+              inline: { a: string; b?: int32 };
+            }
+            @route("/w") interface W {
+              @get two(): Two<string, boolean>;
+              @get @route("o") opt(): Opt<int32>;
+              @get @route("p") phantom(): Phantom<int32>;
+              @get @route("s") subs(): Sub<string>;
+              @get @route("r") rec(): Rec<int32>;
+              @get @route("l") list(): { items: Widget[]; total: int32 };
+            }
+          }
+          namespace MyOrg.Shared {
+            model Money { amount: decimal; unit: Unit; }
+            enum Unit { USD, EUR }
+          }
+        `,
+        undefined,
+        `
+          import type { Two, Sub, Rec } from "./index.js";
+          // The arguments bind in declaration order: A = string, B = boolean.
+          const two: Two<string, boolean> = { a: true, b: "x" };
+          const sub: Sub<string> = { b: "base", s: "own" };
+          const rec: Rec<number> = { m: { k: 1 } };
+          void two;
+          void sub;
+          void rec;
+        `,
+      );
+
+      deepStrictEqual(errors, []);
+    },
+  );
+
+  it(
     "rejects a call that omits a required header",
     { timeout: TYPE_CHECK_TIMEOUT },
     async () => {

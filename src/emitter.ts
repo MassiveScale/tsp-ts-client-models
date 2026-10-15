@@ -9,6 +9,7 @@ import {
   Namespace,
   Program,
   Union,
+  Tuple,
   StringLiteral,
   NumericLiteral,
   BooleanLiteral,
@@ -611,8 +612,8 @@ async function emitVersion(
   // collection passes above are what discover types, so rendering here sees
   // exactly what rendering later would.
   const hasModels =
-    [...models.values()].some((m) => isEmittable(m, nsFullName)) ||
-    [...enums.values()].some((e) => isEmittableEnum(e, nsFullName)) ||
+    [...models.values()].some((m) => isEmittable(m)) ||
+    [...enums.values()].some((e) => isEmittable(e)) ||
     requestTypes.size > 0;
 
   let modelsContent: string | undefined;
@@ -1307,12 +1308,12 @@ function buildModelsFile(
   const parts: string[] = [...prelude];
 
   for (const [, e] of enums) {
-    if (!isEmittableEnum(e, nsFullName)) continue;
+    if (!isEmittable(e)) continue;
     parts.push(renderer.renderEnum(buildEnumView(e, program)));
   }
 
   for (const [, model] of models) {
-    if (!isEmittable(model, nsFullName)) continue;
+    if (!isEmittable(model)) continue;
     // Never emit synthesized MergePatch types — they are replaced by *PatchRequest
     // types or by references to the plain base model.
     if (isSynthesizedMergePatchModel(model)) continue;
@@ -3168,7 +3169,9 @@ function collectModelNamesFromType(type: Type, into: Set<string>): void {
       // `T[]` and never names the model. Adding it here anyway would import a
       // type the emitted code does not reference — and, when that model is the
       // only one in the spec, from a models.ts that is never written.
-      if (!isNativeArrayShortcut(m)) into.add(m.name);
+      if (!isNativeArrayShortcut(m) && !isNativeRecordShortcut(m)) {
+        into.add(m.name);
+      }
       for (const arg of m.templateMapper.args) {
         if ((arg as { entityKind?: string }).entityKind === "Type") {
           collectModelNamesFromType(arg as Type, into);
@@ -3312,6 +3315,16 @@ function isNativeArrayShortcut(m: Model): boolean {
   return m.name === "Array" && (m.templateMapper?.args?.length ?? 0) === 1;
 }
 
+/**
+ * Whether a templated model renders as the native `Record<string, T>`. A
+ * `Record<T>` whose argument is still a template parameter is not recognized
+ * by `isRecordModelType`, so it reaches the generic path and would otherwise
+ * be emitted as `Record<T>` — one type argument where TypeScript needs two.
+ */
+function isNativeRecordShortcut(m: Model): boolean {
+  return m.name === "Record" && (m.templateMapper?.args?.length ?? 0) === 1;
+}
+
 function mapTsType(
   type: Type,
   program: Program,
@@ -3357,18 +3370,19 @@ function mapTsType(
           )
           .map((a) => mapTsType(a, program, models, enums, renameMap));
         if (isNativeArrayShortcut(m)) return `${args[0]}[]`;
+        if (isNativeRecordShortcut(m)) return `Record<string, ${args[0]}>`;
         const decl = m.namespace?.models.get(m.name);
-        models.set(m.name, decl ?? m);
+        registerNamedType(program, models, decl ?? m);
         return args.length > 0 ? `${aliased}<${args.join(", ")}>` : aliased;
       }
 
-      models.set(m.name, m);
+      registerNamedType(program, models, m);
       return aliased;
     }
 
     case "Enum": {
       const e = type as Enum;
-      if (e.name) enums.set(e.name, e);
+      if (e.name) registerNamedType(program, enums, e);
       return e.name || "string";
     }
 
@@ -3409,6 +3423,11 @@ function mapTsType(
     case "TemplateParameter":
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       return (type as any).node?.id?.sv ?? "T";
+
+    case "Tuple":
+      return `[${(type as Tuple).values
+        .map((v) => mapTsType(v, program, models, enums, renameMap))
+        .join(", ")}]`;
 
     default:
       return "unknown";
@@ -3523,31 +3542,83 @@ function builtinScalarName(scalar: Scalar): string {
 
 // ─── Emission filters ────────────────────────────────────────────────────────
 
-function isEmittable(model: Model, serviceNsName: string): boolean {
-  if (!model.name) return false;
-  const ns = model.namespace ? getNamespaceFullName(model.namespace) : "";
-  return (
-    ns === serviceNsName ||
-    ns.startsWith(`${serviceNsName}.`) ||
-    ns === "" ||
-    serviceNsName.startsWith(`${ns}.`)
-  );
+/**
+ * Whether a referenced type belongs in models.ts. Any named type the service
+ * references is emitted, wherever it is declared — the service namespace, a
+ * sibling such as `MyOrg.Shared`, or the global namespace — except the
+ * TypeSpec standard library's own types (`TypeSpec.Http.*` and the like),
+ * which describe the protocol rather than the API's data.
+ */
+function isEmittable(type: Model | Enum): boolean {
+  if (!type.name) return false;
+  const ns = namespaceNameOf(type);
+  return ns !== "TypeSpec" && !ns.startsWith("TypeSpec.");
 }
 
-function isEmittableEnum(e: Enum, serviceNsName: string): boolean {
-  if (!e.name) return false;
-  const ns = e.namespace ? getNamespaceFullName(e.namespace) : "";
-  return (
-    ns === serviceNsName ||
-    ns.startsWith(`${serviceNsName}.`) ||
-    ns === "" ||
-    serviceNsName.startsWith(`${ns}.`)
-  );
+/** Full name of the namespace a type is declared in; `""` for global. */
+function namespaceNameOf(type: Model | Enum): string {
+  return type.namespace ? getNamespaceFullName(type.namespace) : "";
+}
+
+/** Names already reported as `duplicate-type-name`, per program. */
+const reportedDuplicateNames = new WeakMap<Program, Set<string>>();
+
+/**
+ * Records a named model or enum for emission. Every generated type shares one
+ * `models.ts`, so two different types with the same name from different
+ * namespaces cannot both be emitted: the first one keeps the name, and the
+ * clash is reported once as an error instead of the second silently replacing
+ * the first and retyping every property that referenced it.
+ */
+function registerNamedType<T extends Model | Enum>(
+  program: Program,
+  types: Map<string, T>,
+  type: T,
+): void {
+  const name = type.name!;
+  const existing = types.get(name);
+  if (existing && existing !== type) {
+    const kept = namespaceNameOf(existing);
+    const other = namespaceNameOf(type);
+    if (kept !== other) {
+      let reported = reportedDuplicateNames.get(program);
+      if (!reported) {
+        reported = new Set();
+        reportedDuplicateNames.set(program, reported);
+      }
+      if (!reported.has(name)) {
+        reported.add(name);
+        reportDiagnostic(program, {
+          code: "duplicate-type-name",
+          format: {
+            name,
+            kept: kept || "(global)",
+            other: other || "(global)",
+          },
+          target: type,
+        });
+      }
+      return;
+    }
+  }
+  types.set(name, type);
 }
 
 // ─── Model helpers ───────────────────────────────────────────────────────────
 
+/**
+ * Type parameters of a generic model, in declaration order.
+ *
+ * Taken from the template declaration itself, so `model Two<A, B> { a: B; b: A }`
+ * stays `Two<A, B>` — a reference `Two<string, boolean>` must bind `A` to
+ * `string` — and a parameter that no property mentions directly (only through
+ * a union, a base model, or not at all) is still declared.
+ */
 function collectTypeParams(model: Model): string[] {
+  const node = model.node;
+  if (node && "templateParameters" in node && node.templateParameters.length) {
+    return node.templateParameters.map((p) => p.id.sv);
+  }
   const params: string[] = [];
   for (const [, prop] of model.properties) {
     gatherTemplateParams(prop.type, params);

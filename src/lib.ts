@@ -163,6 +163,12 @@ export const $lib = createTypeSpecLibrary({
         default: paramMessage`"${"name"}" is exported by more than one generated module. The copy in "${"module"}" is re-exported from the package root as "${"alias"}" so the barrel stays unambiguous. Rename the colliding TypeSpec declaration to avoid the alias.`,
       },
     },
+    "duplicate-type-name": {
+      severity: "error",
+      messages: {
+        default: paramMessage`Two different types are named "${"name"}": one in namespace "${"kept"}" and one in "${"other"}". Every generated type lives in one models.ts, so only the one in "${"kept"}" is emitted, and references to the other resolve to it. Rename one of them.`,
+      },
+    },
     "multiple-services": {
       severity: "warning",
       messages: {
