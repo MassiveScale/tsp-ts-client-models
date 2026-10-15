@@ -95,18 +95,53 @@ export async function $onEmit(
   const [services, diags] = getAllHttpServices(program);
   program.reportDiagnostics(diags);
 
-  for (const service of services) {
-    if (!isService(program, service.namespace)) continue;
-    if (service.operations.length === 0) continue;
+  const emittable = services.filter(
+    (s) => isService(program, s.namespace) && s.operations.length > 0,
+  );
+
+  // Every service writes models.ts, index.ts and package.json at the root of
+  // its output folder, so two services sharing one folder would overwrite each
+  // other. Each gets a subfolder — and a package — of its own instead.
+  const multiple = emittable.length > 1;
+  if (multiple) {
+    const folders = emittable.map((s) =>
+      serviceFolderName(getNamespaceFullName(s.namespace)),
+    );
+    reportDiagnostic(program, {
+      code: "multiple-services",
+      messageId: options["npm-package-name"] ? "packageNameIgnored" : "default",
+      format: {
+        count: String(emittable.length),
+        folders: folders.join(", "),
+      },
+      target: NoTarget,
+    });
+  }
+
+  for (const service of emittable) {
+    const outputDir = multiple
+      ? resolvePath(
+          emitterOutputDir,
+          serviceFolderName(getNamespaceFullName(service.namespace)),
+        )
+      : emitterOutputDir;
     await emitService(
       program,
       service.namespace,
       service.operations,
-      emitterOutputDir,
-      options,
+      outputDir,
+      multiple ? { ...options, "npm-package-name": undefined } : options,
       renderer,
     );
   }
+}
+
+/**
+ * Subfolder a service is emitted to when a project declares more than one:
+ * its namespace in kebab case, the same as its default package name.
+ */
+function serviceFolderName(nsFullName: string): string {
+  return nsToPackageName(nsFullName);
 }
 
 // ─── Renderer factory ────────────────────────────────────────────────────────
@@ -435,21 +470,66 @@ function projectOperations(
   return service.operations;
 }
 
-/** Groups operations by the interface or namespace that declares them. */
+/**
+ * Groups operations by the interface or namespace that declares them, and
+ * names each group — the name its `*Endpoints` object and `*Client` class are
+ * built from.
+ *
+ * Each group is named after its own interface or namespace; operations
+ * declared directly in the service namespace take the service's name. Names
+ * that two groups would share (`Pets.Ops` and `Stores.Ops`, or two
+ * sub-namespaces both called `Admin`) are qualified with their namespace path
+ * relative to the service (`PetsOps`, `StoresOps`), so no group's endpoints
+ * file can overwrite another's.
+ */
 function groupOperationsByContainer(
   serviceNs: Namespace,
   operations: HttpOperation[],
 ): ContainerGroups {
-  const byContainer: ContainerGroups = new Map();
+  const serviceName = getNamespaceFullName(serviceNs);
+  const groups = new Map<
+    string,
+    { path: string[]; container: Interface | Namespace; ops: HttpOperation[] }
+  >();
   for (const op of operations) {
     const c = op.container;
-    const key =
-      c.kind === "Interface" ? c.name : `__ns_${(c as Namespace).name}`;
-    const name = c.kind === "Interface" ? c.name : serviceNs.name;
-    if (!byContainer.has(key))
-      byContainer.set(key, { name, container: c, ops: [] });
-    const entry = byContainer.get(key);
-    if (entry) entry.ops.push(op);
+    const nsName = getNamespaceFullName(
+      c.kind === "Interface" ? c.namespace! : c,
+    );
+    const key = c.kind === "Interface" ? `${nsName}.${c.name}` : nsName;
+    let group = groups.get(key);
+    if (!group) {
+      const relative = nsName.startsWith(`${serviceName}.`)
+        ? nsName.slice(serviceName.length + 1).split(".")
+        : [];
+      const path =
+        c.kind === "Interface"
+          ? [...relative, c.name]
+          : relative.length > 0
+            ? relative
+            : [serviceNs.name];
+      group = { path, container: c, ops: [] };
+      groups.set(key, group);
+    }
+    group.ops.push(op);
+  }
+
+  const shortNameCounts = new Map<string, number>();
+  for (const { path } of groups.values()) {
+    const short = path[path.length - 1];
+    shortNameCounts.set(short, (shortNameCounts.get(short) ?? 0) + 1);
+  }
+  const taken = new Set<string>();
+  const byContainer: ContainerGroups = new Map();
+  for (const [key, { path, container, ops }] of groups) {
+    const short = path[path.length - 1];
+    const preferred =
+      (shortNameCounts.get(short) ?? 0) > 1
+        ? path.map(capitalize).join("")
+        : short;
+    const name = uniqueName(preferred, taken);
+    taken.add(name);
+    byContainer.set(key, { name, container, ops });
   }
   return byContainer;
 }

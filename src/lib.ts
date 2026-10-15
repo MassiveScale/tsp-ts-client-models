@@ -163,6 +163,13 @@ export const $lib = createTypeSpecLibrary({
         default: paramMessage`"${"name"}" is exported by more than one generated module. The copy in "${"module"}" is re-exported from the package root as "${"alias"}" so the barrel stays unambiguous. Rename the colliding TypeSpec declaration to avoid the alias.`,
       },
     },
+    "multiple-services": {
+      severity: "warning",
+      messages: {
+        default: paramMessage`This project declares ${"count"} HTTP services. Each is emitted to its own subfolder (${"folders"}) as a separate package named after its namespace.`,
+        packageNameIgnored: paramMessage`This project declares ${"count"} HTTP services. Each is emitted to its own subfolder (${"folders"}) as a separate package named after its namespace. The "npm-package-name" option is ignored, because one name cannot be given to several packages.`,
+      },
+    },
     "reserved-client-method-name": {
       severity: "warning",
       messages: {

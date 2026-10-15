@@ -105,7 +105,7 @@ const client = new WidgetsClient({
 
 ## Generated client classes
 
-Each TypeSpec interface becomes a class that extends `HttpClient`.
+Each TypeSpec interface becomes a class that extends `HttpClient`. Operations declared directly in a namespace are grouped by that namespace instead: operations in the service namespace itself take the service's name (`namespace PetStore` → `PetStoreClient`), and operations in a sub-namespace take the sub-namespace's name (`namespace PetStore.Pets` → `PetsClient`). When two interfaces or sub-namespaces share a name, both are qualified with their namespace path (`Pets.Ops` and `Stores.Ops` → `PetsOpsClient` and `StoresOpsClient`), so neither overwrites the other.
 
 ```typescript
 // TypeSpec
