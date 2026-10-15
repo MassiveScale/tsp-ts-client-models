@@ -56,7 +56,7 @@ interface RetryConfig {
 
 Retries use **exponential backoff**: `baseDelayMs * 2^attempt`. When a retried `429` or `503` carries a `Retry-After` header (in seconds), the client waits that long instead.
 
-- A `retryOn` status is retried for every method, because the server sent it to say it did not act on the request.
+- A `retryOn` status is retried for every method. The defaults, `429` and `503`, normally mean the server turned the request away without acting on it. A status you add, such as `500`, gives no such promise: a `POST` may have been saved before the server failed, and retrying it can apply it twice. Only add statuses like that when your API makes mutations safe to replay, for example with idempotency keys.
 - A network failure, where no response arrived, is retried only for idempotent methods: `GET`, `HEAD`, `PUT`, `DELETE` and `OPTIONS`. A `POST` or `PATCH` may already have reached the server, so resending it could apply it twice.
 - A call the caller cancelled, or one that timed out, is never retried. Aborting during a backoff wait ends the wait at once.
 - The body of a response that is retried is discarded, so it does not hold the connection open.
