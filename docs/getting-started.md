@@ -15,7 +15,7 @@ Add the emitter to your TypeSpec project:
 npm install --save-dev @massivescale/tsp-ts-client-models@beta
 ```
 
-The emitter is in beta, so it is published under the `beta` dist-tag. Pin an exact version (for example `0.9.0-beta.0`) if you need reproducible builds while the API settles.
+The emitter is in beta, so it is published under the `beta` dist-tag. Pin an exact version (for example `1.0.0-beta.1`) if you need reproducible builds while the API settles.
 
 ## Configuration
 
