@@ -116,6 +116,21 @@ describe("multiple services", () => {
     ok(diagnostics[0].message.includes("npm-package-name"));
   });
 
+  it("numbers services whose namespaces normalize to the same folder", async () => {
+    const [out] = await emitWithDiagnostics(`${header}
+      @service(#{ title: "A" }) namespace FooBar {
+        @route("/a") @get op a(): string;
+      }
+      @service(#{ title: "B" }) namespace Foo.Bar {
+        @route("/b") @get op b(): string;
+      }
+    `);
+    strictEqual(JSON.parse(out["foo-bar/package.json"]).name, "foo-bar");
+    strictEqual(JSON.parse(out["foo-bar-2/package.json"]).name, "foo-bar-2");
+    ok(out["foo-bar/endpoints/FooBarEndpoints.ts"]);
+    ok(out["foo-bar-2/endpoints/BarEndpoints.ts"]);
+  });
+
   it("does not count a service without operations", async () => {
     const [out, diagnostics] = await emitWithDiagnostics(`${header}
       @service(#{ title: "A" }) namespace Alpha {

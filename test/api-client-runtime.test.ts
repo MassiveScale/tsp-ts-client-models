@@ -413,6 +413,37 @@ describe("generated ApiClient transport", () => {
       strictEqual(request.headers.has("x-null"), false);
     });
 
+    it("asks for the declared response media type", async () => {
+      const request = await send("GET", { accept: "text/plain" });
+      strictEqual(request.headers.get("Accept"), "text/plain");
+    });
+
+    it("lets a caller's Accept header override the declared one", async () => {
+      const request = await send("GET", {
+        accept: "text/plain",
+        headers: { accept: "text/csv" },
+      });
+      strictEqual(request.headers.get("Accept"), "text/csv");
+    });
+
+    it("serializes by an explicit Content-Type header over the declared one", async () => {
+      const request = await send("POST", {
+        body: "hello",
+        contentType: "text/plain",
+        headers: { "Content-Type": "application/json" },
+      });
+      strictEqual(await request.text(), '"hello"');
+    });
+
+    it("sends a body as-is when the header overrides JSON with text", async () => {
+      const request = await send("POST", {
+        body: "hello",
+        headers: { "Content-Type": "text/plain" },
+      });
+      strictEqual(request.headers.get("Content-Type"), "text/plain");
+      strictEqual(await request.text(), "hello");
+    });
+
     it("formats query values: dates, arrays, objects", async () => {
       const request = await send("GET", {
         query: {
@@ -1496,6 +1527,40 @@ describe("generated ApiClient transport", () => {
 
       await client.request("GET", "/widgets");
       ok(cancelled, "the retried response's body must be cancelled");
+    });
+
+    it("does not wait for a body cancellation that never settles", async () => {
+      const { HttpClient } = await loadApiClient();
+      // Cancelling a tee'd branch can stay pending while its sibling is held.
+      const stuck = new ReadableStream({
+        cancel: () => new Promise<void>(() => undefined),
+      });
+      let call = 0;
+      const client = new HttpClient({
+        baseUrl: "https://api.example.com",
+        retry: { maxAttempts: 2, baseDelayMs: 0 },
+        timeout: 2_000,
+        fetch: () =>
+          Promise.resolve(
+            call++ === 0
+              ? new Response(stuck, { status: 503 })
+              : jsonResponse({ ok: true }),
+          ),
+      });
+
+      deepStrictEqual(await client.request("GET", "/widgets"), { ok: true });
+    });
+
+    it("sends a DELETE body", async () => {
+      const { HttpClient } = await loadApiClient();
+      const transport = sequence(new Response(null, { status: 204 }));
+      const client = new HttpClient({
+        baseUrl: "https://api.example.com",
+        fetch: transport,
+      });
+
+      await client.request("DELETE", "/widgets", { body: ["a", "b"] });
+      strictEqual(await transport.calls[0].text(), '["a","b"]');
     });
 
     it("still sends once when maxAttempts is 0", async () => {

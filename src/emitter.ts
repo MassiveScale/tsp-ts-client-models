@@ -107,45 +107,53 @@ export async function $onEmit(
   // its output folder, so two services sharing one folder would overwrite each
   // other. Each gets a subfolder — and a package — of its own instead.
   const multiple = emittable.length > 1;
+  const folders = allocateServiceFolders(emittable.map((s) => s.namespace));
   if (multiple) {
-    const folders = emittable.map((s) =>
-      serviceFolderName(getNamespaceFullName(s.namespace)),
-    );
     reportDiagnostic(program, {
       code: "multiple-services",
       messageId: options["npm-package-name"] ? "packageNameIgnored" : "default",
       format: {
         count: String(emittable.length),
-        folders: folders.join(", "),
+        folders: [...folders.values()].join(", "),
       },
       target: NoTarget,
     });
   }
 
   for (const service of emittable) {
-    const outputDir = multiple
-      ? resolvePath(
-          emitterOutputDir,
-          serviceFolderName(getNamespaceFullName(service.namespace)),
-        )
-      : emitterOutputDir;
+    const folder = folders.get(service.namespace)!;
     await emitService(
       program,
       service.namespace,
       service.operations,
-      outputDir,
-      multiple ? { ...options, "npm-package-name": undefined } : options,
+      multiple ? resolvePath(emitterOutputDir, folder) : emitterOutputDir,
+      // Each service's package is named after its folder, so two packages
+      // can never share a name either.
+      multiple ? { ...options, "npm-package-name": folder } : options,
       renderer,
     );
   }
 }
 
 /**
- * Subfolder a service is emitted to when a project declares more than one:
- * its namespace in kebab case, the same as its default package name.
+ * Subfolder (and package name) for each service when a project declares more
+ * than one: its namespace in kebab case. Namespaces that normalize to the same
+ * name (`FooBar` and `Foo.Bar` are both `foo-bar`) are numbered
+ * (`foo-bar`, `foo-bar-2`), so no service overwrites another's output.
  */
-function serviceFolderName(nsFullName: string): string {
-  return nsToPackageName(nsFullName);
+function allocateServiceFolders(
+  namespaces: readonly Namespace[],
+): Map<Namespace, string> {
+  const taken = new Set<string>();
+  const folders = new Map<Namespace, string>();
+  for (const ns of namespaces) {
+    const base = nsToPackageName(getNamespaceFullName(ns));
+    let folder = base;
+    for (let n = 2; taken.has(folder); n++) folder = `${base}-${n}`;
+    taken.add(folder);
+    folders.set(ns, folder);
+  }
+  return folders;
 }
 
 // ─── Renderer factory ────────────────────────────────────────────────────────
@@ -1687,14 +1695,19 @@ interface PathArg {
 }
 
 /**
- * Parameter names a generated client method declares itself. Path arguments
- * precede them in the same parameter list, so they must not reuse these.
+ * Names a path argument must not take: the parameters a generated client
+ * method declares itself, which share its parameter list, and the globals the
+ * endpoint function calls to expand a path parameter — `@path String` would
+ * otherwise generate `String(String)`.
  */
 const CLIENT_METHOD_PARAMETER_NAMES: readonly string[] = [
   "body",
   "query",
   "headers",
   "options",
+  "String",
+  "encodeURI",
+  "encodeURIComponent",
 ];
 
 /**
@@ -1943,6 +1956,11 @@ export interface TransportOptions extends Omit<RequestOptions, "headers"> {
    * raw bytes. An empty JSON body resolves to \`undefined\`.
    */
   responseFormat?: "json" | "text" | "binary";
+  /**
+   * Media type to request with \`Accept\`. Default: \`application/json\`. A
+   * caller's own \`Accept\` header still takes precedence.
+   */
+  accept?: string;
 }
 
 export class ApiError extends Error {
@@ -2021,10 +2039,15 @@ const IDEMPOTENT_METHODS = new Set([
   "TRACE",
 ]);
 
-/** Discards a response body that will not be read, freeing its connection. */
-async function discardBody(response: Response): Promise<void> {
+/**
+ * Discards a response body that will not be read, freeing its connection.
+ * Cancellation is started but not awaited: cancelling one branch of a cloned
+ * or tee'd body can stay pending until its sibling is read, and a retry must
+ * not wait on that.
+ */
+function discardBody(response: Response): void {
   if (response.bodyUsed || !response.body) return;
-  await response.body.cancel().catch(() => undefined);
+  response.body.cancel().catch(() => undefined);
 }
 
 /**
@@ -2210,7 +2233,9 @@ export class HttpClient {
 
       // A Headers object matches names case-insensitively, so a per-request
       // \`content-type\` replaces the default instead of being sent alongside it.
-      const headers = new Headers({ Accept: "application/json" });
+      const headers = new Headers({
+        Accept: options?.accept ?? "application/json",
+      });
       setHeaders(headers, this.config.defaultHeaders);
       setHeaders(headers, options?.headers);
 
@@ -2227,7 +2252,12 @@ export class HttpClient {
       // reference, a BigInt) reaches onError like any other failure. Only a
       // request that actually has a body gets a Content-Type: on a GET it would
       // force a CORS preflight for no reason.
-      const contentType = options?.contentType ?? "application/json";
+      // A Content-Type the caller set explicitly decides the serialization,
+      // so the payload always matches the media type it is labelled with.
+      const contentType =
+        headers.get("Content-Type") ??
+        options?.contentType ??
+        "application/json";
       let body: BodyInit | undefined;
       if (options?.body !== undefined) {
         body =
@@ -2269,7 +2299,7 @@ export class HttpClient {
             // adding to it.
             wait = retryAfterMs(resp) ?? backoff(attempt);
             lastError = toApiError(resp);
-            await discardBody(resp);
+            discardBody(resp);
             continue;
           }
           const errorBody = await resp.json().catch(() => undefined);
@@ -2352,7 +2382,7 @@ export class HttpClient {
 
   protected httpDelete<T>(
     path: string,
-    options?: TransportOptions,
+    options?: TransportOptions & { body?: unknown },
   ): Promise<T> {
     return this.request<T>("DELETE", path, options);
   }
@@ -2504,7 +2534,7 @@ export class RxHttpClient extends HttpClient {
 
   protected httpDelete$<T>(
     path: string,
-    options?: TransportOptions,
+    options?: TransportOptions & { body?: unknown },
   ): Observable<T> {
     return this.observe<T>(
       (signal) => this.httpDelete<T>(path, { ...options, signal }),
@@ -2871,6 +2901,9 @@ const CLIENT_REFERENCED_GLOBALS: readonly string[] = [
   "Record",
   "Date",
   "Uint8Array",
+  "Blob",
+  "ArrayBuffer",
+  "FormData",
 ];
 
 /**
@@ -3062,6 +3095,11 @@ function buildClientMethodView(
   if (response.format) {
     transport.push(`responseFormat: ${JSON.stringify(response.format)}`);
   }
+  if (response.accept) {
+    transport.push(`accept: ${JSON.stringify(response.accept)}`);
+  }
+  // DELETE takes no positional body, so a declared one rides in the options.
+  if (body && op.verb === "delete") transport.push("body");
   const responseType = response.type;
   const transportArg = `{ ${transport.join(", ")} }`;
 
@@ -3218,8 +3256,7 @@ function resolveNamedBodyModelType(
   if (
     !bodyModel.name ||
     isArrayModelType(bodyModel) ||
-    isPlainRecord(bodyModel) ||
-    bodyModel.templateMapper?.args
+    isPlainRecord(bodyModel)
   ) {
     return undefined;
   }
@@ -3246,7 +3283,14 @@ function resolveNamedBodyModelType(
       return emitted(prefixed);
     }
   }
-  if (isSynthesizedMergePatchModel(bodyModel)) return undefined;
+  // A generic instance (`Box<string>`) with no request type of its own maps
+  // like any other type, so its arguments are kept.
+  if (
+    isSynthesizedMergePatchModel(bodyModel) ||
+    bodyModel.templateMapper?.args
+  ) {
+    return undefined;
+  }
   // Through the rename map like every other type reference, so a model aliased
   // to dodge a shadowed global (`Promise` → `PromiseModel`) is aliased here
   // too. Both rewrite kinds are consulted, in the same order mapTsType uses.
@@ -3283,11 +3327,18 @@ function resolveResponseType(
       const isJson = !contentType || /[/+]json\s*(;|$)/i.test(contentType);
       const isBytes =
         bodyType.kind === "Scalar" && builtinScalarName(bodyType) === "bytes";
-      if (!isJson && isBytes) return { type: "Uint8Array", format: "binary" };
+      if (!isJson) {
+        // A non-JSON body is read raw, so it is typed as what that yields —
+        // a `text/plain` int32 resolves to "42", not 42 — and the request
+        // asks for the declared media type rather than JSON.
+        return isBytes
+          ? { type: "Uint8Array", format: "binary", accept: contentType }
+          : { type: "string", format: "text", accept: contentType };
+      }
       const tsType = mapTsType(bodyType, program, models, enums, renameMap);
       if (tsType !== "void" && tsType !== "unknown") {
         collectModelNamesFromType(bodyType, modelImportSet);
-        return isJson ? { type: tsType } : { type: tsType, format: "text" };
+        return { type: tsType };
       }
     }
   }
@@ -3303,6 +3354,8 @@ interface ResponseShape {
    * textual media type, `binary` for raw `bytes`.
    */
   format?: "text" | "binary";
+  /** Media type to request in `Accept`, when it is not JSON. */
+  accept?: string;
 }
 
 function collectModelNamesFromType(type: Type, into: Set<string>): void {
@@ -3338,6 +3391,10 @@ function collectModelNamesFromType(type: Type, into: Set<string>): void {
           collectModelNamesFromType(arg as Type, into);
         }
       }
+    }
+  } else if (type.kind === "Tuple") {
+    for (const value of (type as Tuple).values) {
+      collectModelNamesFromType(value, into);
     }
   } else if (type.kind === "Union") {
     const u = type as Union;
@@ -3554,17 +3611,17 @@ function mapTsType(
         if (isNativeArrayShortcut(m)) return `${args[0]}[]`;
         if (isNativeRecordShortcut(m)) return `Record<string, ${args[0]}>`;
         const decl = m.namespace?.models.get(m.name);
-        registerNamedType(program, models, decl ?? m);
+        registerNamedType(program, models, enums, decl ?? m);
         return args.length > 0 ? `${aliased}<${args.join(", ")}>` : aliased;
       }
 
-      registerNamedType(program, models, m);
+      registerNamedType(program, models, enums, m);
       return aliased;
     }
 
     case "Enum": {
       const e = type as Enum;
-      if (e.name) registerNamedType(program, enums, e);
+      if (e.name) registerNamedType(program, models, enums, e);
       return e.name || "string";
     }
 
@@ -3580,7 +3637,7 @@ function mapTsType(
     case "Union": {
       const u = type as Union;
       if (isAliasedUnion(u)) {
-        registerNamedType(program, enums, u);
+        registerNamedType(program, models, enums, u);
         return renameMap?.get(`${RENAME_ALIAS}${u.name}`) ?? u.name!;
       }
       const parts = unionMemberTypes(u, program, models, enums, renameMap);
@@ -3710,7 +3767,7 @@ function renderInlineModel(
   );
   for (const prop of props) {
     const optional = prop.optional ? "?" : "";
-    const type = mapTsType(prop.type, program, models, enums, renameMap);
+    const type = mapPropertyTsType(prop, program, models, enums, renameMap);
     const key = formatPropertyKey(jsonPropertyName(program, prop));
     fields.push(`${key}${optional}: ${type}`);
   }
@@ -3852,19 +3909,21 @@ function namespaceNameOf(type: Model | Enum | Union): string {
 const reportedDuplicateNames = new WeakMap<Program, Set<string>>();
 
 /**
- * Records a named model or enum for emission. Every generated type shares one
- * `models.ts`, so two different types with the same name from different
- * namespaces cannot both be emitted: the first one keeps the name, and the
- * clash is reported once as an error instead of the second silently replacing
- * the first and retyping every property that referenced it.
+ * Records a named model, enum, or union for emission. Every generated type
+ * shares one `models.ts`, so two different types with the same name from
+ * different namespaces cannot both be emitted — whether both are models or one
+ * is a model and the other an enum or union. The first one keeps the name, and
+ * the clash is reported once as an error instead of the second silently
+ * replacing the first (or being declared twice).
  */
-function registerNamedType<T extends Model | Enum | Union>(
+function registerNamedType(
   program: Program,
-  types: Map<string, T>,
-  type: T,
+  models: Map<string, Model>,
+  enums: Map<string, Enum | Union>,
+  type: Model | Enum | Union,
 ): void {
   const name = type.name!;
-  const existing = types.get(name);
+  const existing = models.get(name) ?? enums.get(name);
   if (existing && existing !== type) {
     const kept = namespaceNameOf(existing);
     const other = namespaceNameOf(type);
@@ -3889,7 +3948,8 @@ function registerNamedType<T extends Model | Enum | Union>(
       return;
     }
   }
-  types.set(name, type);
+  if (type.kind === "Model") models.set(name, type);
+  else enums.set(name, type);
 }
 
 // ─── Model helpers ───────────────────────────────────────────────────────────

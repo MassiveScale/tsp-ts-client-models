@@ -72,7 +72,7 @@ interface RequestOptions {
 }
 ```
 
-Every request sends `Accept: application/json`. A `Content-Type` is sent only when the request has a body, so a cross-origin `GET` does not trigger a CORS preflight just for that header. Header names are matched case-insensitively, so a per-request `content-type` replaces the default instead of being sent alongside it.
+Every request sends `Accept: application/json`, or the media type the operation declares for its response when that is not JSON (`text/plain`, `application/octet-stream`). Your own `Accept` header still wins. A `Content-Type` is sent only when the request has a body, so a cross-origin `GET` does not trigger a CORS preflight just for that header. Header names are matched case-insensitively, so a per-request `content-type` replaces the default instead of being sent alongside it.
 
 ### Error classes
 
@@ -138,7 +138,7 @@ export class WidgetsClient extends HttpClient {
 - A path parameter whose name is a reserved word, or clashes with `body`, `query`, `headers` or `options`, gets a `Param` suffix (`default` → `defaultParam`). The route still uses the TypeSpec wire name.
 - If a request type was generated for the body model, the body parameter uses that type (e.g. `WidgetPostRequest`). Otherwise the raw model is used.
 - Every other body shape is supported too. See [Request bodies](#request-bodies).
-- The response type is the TypeScript equivalent of the first 2xx response body. Operations with no body response use `void`. A JSON body is parsed, and an empty one (a `201` with no content, for example) resolves to `undefined`. A textual response such as `text/plain` resolves to the raw string. A `bytes` response with a non-JSON media type resolves to a `Uint8Array`.
+- The response type is the TypeScript equivalent of the first 2xx response body. Operations with no body response use `void`. A JSON body is parsed, and an empty one (a `201` with no content, for example) resolves to `undefined`. A textual response such as `text/plain` resolves to the raw string, and is typed `string` whatever its TypeSpec type: a `text/plain` `int32` arrives as `"42"`. A `bytes` response with a non-JSON media type resolves to a `Uint8Array`.
 - Every method accepts a `query` parameter, regardless of HTTP verb. See [Query parameters](#query-parameters).
 - When an argument after an optional one is required, the optional one is typed `T | undefined`, and you pass `undefined` to skip it.
 
@@ -154,6 +154,8 @@ export class WidgetsClient extends HttpClient {
 | `@header contentType: "application/octet-stream", @body data: bytes` | `Blob \| ArrayBuffer \| Uint8Array` | As-is, with the declared media type               |
 | `@body file: File`                                                   | `Blob`                              | As-is, with the declared media type               |
 | `@multipartBody body: { … }`                                         | `FormData`                          | As-is; `fetch` sets the multipart boundary itself |
+
+A `Content-Type` you set in `options.headers` decides how the body is serialized, so a JSON media type always gets JSON and any other is sent as-is. A `@delete` operation with a `@body` sends it too.
 
 For a multipart body you build the `FormData` yourself, using the part names from the TypeSpec definition. A `Content-Type` header parameter is never offered as an argument, because the body's declared media type decides it. You can still override it through `options.headers`.
 

@@ -800,6 +800,8 @@ describe("generated package compiles", () => {
       ): void;
       @get @route("{id}") optional(@path id: string, @path tail?: string): void;
       @get @route("reserved/{default}") reserved(@path("default") \`default\`: string): void;
+      @delete @route("bulk") removeMany(@body ids: string[]): void;
+      @get @route("count") count(): { @header contentType: "text/plain"; @body body: int32 };
       @patch @route("{id}") update(
         @path id: string,
         @header ifMatch?: string,
@@ -821,6 +823,9 @@ describe("generated package compiles", () => {
     void client.optional("w1");
     void client.optional("w1", "tail");
     void client.reserved("d");
+    void client.removeMany(["a", "b"]);
+    const count: Promise<string> = client.count();
+    void count;
     void client.update("w1", { name: "x" }, undefined, { "if-match": "etag" });
     const path: string = WidgetsEndpoints.read("w1");
     void path;

@@ -353,3 +353,87 @@ describe("toIdentifier", () => {
   it("falls back to an underscore for a name with no valid characters", () =>
     strictEqual(toIdentifier("--", new Set()), "_"));
 });
+
+describe("review follow-ups", () => {
+  it("renames path arguments that would shadow the expansion helpers", async () => {
+    const { endpoints } = await emitWidgets(
+      `@get @route("{String}/{encodeURIComponent}") read(@path String: string, @path encodeURIComponent: string): void;`,
+    );
+    ok(
+      endpoints.includes(
+        "read: (StringParam: string, encodeURIComponentParam: string)",
+      ),
+      endpoints,
+    );
+    ok(endpoints.includes("encodeURIComponent(String(StringParam))"));
+  });
+
+  it("imports models referenced inside a tuple", async () => {
+    const { client } = await emitWidgets(
+      `@get pairs(): { pair: [Widget, int32] };`,
+    );
+    ok(client.includes("import type { Widget } from"), client);
+  });
+
+  it("honors a property-level @encode inside an inline body", async () => {
+    const { client } = await emitWidgets(
+      `@post create(@encode(DateTimeKnownEncoding.unixTimestamp, int32) at: utcDateTime): void;`,
+    );
+    ok(methodLine(client, "create").includes("body: { at: number }"));
+  });
+
+  it("aliases a model named Blob so the native body type survives", async () => {
+    const out = await emit(`
+      import "@typespec/http";
+      using Http;
+      @service(#{ title: "Test API" }) namespace TestApi;
+      model Blob { id: string; }
+      @route("/widgets") interface Widgets {
+        @get read(): Blob;
+        @put upload(@header contentType: "application/octet-stream", @body data: bytes): void;
+      }
+    `);
+    const client = out["client/WidgetsClient.ts"];
+    ok(client.includes("Blob as BlobModel"), client);
+    ok(client.includes("Promise<BlobModel>"));
+    ok(client.includes("body: Blob | ArrayBuffer | Uint8Array"));
+  });
+
+  it("uses the request type synthesized for a generic body", async () => {
+    const out = await emit(`
+      import "@typespec/http";
+      using Http;
+      @service(#{ title: "Test API" }) namespace TestApi;
+      model Box<T> { @visibility(Lifecycle.Read) id: string; value: T; }
+      @route("/boxes") interface Boxes { @post create(@body body: Box<string>): void; }
+    `);
+    ok(out["models.ts"].includes("export interface BoxPostRequest"));
+    ok(
+      out["client/BoxesClient.ts"].includes("body: BoxPostRequest"),
+      out["client/BoxesClient.ts"],
+    );
+  });
+
+  it("forwards a DELETE body", async () => {
+    const { client } = await emitWidgets(
+      `@delete remove(@body ids: string[]): void;`,
+    );
+    ok(methodLine(client, "remove").includes("body: string[]"));
+    ok(callLine(client, "remove").includes("query, body }"), client);
+  });
+
+  it("types a text response as the string it is read as", async () => {
+    const { client } = await emitWidgets(
+      `@get @route("count") count(): { @header contentType: "text/plain"; @body body: int32 };`,
+    );
+    ok(methodLine(client, "count").includes("Promise<string>"));
+    ok(callLine(client, "count").includes('accept: "text/plain"'));
+  });
+
+  it("asks for a binary response's media type", async () => {
+    const { client } = await emitWidgets(
+      `@get @route("raw") raw(): { @header contentType: "application/octet-stream"; @body body: bytes };`,
+    );
+    ok(callLine(client, "raw").includes('accept: "application/octet-stream"'));
+  });
+});

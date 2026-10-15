@@ -276,6 +276,30 @@ describe("types from other namespaces", () => {
     ok(!out["models.ts"].includes("fromB"));
   });
 
+  it("reports a model and a union with the same name", async () => {
+    const [out, diagnostics] = await emitWithDiagnostics(`
+      import "@typespec/http";
+      using Http;
+
+      @service(#{ title: "Test API" })
+      namespace Api {
+        model Holder { a: A.Widget; b: B.Widget; }
+        @route("/w") interface W { @get read(): Holder; }
+      }
+      namespace A { model Widget { fromA: string; } }
+      namespace B { union Widget { "x", "y" } }
+    `);
+    strictEqual(
+      diagnostics.filter(
+        (d) =>
+          d.code === "@massivescale/tsp-ts-client-models/duplicate-type-name",
+      ).length,
+      1,
+    );
+    ok(out["models.ts"].includes("export interface Widget {"));
+    ok(!out["models.ts"].includes("export type Widget"));
+  });
+
   it("does not report one type reached through several paths", async () => {
     const [, diagnostics] = await emitWithDiagnostics(`
       import "@typespec/http";

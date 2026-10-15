@@ -51,7 +51,7 @@ options:
 | `client-style`         | `string`  | `promise`                               | Return-type flavor of the generated client(s): `promise` (Promise-based `{Name}Client`), `observable` (RxJS `Observable`-based `{Name}ObservableClient`), or `both`. The observable flavor adds `rxjs` as an optional peer dependency of the generated package. See [Observable (RxJS) client](docs/http-client.md#observable-rxjs-client). |
 | `templates`            | `object`  | —                                       | Override individual built-in Handlebars templates. See [Customizing templates](#customizing-templates).                                                                                                                                                                                                                                     |
 
-A project with more than one `@service` namespace gets one package per service, each in a subfolder of the output directory named after its namespace in kebab case (`MyOrg.PetApi` → `my-org-pet-api/`). Each package is named the same way, and `npm-package-name` is ignored with a warning.
+A project with more than one `@service` namespace gets one package per service, each in a subfolder of the output directory named after its namespace in kebab case (`MyOrg.PetApi` → `my-org-pet-api/`). Each package is named the same way, and `npm-package-name` is ignored with a warning. Namespaces that normalize to the same name (`FooBar` and `Foo.Bar`) are numbered: `foo-bar/` and `foo-bar-2/`.
 
 Then compile your TypeSpec definition:
 
