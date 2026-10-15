@@ -22,8 +22,10 @@ The output is a complete, buildable npm package (`package.json`, `tsconfig.json`
 Add the emitter to your TypeSpec project:
 
 ```bash
-npm install @massivescale/tsp-ts-client-models
+npm install --save-dev @massivescale/tsp-ts-client-models@beta
 ```
+
+The emitter is in beta and is published under the `beta` dist-tag. It requires Node.js 22 or later and TypeSpec 1.15 or later.
 
 Configure it in your `tspconfig.yaml`:
 
@@ -49,6 +51,8 @@ options:
 | `client-style`         | `string`  | `promise`                               | Return-type flavor of the generated client(s): `promise` (Promise-based `{Name}Client`), `observable` (RxJS `Observable`-based `{Name}ObservableClient`), or `both`. The observable flavor adds `rxjs` as an optional peer dependency of the generated package. See [Observable (RxJS) client](docs/http-client.md#observable-rxjs-client). |
 | `templates`            | `object`  | —                                       | Override individual built-in Handlebars templates. See [Customizing templates](#customizing-templates).                                                                                                                                                                                                                                     |
 
+A project with more than one `@service` namespace gets one package per service, each in a subfolder of the output directory named after its namespace in kebab case (`MyOrg.PetApi` → `my-org-pet-api/`). Each package is named the same way, and `npm-package-name` is ignored with a warning. Namespaces that normalize to the same name (`FooBar` and `Foo.Bar`) are numbered: `foo-bar/` and `foo-bar-2/`.
+
 Then compile your TypeSpec definition:
 
 ```bash
@@ -69,41 +73,49 @@ options:
       clientObservable: "./templates/clientObservable.hbs" # RxJS client (client-style: observable|both)
 ```
 
+Relative paths are resolved from the TypeSpec project root (the folder containing `tspconfig.yaml`), so the same templates are found no matter which directory `tsp compile` runs from.
+
 ### Template view models
 
 Each template receives the corresponding view model as its Handlebars context.
 
 **`enum`** — `EnumView`
 
-| Field                   | Type                  | Description              |
-| ----------------------- | --------------------- | ------------------------ |
-| `doc`                   | `string \| undefined` | JSDoc text from `@doc`.  |
-| `enumName`              | `string`              | Enum name.               |
-| `members[]`             | `EnumMemberView[]`    | Ordered list of members. |
-| `members[].doc`         | `string \| undefined` | Per-member `@doc` text.  |
-| `members[].name`        | `string`              | Member name.             |
-| `members[].memberValue` | `string`              | Wire string value.       |
+| Field                    | Type                  | Description                                                                                             |
+| ------------------------ | --------------------- | ------------------------------------------------------------------------------------------------------- |
+| `doc`                    | `string \| undefined` | JSDoc text from `@doc`.                                                                                 |
+| `enumName`               | `string`              | Enum name.                                                                                              |
+| `members[]`              | `EnumMemberView[]`    | Ordered list of members.                                                                                |
+| `members[].doc`          | `string \| undefined` | Per-member `@doc` text.                                                                                 |
+| `members[].name`         | `string`              | Member name, as declared.                                                                               |
+| `members[].key`          | `string`              | Member name ready to use as an enum key: quoted when it is not a valid identifier (`"x-y"`).            |
+| `members[].memberValue`  | `string`              | Wire value, as a string.                                                                                |
+| `members[].valueLiteral` | `string`              | Wire value as a TypeScript literal: an escaped, single-quoted string (`'red'`) or a bare number (`10`). |
 
 **`interface`** — `InterfaceView`
 
-| Field                   | Type                  | Description                                    |
-| ----------------------- | --------------------- | ---------------------------------------------- |
-| `doc`                   | `string \| undefined` | JSDoc text from `@doc`.                        |
-| `interfaceName`         | `string`              | PascalCase interface name.                     |
-| `genericSuffix`         | `string`              | Generic parameter string, e.g. `<T>`, or `""`. |
-| `properties[]`          | `PropertyView[]`      | Ordered list of properties.                    |
-| `properties[].doc`      | `string \| undefined` | Per-property `@doc` text.                      |
-| `properties[].name`     | `string`              | Property name.                                 |
-| `properties[].type`     | `string`              | TypeScript type string.                        |
-| `properties[].optional` | `boolean`             | When `true`, emit `name?`.                     |
+| Field                   | Type                  | Description                                                                                 |
+| ----------------------- | --------------------- | ------------------------------------------------------------------------------------------- |
+| `doc`                   | `string \| undefined` | JSDoc text from `@doc`.                                                                     |
+| `interfaceName`         | `string`              | PascalCase interface name.                                                                  |
+| `genericSuffix`         | `string`              | Generic parameter string, e.g. `<T>`, or `""`.                                              |
+| `properties[]`          | `PropertyView[]`      | Ordered list of properties.                                                                 |
+| `properties[].doc`      | `string \| undefined` | Per-property `@doc` text.                                                                   |
+| `properties[].name`     | `string`              | Property name, as declared.                                                                 |
+| `properties[].key`      | `string`              | JSON name (`@encodedName` if set) as a key, quoted if needed.                               |
+| `properties[].type`     | `string`              | TypeScript type string.                                                                     |
+| `properties[].optional` | `boolean`             | When `true`, emit `name?`.                                                                  |
+| `indexSignature`        | `string \| undefined` | Value type of a `[key: string]` index signature, for a model that spreads or is a `Record`. |
 
 **`union`** — `UnionView`
 
-| Field           | Type                  | Description                                                     |
-| --------------- | --------------------- | --------------------------------------------------------------- |
-| `doc`           | `string \| undefined` | JSDoc text from `@doc` on the `@discriminator`-annotated model. |
-| `unionName`     | `string`              | PascalCase name of the base (discriminated) model.              |
-| `memberNames[]` | `string[]`            | Ordered, deduplicated interface names of the concrete variants. |
+Used for three kinds of `export type` alias: a `@discriminator` base model (the union of its variants), a named `union` declaration, and a discriminated write-body request type.
+
+| Field           | Type                  | Description                                                                                                                                                          |
+| --------------- | --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `doc`           | `string \| undefined` | JSDoc text from `@doc`.                                                                                                                                              |
+| `unionName`     | `string`              | Name of the alias.                                                                                                                                                   |
+| `memberNames[]` | `string[]`            | Ordered, deduplicated member types, ready to join with `\|`. Usually type names; for a named union, any TypeScript type (`"active"`, `{ kind: "cat"; value: Cat }`). |
 
 **`endpoints`** — `EndpointsView`
 
@@ -312,25 +324,23 @@ export type Pet = Dog | Cat;
 
 Every reference to `Pet` (e.g. `pets: Pet[]`) resolves to the union, enabling standard TypeScript discriminated-union narrowing on `petKind`. See [docs/discriminated-models.md](docs/discriminated-models.md) for details, including multi-level hierarchies.
 
-### Property encoding
+### Wire types
 
-TypeSpec scalars map to their natural TypeScript types (`string`, `number`, `boolean`, `Date`, `Uint8Array`, …). The one encoding that changes the generated type is `@encode(string)` on a `boolean` (TypeSpec 1.14.0+):
+The generated client sends and receives plain JSON (`JSON.stringify` and `response.json()`) and performs no per-field conversion, so every property is typed as the value that actually arrives:
 
-```typespec
-model Widget {
-  @encode(string) active: boolean; // carried on the wire as "true" / "false"
-  enabled: boolean;
-}
-```
+| TypeSpec                                                          | TypeScript        |
+| ----------------------------------------------------------------- | ----------------- |
+| `utcDateTime`, `offsetDateTime`, `plainDate`, `plainTime`         | `string`          |
+| `duration`                                                        | `string`          |
+| `bytes`                                                           | `string` (base64) |
+| integer and float types, `decimal`                                | `number`          |
+| `@encode(DateTimeKnownEncoding.unixTimestamp, int32) utcDateTime` | `number`          |
+| `@encode(DurationKnownEncoding.seconds, float64) duration`        | `number`          |
+| `@encode(string) boolean`                                         | `string`          |
 
-```typescript
-export interface Widget {
-  active: string; // matches what response.json() actually yields
-  enabled: boolean;
-}
-```
+An `@encode` on a property, or on a custom scalar's declaration, chooses the wire type. Convert in your own code where you need a richer value, for example `new Date(widget.createdAt)`.
 
-The generated `fetch`/JSON client performs no per-field transformation, so a boolean carried as a string arrives from `response.json()` as `"true"`/`"false"` — typing it `string` reflects the real runtime shape. Plain booleans and every other encoding are unaffected.
+Raw payloads are the exception. A `bytes` request body with a binary media type such as `application/octet-stream` accepts `Blob | ArrayBuffer | Uint8Array`, and a `bytes` response with one resolves to a `Uint8Array`. See the [HTTP client docs](docs/http-client.md#request-bodies).
 
 ## Development
 

@@ -5,15 +5,17 @@
 ## Prerequisites
 
 - Node.js 22 or later (native `fetch` is required for the HTTP client)
-- TypeSpec 1.14.0 or later (`npm install -g @typespec/compiler@^1.14.0`)
+- TypeSpec 1.15.0 or later (`npm install -g @typespec/compiler@^1.15.0`)
 
 ## Installation
 
 Add the emitter to your TypeSpec project:
 
 ```bash
-npm install --save-dev @massivescale/tsp-ts-client-models
+npm install --save-dev @massivescale/tsp-ts-client-models@beta
 ```
+
+The emitter is in beta, so it is published under the `beta` dist-tag. Pin an exact version (for example `1.0.0-beta.1`) if you need reproducible builds while the API settles.
 
 ## Configuration
 

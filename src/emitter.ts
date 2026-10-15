@@ -9,6 +9,8 @@ import {
   Namespace,
   Program,
   Union,
+  Tuple,
+  Operation,
   StringLiteral,
   NumericLiteral,
   BooleanLiteral,
@@ -19,6 +21,7 @@ import {
   getFormat,
   getTags,
   getDiscriminator,
+  getDiscriminatedUnion,
   getDiscriminatedUnionFromInheritance,
   isArrayModelType,
   isRecordModelType,
@@ -26,19 +29,31 @@ import {
   isVoidType,
   isNeverType,
   getNamespaceFullName,
+  resolveEncodedName,
   resolvePath,
-  isErrorModel,
   isService,
   NoTarget,
 } from "@typespec/compiler";
 import {
+  unsafe_MutatorWithNamespace,
+  unsafe_mutateSubgraphWithNamespace,
+} from "@typespec/compiler/experimental";
+import {
   getAllHttpServices,
+  getHttpService,
+  HttpOperationParameter,
+  HttpOperationPathParameter,
+  isMetadata,
   HttpOperation,
   HttpStatusCodeRange,
   Visibility,
   resolveRequestVisibility,
 } from "@typespec/http";
-import { getAllVersions, Version } from "@typespec/versioning";
+import {
+  getAllVersions,
+  getVersioningMutators,
+  Version,
+} from "@typespec/versioning";
 import { resolve } from "node:path";
 import {
   createRenderer,
@@ -65,7 +80,7 @@ import {
   filterPropsForRequest,
   flattenProperties,
   getMergePatchBaseName,
-  hasHiddenProperties,
+  bodyHasHiddenProperties,
   isOpInVersion,
   propsHaveSameKeys,
   requestTypeSuffix,
@@ -84,24 +99,70 @@ export async function $onEmit(
   const [services, diags] = getAllHttpServices(program);
   program.reportDiagnostics(diags);
 
-  for (const service of services) {
-    if (!isService(program, service.namespace)) continue;
-    if (service.operations.length === 0) continue;
+  const emittable = services.filter(
+    (s) => isService(program, s.namespace) && s.operations.length > 0,
+  );
+
+  // Every service writes models.ts, index.ts and package.json at the root of
+  // its output folder, so two services sharing one folder would overwrite each
+  // other. Each gets a subfolder — and a package — of its own instead.
+  const multiple = emittable.length > 1;
+  const folders = allocateServiceFolders(emittable.map((s) => s.namespace));
+  if (multiple) {
+    reportDiagnostic(program, {
+      code: "multiple-services",
+      messageId: options["npm-package-name"] ? "packageNameIgnored" : "default",
+      format: {
+        count: String(emittable.length),
+        folders: [...folders.values()].join(", "),
+      },
+      target: NoTarget,
+    });
+  }
+
+  for (const service of emittable) {
+    const folder = folders.get(service.namespace)!;
     await emitService(
       program,
       service.namespace,
       service.operations,
-      emitterOutputDir,
-      options,
+      multiple ? resolvePath(emitterOutputDir, folder) : emitterOutputDir,
+      // Each service's package is named after its folder, so two packages
+      // can never share a name either.
+      multiple ? { ...options, "npm-package-name": folder } : options,
       renderer,
     );
   }
 }
 
+/**
+ * Subfolder (and package name) for each service when a project declares more
+ * than one: its namespace in kebab case. Namespaces that normalize to the same
+ * name (`FooBar` and `Foo.Bar` are both `foo-bar`) are numbered
+ * (`foo-bar`, `foo-bar-2`), so no service overwrites another's output.
+ */
+function allocateServiceFolders(
+  namespaces: readonly Namespace[],
+): Map<Namespace, string> {
+  const taken = new Set<string>();
+  const folders = new Map<Namespace, string>();
+  for (const ns of namespaces) {
+    const base = nsToPackageName(getNamespaceFullName(ns));
+    let folder = base;
+    for (let n = 2; taken.has(folder); n++) folder = `${base}-${n}`;
+    taken.add(folder);
+    folders.set(ns, folder);
+  }
+  return folders;
+}
+
 // ─── Renderer factory ────────────────────────────────────────────────────────
 
 function buildRenderer(program: Program, options: EmitterOptions): Renderer {
-  const overrides = resolveTemplateOverrides(options.templates);
+  const overrides = resolveTemplateOverrides(
+    options.templates,
+    program.projectRoot,
+  );
   try {
     return createRenderer(overrides);
   } catch (e) {
@@ -116,13 +177,22 @@ function buildRenderer(program: Program, options: EmitterOptions): Renderer {
   }
 }
 
-function resolveTemplateOverrides(
-  templates?: TemplateOverrides,
+/**
+ * Resolves template override paths to absolute paths.
+ *
+ * Relative paths are resolved against the TypeSpec project root (the directory
+ * holding `tspconfig.yaml`, or the entrypoint's directory when there is none),
+ * not the process working directory, so `tsp compile path/to/project` run from
+ * elsewhere finds the same templates as running it from inside the project.
+ */
+export function resolveTemplateOverrides(
+  templates: TemplateOverrides | undefined,
+  projectRoot: string,
 ): TemplateOverrides {
   if (!templates) return {};
   const result: TemplateOverrides = {};
   for (const [key, val] of Object.entries(templates)) {
-    if (val) result[key as TemplateName] = resolve(process.cwd(), val);
+    if (val) result[key as TemplateName] = resolve(projectRoot, val);
   }
   return result;
 }
@@ -143,24 +213,30 @@ async function writeFile(
 
 /**
  * Attempts to parse a semver string from a TypeSpec version value.
- * Accepts an optional leading `v`/`V`, two-part (`1.2`) or three-part (`1.2.3`)
- * numeric versions, and preserves any pre-release suffix.
+ *
+ * Accepts an optional leading `v`/`V`, two-part (`1.2`) or three-part
+ * (`1.2.3`) numeric versions, and preserves any pre-release or build suffix.
+ * Leading zeros are stripped from every numeric part (`v1.02` → `1.2.0`),
+ * since npm rejects them as invalid semver.
  */
 export function tryParseSemver(value: string): string | undefined {
   const stripped = value.replace(/^[vV]/, "");
-  const match = stripped.match(/^(\d+)\.(\d+)(?:\.(\d+))?([-+].+)?$/);
+  const match = stripped.match(
+    /^(\d+)\.(\d+)(?:\.(\d+))?([-+][0-9A-Za-z.+-]+)?$/,
+  );
   if (!match) return undefined;
-  const patch = match[3] ?? "0";
-  const rest = match[4] ?? "";
-  return `${match[1]}.${match[2]}.${patch}${rest}`;
+  const part = (digits: string | undefined) => String(Number(digits ?? "0"));
+  return `${part(match[1])}.${part(match[2])}.${part(match[3])}${match[4] ?? ""}`;
 }
 
-/** Formats a date as a CalVer string (`YYYY.MM.DD`). */
+/**
+ * Formats a date as a CalVer string (`YYYY.M.D`).
+ *
+ * Month and day are deliberately not zero-padded: `2026.01.05` is not valid
+ * semver, and npm refuses to install or publish a package with that version.
+ */
 export function toCalVer(date: Date): string {
-  const y = date.getFullYear();
-  const m = String(date.getMonth() + 1).padStart(2, "0");
-  const d = String(date.getDate()).padStart(2, "0");
-  return `${y}.${m}.${d}`;
+  return `${date.getFullYear()}.${date.getMonth() + 1}.${date.getDate()}`;
 }
 
 /**
@@ -292,7 +368,16 @@ function buildMergePatchRenameMap(
     const patchTypeEmitted =
       requestTypes.has(patchTypeName) ||
       discriminatedRequestUnions.has(patchTypeName);
-    renameMap.set(name, patchTypeEmitted ? patchTypeName : base);
+    renameMap.set(
+      name,
+      patchTypeEmitted
+        ? emittedRequestTypeName(
+            patchTypeName,
+            requestTypes,
+            discriminatedRequestUnions,
+          )
+        : base,
+    );
   }
   return renameMap;
 }
@@ -313,24 +398,8 @@ async function emitService(
   if (versionsToEmit === null) return;
 
   const useVersionedFolders = options["all-versions"] === true;
-
-  // Group operations by container (Interface or Namespace)
-  const byContainer = new Map<
-    string,
-    { name: string; container: Interface | Namespace; ops: HttpOperation[] }
-  >();
-  for (const op of operations) {
-    const c = op.container;
-    const key =
-      c.kind === "Interface" ? c.name : `__ns_${(c as Namespace).name}`;
-    const name = c.kind === "Interface" ? c.name : serviceNs.name;
-    if (!byContainer.has(key))
-      byContainer.set(key, { name, container: c, ops: [] });
-    const entry = byContainer.get(key);
-    if (entry) entry.ops.push(op);
-  }
-
   const prefixTemplate = options["route-prefix"] ?? "api/{version}";
+  const mutators = getVersioningMutators(program, serviceNs);
 
   if (versionsToEmit.length > 0) {
     for (const version of versionsToEmit) {
@@ -338,10 +407,17 @@ async function emitService(
         ? resolvePath(outputDir, version.value)
         : outputDir;
       const routePrefix = resolveRoutePrefix(prefixTemplate, version.value);
+      const snapshot =
+        mutators?.kind === "versioned"
+          ? mutators.snapshots.find((s) => s.version.name === version.name)
+          : undefined;
+      const versionOps = snapshot
+        ? projectOperations(program, serviceNs, snapshot.mutator)
+        : operations;
       await emitVersion(
         program,
         nsFullName,
-        byContainer,
+        groupOperationsByContainer(serviceNs, versionOps),
         vDir,
         version,
         routePrefix,
@@ -350,11 +426,17 @@ async function emitService(
       );
     }
   } else {
+    // A service that is not itself versioned can still pin a version of a
+    // versioned library it uses (`@useDependency`), which needs projecting too.
+    const unversionedOps =
+      mutators?.kind === "transient"
+        ? projectOperations(program, serviceNs, mutators.mutator)
+        : operations;
     const routePrefix = resolveRoutePrefix(prefixTemplate, undefined);
     await emitVersion(
       program,
       nsFullName,
-      byContainer,
+      groupOperationsByContainer(serviceNs, unversionedOps),
       outputDir,
       undefined,
       routePrefix,
@@ -378,13 +460,105 @@ async function emitService(
   );
 }
 
+/** Operations grouped by the interface or namespace that declares them. */
+type ContainerGroups = Map<
+  string,
+  { name: string; container: Interface | Namespace; ops: HttpOperation[] }
+>;
+
+/**
+ * Projects the service to one API version and returns its HTTP operations.
+ *
+ * The versioning mutator clones the service's type graph as it exists in that
+ * version: `@added`/`@removed` types, properties, enum members, operations and
+ * parameters appear or disappear, `@renamedFrom` and `@typeChangedFrom` take
+ * effect, and `@madeOptional`/`@madeRequired` change optionality. Everything
+ * downstream then reads a plain, version-free graph.
+ */
+function projectOperations(
+  program: Program,
+  serviceNs: Namespace,
+  mutator: unsafe_MutatorWithNamespace,
+): HttpOperation[] {
+  const projected = unsafe_mutateSubgraphWithNamespace(
+    program,
+    [mutator],
+    serviceNs,
+  ).type as Namespace;
+  // Diagnostics were already reported for the unprojected service; the
+  // projection would only repeat them.
+  const [service] = getHttpService(program, projected);
+  return service.operations;
+}
+
+/**
+ * Groups operations by the interface or namespace that declares them, and
+ * names each group — the name its `*Endpoints` object and `*Client` class are
+ * built from.
+ *
+ * Each group is named after its own interface or namespace; operations
+ * declared directly in the service namespace take the service's name. Names
+ * that two groups would share (`Pets.Ops` and `Stores.Ops`, or two
+ * sub-namespaces both called `Admin`) are qualified with their namespace path
+ * relative to the service (`PetsOps`, `StoresOps`), so no group's endpoints
+ * file can overwrite another's.
+ */
+function groupOperationsByContainer(
+  serviceNs: Namespace,
+  operations: HttpOperation[],
+): ContainerGroups {
+  const serviceName = getNamespaceFullName(serviceNs);
+  const groups = new Map<
+    string,
+    { path: string[]; container: Interface | Namespace; ops: HttpOperation[] }
+  >();
+  for (const op of operations) {
+    const c = op.container;
+    const nsName = getNamespaceFullName(
+      c.kind === "Interface" ? c.namespace! : c,
+    );
+    const key = c.kind === "Interface" ? `${nsName}.${c.name}` : nsName;
+    let group = groups.get(key);
+    if (!group) {
+      const relative = nsName.startsWith(`${serviceName}.`)
+        ? nsName.slice(serviceName.length + 1).split(".")
+        : [];
+      const path =
+        c.kind === "Interface"
+          ? [...relative, c.name]
+          : relative.length > 0
+            ? relative
+            : [serviceNs.name];
+      group = { path, container: c, ops: [] };
+      groups.set(key, group);
+    }
+    group.ops.push(op);
+  }
+
+  const shortNameCounts = new Map<string, number>();
+  for (const { path } of groups.values()) {
+    const short = path[path.length - 1];
+    shortNameCounts.set(short, (shortNameCounts.get(short) ?? 0) + 1);
+  }
+  const taken = new Set<string>();
+  const byContainer: ContainerGroups = new Map();
+  for (const [key, { path, container, ops }] of groups) {
+    const short = path[path.length - 1];
+    const preferred =
+      (shortNameCounts.get(short) ?? 0) > 1
+        ? path.map(capitalize).join("")
+        : short;
+    const name = uniqueName(preferred, taken);
+    taken.add(name);
+    byContainer.set(key, { name, container, ops });
+  }
+  return byContainer;
+}
+
 async function emitVersion(
   program: Program,
   nsFullName: string,
-  byContainer: Map<
-    string,
-    { name: string; container: Interface | Namespace; ops: HttpOperation[] }
-  >,
+  byContainer: ContainerGroups,
   vDir: string,
   version: Version | undefined,
   routePrefix: string,
@@ -392,23 +566,13 @@ async function emitVersion(
   renderer: Renderer,
 ): Promise<void> {
   const models = new Map<string, Model>();
-  const enums = new Map<string, Enum>();
+  const enums = new Map<string, Enum | Union>();
   const requestTypes = new Map<string, RequestType>();
   const requestTypeBaseModels = new Set<string>();
   const discriminatedRequestUnions = new Map<
     string,
     DiscriminatedRequestUnion
   >();
-
-  // Determine which model names are needed for GET/HEAD responses BEFORE the
-  // full collection pass. Models that only appear as write-operation bodies (and
-  // never as read-operation responses) will be suppressed in favour of their
-  // filtered request types. Models that appear in both contexts are kept.
-  const readResponseModelNames = collectReadResponseModelNames(
-    program,
-    byContainer,
-    version,
-  );
 
   // First pass: collect all types and build request types
   for (const { ops } of byContainer.values()) {
@@ -437,6 +601,28 @@ async function emitVersion(
   const discriminatedUnions = new Map<string, string[]>();
   deepCollectTypes(models, enums, program, discriminatedUnions);
 
+  // Declared types keep their names; a synthesized request type that would
+  // share one is renamed before anything refers to it.
+  resolveRequestTypeNameClashes(
+    program,
+    models,
+    enums,
+    requestTypes,
+    discriminatedRequestUnions,
+  );
+
+  // A model whose only use is as a write body is replaced by its filtered
+  // request type and not emitted itself — unless something that is emitted
+  // still names it. Computed after the request types exist, since their
+  // properties are among those references.
+  const referencedModelNames = collectReferencedModelNames(
+    program,
+    byContainer,
+    version,
+    requestTypes,
+    requestTypeBaseModels,
+  );
+
   // Build a rename map so synthesized MergePatch type names are rewritten to
   // their canonical output names during rendering (e.g. PetMergePatchUpdateReplaceOnly
   // → PetPatchRequest, TagMergePatchUpdateReplaceOnly → Tag).
@@ -458,8 +644,8 @@ async function emitVersion(
   // collection passes above are what discover types, so rendering here sees
   // exactly what rendering later would.
   const hasModels =
-    [...models.values()].some((m) => isEmittable(m, nsFullName)) ||
-    [...enums.values()].some((e) => isEmittableEnum(e, nsFullName)) ||
+    [...models.values()].some((m) => isEmittable(m)) ||
+    [...enums.values()].some((e) => isEmittable(e)) ||
     requestTypes.size > 0;
 
   let modelsContent: string | undefined;
@@ -471,7 +657,7 @@ async function emitVersion(
       enums,
       requestTypes,
       requestTypeBaseModels,
-      readResponseModelNames,
+      referencedModelNames,
       discriminatedUnions,
       discriminatedRequestUnions,
       program,
@@ -481,40 +667,6 @@ async function emitVersion(
     // Read back from the emitted text rather than recomputing the name set, so
     // the collision checks can never disagree with what models.ts exports.
     generatedTypeNames = collectExportedNames(modelsContent);
-
-    // A generated type named after a global that scalars map to shadows it
-    // inside this very file. Re-render with those scalar references pointed at
-    // an alias instead. Rendering is pure, so a second pass is safe — and it
-    // only happens for the rare spec that triggers it.
-    const shadowed = resolveShadowedScalarGlobals(generatedTypeNames);
-    if (shadowed.aliases.size > 0) {
-      for (const [global, alias] of shadowed.aliases) {
-        reportDiagnostic(program, {
-          code: "shadowed-global-type",
-          format: { name: global, alias },
-          target: NoTarget,
-        });
-      }
-      modelsContent = buildModelsFile(
-        nsFullName,
-        models,
-        enums,
-        requestTypes,
-        requestTypeBaseModels,
-        readResponseModelNames,
-        discriminatedUnions,
-        discriminatedRequestUnions,
-        program,
-        renderer,
-        new Map([
-          ...mergePatchRenameMap,
-          ...[...shadowed.aliases].map(
-            ([global, alias]) => [`scalar:${global}`, alias] as const,
-          ),
-        ]),
-        shadowed.declarations,
-      );
-    }
   }
 
   // Emit endpoint files and (optionally) client files; collect exports for index
@@ -694,7 +846,7 @@ function collectTypesFromOp(
   op: HttpOperation,
   program: Program,
   models: Map<string, Model>,
-  enums: Map<string, Enum>,
+  enums: Map<string, Enum | Union>,
 ): void {
   for (const param of op.parameters.parameters) {
     mapTsType(param.param.type, program, models, enums);
@@ -718,7 +870,7 @@ function storeRequestType(
   op: HttpOperation,
   program: Program,
   models: Map<string, Model>,
-  enums: Map<string, Enum>,
+  enums: Map<string, Enum | Union>,
   requestTypes: Map<string, RequestType>,
   requestTypeBaseModels: Set<string>,
 ): void {
@@ -770,7 +922,7 @@ function collectRequestType(
   op: HttpOperation,
   program: Program,
   models: Map<string, Model>,
-  enums: Map<string, Enum>,
+  enums: Map<string, Enum | Union>,
   version: Version | undefined,
   requestTypes: Map<string, RequestType>,
   requestTypeBaseModels: Set<string>,
@@ -810,7 +962,8 @@ function collectRequestType(
   }
 
   const visibility = resolveRequestVisibility(program, op.operation, op.verb);
-  if (!hasHiddenProperties(bodyModel, visibility, program)) return;
+  if (!bodyHasHiddenProperties(bodyModel, visibility, program)) return;
+  const discriminator = getDiscriminator(program, bodyModel);
 
   const suffix = requestTypeSuffix(op.verb);
 
@@ -819,7 +972,6 @@ function collectRequestType(
   // flat {Base}{Verb}Request would silently drop them. Instead, filter each
   // variant individually and expose the write body as a union of the results,
   // mirroring how the plain model itself is exposed as a union of variants.
-  const discriminator = getDiscriminator(program, bodyModel);
   if (discriminator) {
     collectDiscriminatedRequestType(
       bodyModel,
@@ -877,6 +1029,73 @@ interface DiscriminatedRequestUnion {
   /** The operation that produced this registration — its `@tag` resolves a
    * collision against a later conflicting operation. */
   sourceOp: HttpOperation;
+  /** The name it is emitted under, when a declared type forced a rename. */
+  emittedName?: string;
+}
+
+/**
+ * The name a synthesized request type (or discriminated request union) is
+ * actually emitted under: its registered name, unless a declared type of the
+ * same name forced a rename.
+ */
+function emittedRequestTypeName(
+  name: string,
+  requestTypes: Map<string, RequestType>,
+  discriminatedRequestUnions: Map<string, DiscriminatedRequestUnion>,
+): string {
+  return (
+    requestTypes.get(name)?.name ??
+    discriminatedRequestUnions.get(name)?.emittedName ??
+    name
+  );
+}
+
+/**
+ * Renames every synthesized request type whose name a declared type already
+ * uses. A user model called `WidgetPostRequest` next to a `POST` of a
+ * `Widget` with read-only properties would otherwise produce two
+ * `export interface WidgetPostRequest` declarations, which TypeScript
+ * silently merges into one type with both sets of properties. The declared
+ * type keeps the name; the synthesized one takes a numeric suffix, as other
+ * generated names do, and a `request-type-name-collision` warning says so.
+ */
+function resolveRequestTypeNameClashes(
+  program: Program,
+  models: Map<string, Model>,
+  enums: Map<string, Enum | Union>,
+  requestTypes: Map<string, RequestType>,
+  discriminatedRequestUnions: Map<string, DiscriminatedRequestUnion>,
+): void {
+  const declared = new Set<string>();
+  for (const type of [...models.values(), ...enums.values()]) {
+    if (isEmittable(type)) declared.add(type.name!);
+  }
+  const taken = new Set([
+    ...declared,
+    ...requestTypes.keys(),
+    ...discriminatedRequestUnions.keys(),
+  ]);
+  const rename = (name: string, target: Operation): string => {
+    const renamed = uniqueName(name, taken);
+    taken.add(renamed);
+    reportDiagnostic(program, {
+      code: "request-type-name-collision",
+      format: { name, renamed },
+      target,
+    });
+    return renamed;
+  };
+  for (const rt of requestTypes.values()) {
+    if (declared.has(rt.name)) rt.name = rename(rt.name, rt.sourceOp.operation);
+  }
+  for (const [key, union] of discriminatedRequestUnions) {
+    union.memberNames = union.memberNames.map(
+      (member) => requestTypes.get(member)?.name ?? member,
+    );
+    if (declared.has(key)) {
+      union.emittedName = rename(key, union.sourceOp.operation);
+    }
+  }
 }
 
 /**
@@ -901,7 +1120,7 @@ function collectDiscriminatedRequestType(
   op: HttpOperation,
   program: Program,
   models: Map<string, Model>,
-  enums: Map<string, Enum>,
+  enums: Map<string, Enum | Union>,
   requestTypes: Map<string, RequestType>,
   requestTypeBaseModels: Set<string>,
   discriminatedRequestUnions: Map<string, DiscriminatedRequestUnion>,
@@ -1018,7 +1237,7 @@ function registerDiscriminatedRequestUnion(
   prefix: string,
   program: Program,
   models: Map<string, Model>,
-  enums: Map<string, Enum>,
+  enums: Map<string, Enum | Union>,
   requestTypes: Map<string, RequestType>,
   requestTypeBaseModels: Set<string>,
   discriminatedRequestUnions: Map<string, DiscriminatedRequestUnion>,
@@ -1049,32 +1268,70 @@ function registerDiscriminatedRequestUnion(
 
 // ─── Read-response model name collection ─────────────────────────────────────
 
-function collectReadResponseModelNames(
+/**
+ * Names of the models that emitted code references directly, so they must be
+ * declared in models.ts even when they also have a filtered request type:
+ *
+ * - any operation's response body, whatever the verb or status — a `POST`
+ *   that returns the created `Widget` needs `Widget`;
+ * - path, query, and header parameter types;
+ * - request bodies the client passes through unfiltered: inline models,
+ *   arrays, and named models with no request type of their own;
+ * - the properties of every synthesized request type, since only the top
+ *   level of a write body is visibility-filtered.
+ *
+ * Collection is transitive: a model those reference by property is needed too.
+ */
+function collectReferencedModelNames(
   program: Program,
-  byContainer: Map<
-    string,
-    { name: string; container: Interface | Namespace; ops: HttpOperation[] }
-  >,
+  byContainer: ContainerGroups,
   version: Version | undefined,
+  requestTypes: Map<string, RequestType>,
+  requestTypeBaseModels: Set<string>,
 ): Set<string> {
   const tmpModels = new Map<string, Model>();
-  const tmpEnums = new Map<string, Enum>();
+  const tmpEnums = new Map<string, Enum | Union>();
+  const reference = (type: Type) =>
+    mapTsType(type, program, tmpModels, tmpEnums);
   for (const { ops } of byContainer.values()) {
     const vOps = version
       ? ops.filter((op) => isOpInVersion(program, op, version))
       : ops;
     for (const op of vOps) {
-      if (op.verb !== "get" && op.verb !== "head") continue;
       for (const resp of op.responses) {
         for (const content of resp.responses) {
-          if (content.body)
-            mapTsType(content.body.type, program, tmpModels, tmpEnums);
+          if (content.body) reference(content.body.type);
         }
+      }
+      for (const param of op.parameters.parameters) {
+        reference(param.param.type);
+      }
+      const body = op.parameters.body?.type;
+      if (body && !isRequestTypedBody(body, requestTypeBaseModels)) {
+        reference(body);
       }
     }
   }
+  for (const { props } of requestTypes.values()) {
+    for (const prop of props.values()) reference(prop.type);
+  }
   deepCollectTypes(tmpModels, tmpEnums, program, new Map());
   return new Set(tmpModels.keys());
+}
+
+/**
+ * Whether the client sends this body as a synthesized request type instead
+ * of naming the model itself.
+ */
+function isRequestTypedBody(
+  body: Type,
+  requestTypeBaseModels: Set<string>,
+): boolean {
+  if (body.kind !== "Model" || !body.name) return false;
+  if (isArrayModelType(body) || isPlainRecord(body)) return false;
+  return requestTypeBaseModels.has(
+    getMergePatchBaseName(body.name) ?? body.name,
+  );
 }
 
 // ─── Discriminated union collection ──────────────────────────────────────────
@@ -1106,7 +1363,7 @@ function collectDiscriminatedVariants(
 
 function deepCollectTypes(
   models: Map<string, Model>,
-  enums: Map<string, Enum>,
+  enums: Map<string, Enum | Union>,
   program: Program,
   discriminatedUnions: Map<string, string[]>,
 ): void {
@@ -1124,13 +1381,27 @@ function deepCollectTypes(
           changed = true;
         }
       }
-      for (const [, prop] of flattenProperties(model)) {
+      const referenced = [...flattenProperties(model).values()].map(
+        (p) => p.type,
+      );
+      if (model.indexer) referenced.push(model.indexer.value);
+      for (const type of referenced) {
         const prevModels = models.size;
         const prevEnums = enums.size;
-        mapTsType(prop.type, program, models, enums);
+        mapTsType(type, program, models, enums);
         if (models.size !== prevModels || enums.size !== prevEnums)
           changed = true;
       }
+    }
+    // A named union is referenced by its alias, so mapping it does not visit
+    // its members; walk them here so the types they name are emitted too.
+    for (const type of [...enums.values()]) {
+      if (type.kind !== "Union") continue;
+      const prevModels = models.size;
+      const prevEnums = enums.size;
+      unionMemberTypes(type, program, models, enums);
+      if (models.size !== prevModels || enums.size !== prevEnums)
+        changed = true;
     }
   }
 }
@@ -1140,26 +1411,35 @@ function deepCollectTypes(
 function buildModelsFile(
   nsFullName: string,
   models: Map<string, Model>,
-  enums: Map<string, Enum>,
+  enums: Map<string, Enum | Union>,
   requestTypes: Map<string, RequestType>,
   requestTypeBaseModels: Set<string>,
-  readResponseModelNames: Set<string>,
+  referencedModelNames: Set<string>,
   discriminatedUnions: Map<string, string[]>,
   discriminatedRequestUnions: Map<string, DiscriminatedRequestUnion>,
   program: Program,
   renderer: Renderer,
   renameMap: Map<string, string>,
-  prelude: string[] = [],
 ): string {
-  const parts: string[] = [...prelude];
+  const parts: string[] = [];
 
   for (const [, e] of enums) {
-    if (!isEmittableEnum(e, nsFullName)) continue;
+    if (!isEmittable(e)) continue;
+    if (e.kind === "Union") {
+      parts.push(
+        renderer.renderUnion({
+          doc: getDoc(program, e) ?? undefined,
+          unionName: e.name!,
+          memberNames: unionMemberTypes(e, program, models, enums, renameMap),
+        }),
+      );
+      continue;
+    }
     parts.push(renderer.renderEnum(buildEnumView(e, program)));
   }
 
   for (const [, model] of models) {
-    if (!isEmittable(model, nsFullName)) continue;
+    if (!isEmittable(model)) continue;
     // Never emit synthesized MergePatch types — they are replaced by *PatchRequest
     // types or by references to the plain base model.
     if (isSynthesizedMergePatchModel(model)) continue;
@@ -1170,8 +1450,10 @@ function buildModelsFile(
     // never rendered as a plain interface, so whether it separately "has a
     // request type" (e.g. a filtered write-body union) must not skip its
     // union alias — the base's own response-type references still need it.
+    // A base with no concrete variants yet has nothing to form a union from —
+    // `export type Pet = ;` is a syntax error — so it stays a plain interface.
     const variantNames = discriminatedUnions.get(model.name!);
-    if (variantNames) {
+    if (variantNames?.length) {
       const unionView: UnionView = {
         doc: getDoc(program, model) ?? undefined,
         unionName: model.name!,
@@ -1180,11 +1462,11 @@ function buildModelsFile(
       parts.push(renderer.renderUnion(unionView));
       continue;
     }
-    // Suppress models that have a request type and are NOT needed for any
-    // GET/HEAD response — they'll appear only via their filtered request type.
+    // Suppress models that have a request type and that nothing emitted
+    // references — they appear only via their filtered request type.
     if (
       requestTypeBaseModels.has(model.name!) &&
-      !readResponseModelNames.has(model.name!)
+      !referencedModelNames.has(model.name!)
     )
       continue;
     parts.push(
@@ -1214,8 +1496,11 @@ function buildModelsFile(
   // filtered request types (e.g. `PetPostRequest = DogPostRequest | CatPostRequest`)
   // instead of a single flat interface, so callers must supply a variant's
   // own fields alongside its narrowed discriminator value.
-  for (const [unionName, { memberNames }] of discriminatedRequestUnions) {
-    const unionView: UnionView = { unionName, memberNames };
+  for (const [
+    key,
+    { memberNames, emittedName },
+  ] of discriminatedRequestUnions) {
+    const unionView: UnionView = { unionName: emittedName ?? key, memberNames };
     parts.push(renderer.renderUnion(unionView));
   }
 
@@ -1228,25 +1513,30 @@ function buildInterfaceView(
   model: Model,
   program: Program,
   models: Map<string, Model>,
-  enums: Map<string, Enum>,
+  enums: Map<string, Enum | Union>,
   renameMap?: Map<string, string>,
 ): InterfaceView {
   const typeParams = collectTypeParams(model);
   const genericSuffix =
     typeParams.length > 0 ? `<${typeParams.join(", ")}>` : "";
   const doc = getDoc(program, model);
-  return {
+  const props = flattenProperties(model);
+  const view: InterfaceView = {
     doc: doc ?? undefined,
     interfaceName: model.name!,
     genericSuffix,
-    properties: buildPropertyViews(
-      flattenProperties(model),
-      program,
-      models,
-      enums,
-      renameMap,
-    ),
+    properties: buildPropertyViews(props, program, models, enums, renameMap),
   };
+  const index = indexSignatureType(
+    model,
+    [...props.values()],
+    program,
+    models,
+    enums,
+    renameMap,
+  );
+  if (index) view.indexSignature = index;
+  return view;
 }
 
 function buildFilteredInterfaceView(
@@ -1255,7 +1545,7 @@ function buildFilteredInterfaceView(
   props: Map<string, ModelProperty>,
   program: Program,
   models: Map<string, Model>,
-  enums: Map<string, Enum>,
+  enums: Map<string, Enum | Union>,
   renameMap?: Map<string, string>,
 ): InterfaceView {
   return {
@@ -1267,29 +1557,23 @@ function buildFilteredInterfaceView(
 }
 
 /**
- * Maps a model property to its TypeScript type, honoring `@encode(string)` on
- * boolean targets (TypeSpec 1.14.0). The generated client uses native `fetch`
- * with `JSON.stringify`/`response.json()` and performs no per-field transform,
- * so a boolean carried on the wire as the string `"true"`/`"false"` is typed as
- * `string` — matching what `response.json()` actually yields — rather than the
- * logical `boolean`, which would be a runtime type mismatch. All other property
- * types (and all other encodings) fall through to the normal type mapping.
+ * Maps a model property to the TypeScript type of its JSON wire value,
+ * honoring an `@encode` on the property itself — `@encode(string)` on a
+ * boolean, `@encode(unixTimestamp, int64)` on a date, `@encode(seconds,
+ * float64)` on a duration. The client performs no per-field conversion, so the
+ * type must match what `response.json()` actually yields. An `@encode` on the
+ * scalar declaration is handled by {@link mapScalar}.
  */
 function mapPropertyTsType(
   prop: ModelProperty,
   program: Program,
   models: Map<string, Model>,
-  enums: Map<string, Enum>,
+  enums: Map<string, Enum | Union>,
   renameMap?: Map<string, string>,
 ): string {
   if (prop.type.kind === "Scalar") {
-    const scalar = prop.type as Scalar;
-    if (builtinScalarName(scalar) === "boolean") {
-      const encode = getEncode(program, prop) ?? getEncode(program, scalar);
-      if (encode && builtinScalarName(encode.type) === "string") {
-        return "string";
-      }
-    }
+    const encode = getEncode(program, prop);
+    if (encode) return mapBuiltinScalar(builtinScalarName(encode.type));
   }
   return mapTsType(prop.type, program, models, enums, renameMap);
 }
@@ -1298,7 +1582,7 @@ function buildPropertyViews(
   props: Iterable<[string, ModelProperty]>,
   program: Program,
   models: Map<string, Model>,
-  enums: Map<string, Enum>,
+  enums: Map<string, Enum | Union>,
   renameMap?: Map<string, string>,
 ): PropertyView[] {
   const result: PropertyView[] = [];
@@ -1308,6 +1592,7 @@ function buildPropertyViews(
     result.push({
       doc: doc ?? undefined,
       name: prop.name,
+      key: formatPropertyKey(jsonPropertyName(program, prop)),
       type: tsType,
       optional: prop.optional,
     });
@@ -1320,15 +1605,40 @@ function buildEnumView(e: Enum, program: Program): EnumView {
   const members: EnumMemberView[] = [];
   for (const [, member] of e.members) {
     const memberDoc = getDoc(program, member);
-    const stringValue =
-      typeof member.value === "string" ? member.value : member.name;
+    // A member with no explicit value is serialized as its name, so a
+    // numeric enum is only one whose values are actually numbers.
+    const value = member.value ?? member.name;
     members.push({
       doc: memberDoc ?? undefined,
       name: member.name,
-      memberValue: stringValue,
+      key: formatPropertyKey(member.name),
+      memberValue: String(value),
+      valueLiteral:
+        typeof value === "number" ? String(value) : singleQuoted(value),
     });
   }
   return { doc: doc ?? undefined, enumName: e.name, members };
+}
+
+/**
+ * The property's name in JSON: its `@encodedName("application/json", …)`
+ * when it has one, otherwise its declared name. The client sends and receives
+ * plain objects, so the TypeScript key must be the name on the wire.
+ */
+function jsonPropertyName(program: Program, prop: ModelProperty): string {
+  return resolveEncodedName(program, prop, "application/json");
+}
+
+/** Renders a string as a single-quoted TypeScript literal, escaping as needed. */
+function singleQuoted(value: string): string {
+  const escaped = value
+    .replace(/\\/g, "\\\\")
+    .replace(/'/g, "\\'")
+    .replace(/\n/g, "\\n")
+    .replace(/\r/g, "\\r")
+    .replace(/\u2028/g, "\\u2028")
+    .replace(/\u2029/g, "\\u2029");
+  return `'${escaped}'`;
 }
 
 // ─── endpoints/*.ts generation ────────────────────────────────────────────────
@@ -1359,21 +1669,97 @@ function buildEndpointMethodView(
   routePrefix: string,
   program: Program,
 ): EndpointMethodView {
-  const pathParams = op.parameters.parameters
-    .filter((p) => p.type === "path")
-    .map((p) => p.param.name);
-
-  const functionText = buildEndpointFunctionText(
-    op.path,
-    pathParams,
-    routePrefix,
-  );
-
   return {
     doc: getDoc(program, op.operation) ?? undefined,
     name: op.operation.name,
-    functionText,
+    functionText: buildEndpointFunctionText(
+      op.path,
+      resolvePathArgs(op),
+      routePrefix,
+    ),
   };
+}
+
+/** A path parameter as the generated endpoint function and client see it. */
+interface PathArg {
+  /** Name of the `{token}` in the route, e.g. `widget-id`. */
+  wireName: string;
+  /** JavaScript parameter name, e.g. `widgetId`. */
+  argName: string;
+  /** Whether the parameter may be omitted. */
+  optional: boolean;
+  /** RFC 6570 expansion style. */
+  style: HttpOperationPathParameter["style"];
+  /** Whether reserved characters such as `/` are left unencoded. */
+  allowReserved: boolean;
+}
+
+/**
+ * Names a path argument must not take: the parameters a generated client
+ * method declares itself, which share its parameter list, and the globals the
+ * endpoint function calls to expand a path parameter — `@path String` would
+ * otherwise generate `String(String)`.
+ */
+const CLIENT_METHOD_PARAMETER_NAMES: readonly string[] = [
+  "body",
+  "query",
+  "headers",
+  "options",
+  "String",
+  "encodeURI",
+  "encodeURIComponent",
+];
+
+/**
+ * Resolves each path parameter's route token and argument name, required
+ * arguments first — TypeScript rejects a required parameter after an optional
+ * one. The endpoint function and the client method share this order.
+ */
+function resolvePathArgs(op: HttpOperation): PathArg[] {
+  const taken = new Set(CLIENT_METHOD_PARAMETER_NAMES);
+  const args = op.parameters.parameters
+    .filter((p): p is HttpOperationPathParameter => p.type === "path")
+    .map((p) => ({
+      wireName: p.name,
+      argName: toIdentifier(p.param.name, taken),
+      optional: p.param.optional,
+      style: p.style,
+      allowReserved: p.allowReserved,
+    }));
+  return [
+    ...args.filter((a) => !a.optional),
+    ...args.filter((a) => a.optional),
+  ];
+}
+
+/**
+ * Text a path parameter's style places before its value (RFC 6570). The route
+ * TypeSpec produces leaves it out of the path, since an omitted optional
+ * parameter must omit its prefix too. `matrix` is handled separately because
+ * its prefix includes the parameter name.
+ */
+const PATH_STYLE_PREFIX: Record<string, string> = {
+  simple: "",
+  label: ".",
+  path: "/",
+  fragment: "#",
+};
+
+/**
+ * JavaScript expression that renders one path parameter into the route. The
+ * value is percent-encoded so that an id such as `a/b` or `50%` cannot change
+ * which route is called; `allowReserved` keeps reserved characters such as `/`
+ * intact, as RFC 6570's `{+x}` does.
+ */
+function pathArgExpression(arg: PathArg): string {
+  const encoder = arg.allowReserved ? "encodeURI" : "encodeURIComponent";
+  const prefix =
+    arg.style === "matrix"
+      ? `;${arg.wireName}=`
+      : (PATH_STYLE_PREFIX[arg.style] ?? "");
+  const value = `${encoder}(String(${arg.argName}))`;
+  const expr = prefix ? `${JSON.stringify(prefix)} + ${value}` : value;
+  return arg.optional ? `${arg.argName} === undefined ? "" : ${expr}` : expr;
 }
 
 /** Backtick character constant — avoids escape issues in template literals. */
@@ -1397,31 +1783,40 @@ export function resolveRoutePrefix(
 
 function buildEndpointFunctionText(
   path: string,
-  pathParamNames: string[],
+  pathArgs: PathArg[],
   routePrefix: string,
 ): string {
-  // Convert {param} to ${param} for JS template literals.
-  // In replacement strings: $$ → $, $1 → first capture group.
   const fullPath = routePrefix ? `/${routePrefix}${path}` : path;
-  const templatePath = fullPath.replace(/\{([^}]+)\}/g, "$${$1}");
+  const byWireName = new Map(pathArgs.map((a) => [a.wireName, a]));
+  const templatePath = fullPath.replace(
+    /\{([^}]+)\}/g,
+    (token, name: string) => {
+      const arg = byWireName.get(name);
+      return arg ? "${" + pathArgExpression(arg) + "}" : token;
+    },
+  );
   const pathExpr = BT + templatePath + BT;
-
-  if (pathParamNames.length === 0) {
-    return `() => ${pathExpr}`;
-  }
-
-  const params = pathParamNames.map((p) => `${p}: string`).join(", ");
+  const params = pathArgs
+    .map((a) => `${a.argName}${a.optional ? "?" : ""}: string`)
+    .join(", ");
   return `(${params}) => ${pathExpr}`;
 }
 
 // ─── client/ApiClient.ts — static base infrastructure ────────────────────────
 
 const API_CLIENT_CONTENT = `export interface RetryConfig {
-  /** Maximum number of attempts before giving up. Default: 3. */
+  /** Maximum number of attempts, including the first. Default: 3. */
   maxAttempts?: number;
-  /** Base delay in milliseconds for exponential backoff. Default: 1000. */
+  /**
+   * Base delay in milliseconds for exponential backoff (1x, 2x, 4x, …). A
+   * \`Retry-After\` header on the response replaces it. Default: 1000.
+   */
   baseDelayMs?: number;
-  /** HTTP status codes that trigger a retry. Default: [429, 503]. */
+  /**
+   * HTTP status codes that trigger a retry, for any method. A network failure
+   * is retried only for idempotent methods (GET, HEAD, PUT, DELETE, OPTIONS),
+   * and a cancelled or timed-out call is never retried. Default: [429, 503].
+   */
   retryOn?: number[];
 }
 
@@ -1497,7 +1892,10 @@ export interface ClientConfig {
   baseUrl: string;
   /** Headers merged into every request. */
   defaultHeaders?: Record<string, string>;
-  /** Request timeout in milliseconds (passed as AbortSignal). */
+  /**
+   * Timeout in milliseconds for a whole call, retries and backoff included.
+   * Applies together with a per-request \`signal\`; whichever fires first wins.
+   */
   timeout?: number;
   /** Retry configuration. */
   retry?: RetryConfig;
@@ -1513,7 +1911,11 @@ export interface ClientConfig {
   onRequest?: RequestHook;
   /** Runs after all middleware, once per retry attempt. */
   onResponse?: ResponseHook;
-  /** Runs once when a call ultimately fails, after retries are exhausted. */
+  /**
+   * Runs once when a call ultimately fails, after retries are exhausted. Not
+   * called when the caller cancels through \`options.signal\` or by
+   * unsubscribing.
+   */
   onError?: ErrorHook;
 }
 
@@ -1522,6 +1924,43 @@ export interface RequestOptions {
   headers?: Record<string, string>;
   /** Abort signal for cancellation. */
   signal?: AbortSignal;
+}
+
+/**
+ * Options the protected verb helpers accept. Generated client methods build
+ * these from their typed arguments; consumers normally pass
+ * {@link RequestOptions} instead.
+ */
+export interface TransportOptions extends Omit<RequestOptions, "headers"> {
+  /**
+   * Request headers keyed by wire name. \`undefined\` and \`null\` values are
+   * skipped, a \`Date\` is sent in HTTP-date form, and an array is joined with
+   * commas. Names are matched case-insensitively; later entries win.
+   */
+  headers?: Record<string, unknown>;
+  /**
+   * Query parameters keyed by wire name. \`undefined\` and \`null\` values are
+   * skipped, a \`Date\` is sent as an ISO 8601 string, and an array is joined
+   * with commas unless its key is listed in {@link TransportOptions.explode}.
+   */
+  query?: Record<string, unknown>;
+  /** Query keys whose array values are sent as repeated \`key=value\` pairs. */
+  explode?: readonly string[];
+  /**
+   * Media type of the request body. JSON types (the default) are serialized
+   * with \`JSON.stringify\`; any other body is sent as-is.
+   */
+  contentType?: string;
+  /**
+   * How to read a success body: parsed as JSON (the default), as text, or as
+   * raw bytes. An empty JSON body resolves to \`undefined\`.
+   */
+  responseFormat?: "json" | "text" | "binary";
+  /**
+   * Media type to request with \`Accept\`. Default: \`application/json\`. A
+   * caller's own \`Accept\` header still takes precedence.
+   */
+  accept?: string;
 }
 
 export class ApiError extends Error {
@@ -1563,8 +2002,52 @@ export class ServiceUnavailableError extends ApiError {
  */
 const MAX_TIMER_DELAY_MS = 2147483647;
 
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+/**
+ * Waits \`ms\` milliseconds, or rejects with the signal's reason as soon as it
+ * aborts, so a cancelled call does not sit out the rest of a retry backoff.
+ */
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason);
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal?.reason);
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+/**
+ * Methods that are safe to resend after a network failure (RFC 9110). A failed
+ * \`POST\` or \`PATCH\` may already have reached the server, so resending it
+ * could apply it twice; those are retried only on a \`retryOn\` status, which
+ * the server sends to say it did not act on the request.
+ */
+const IDEMPOTENT_METHODS = new Set([
+  "GET",
+  "HEAD",
+  "PUT",
+  "DELETE",
+  "OPTIONS",
+  "TRACE",
+]);
+
+/**
+ * Discards a response body that will not be read, freeing its connection.
+ * Cancellation is started but not awaited: cancelling one branch of a cloned
+ * or tee'd body can stay pending until its sibling is read, and a retry must
+ * not wait on that.
+ */
+function discardBody(response: Response): void {
+  if (response.bodyUsed || !response.body) return;
+  response.body.cancel().catch(() => undefined);
 }
 
 /**
@@ -1595,6 +2078,78 @@ function toApiError(response: Response, body?: unknown): ApiError {
     return new ServiceUnavailableError(body, response);
   }
   return new ApiError(response.status, response.statusText, body, response);
+}
+
+/** Formats a query value; a \`Date\` becomes an ISO 8601 string. */
+function formatQueryValue(value: unknown): string {
+  if (value instanceof Date) return value.toISOString();
+  if (typeof value === "object" && value !== null) return JSON.stringify(value);
+  return String(value);
+}
+
+/** Formats a header value; a \`Date\` becomes an HTTP-date (RFC 9110). */
+function formatHeaderValue(value: unknown): string {
+  if (value instanceof Date) return value.toUTCString();
+  if (Array.isArray(value)) return value.map(formatHeaderValue).join(",");
+  return String(value);
+}
+
+/** Copies headers into \`target\`, skipping \`undefined\` and \`null\` values. */
+function setHeaders(
+  target: Headers,
+  source: Record<string, unknown> | undefined,
+): void {
+  for (const [name, value] of Object.entries(source ?? {})) {
+    if (value !== undefined && value !== null) {
+      target.set(name, formatHeaderValue(value));
+    }
+  }
+}
+
+/** Whether a media type is JSON (\`application/json\`, \`application/*+json\`). */
+function isJsonContentType(contentType: string): boolean {
+  return /^[^;]*[/+]json\\s*(;|$)/i.test(contentType);
+}
+
+/**
+ * Whether \`fetch\` must choose the \`Content-Type\` itself: a \`FormData\` body
+ * needs a generated multipart boundary, and \`URLSearchParams\` is labelled
+ * automatically.
+ */
+function hasImplicitContentType(body: unknown): boolean {
+  return (
+    (typeof FormData !== "undefined" && body instanceof FormData) ||
+    (typeof URLSearchParams !== "undefined" && body instanceof URLSearchParams)
+  );
+}
+
+/**
+ * Whether a body is already in a form \`fetch\` sends as-is — a form, binary
+ * data, or a stream — and so must never go through \`JSON.stringify\`.
+ */
+function isRawBody(body: unknown): body is BodyInit {
+  return (
+    hasImplicitContentType(body) ||
+    (typeof Blob !== "undefined" && body instanceof Blob) ||
+    body instanceof ArrayBuffer ||
+    ArrayBuffer.isView(body) ||
+    (typeof ReadableStream !== "undefined" && body instanceof ReadableStream)
+  );
+}
+
+/**
+ * Reads a success body in the format the operation declares. An empty JSON
+ * body — a \`201\` with no content, or a \`200\` from an operation that returns
+ * nothing — resolves to \`undefined\` rather than failing to parse.
+ */
+async function readBody(
+  response: Response,
+  format: TransportOptions["responseFormat"] = "json",
+): Promise<unknown> {
+  if (format === "binary") return new Uint8Array(await response.arrayBuffer());
+  const text = await response.text();
+  if (format === "text") return text;
+  return text.trim() === "" ? undefined : JSON.parse(text);
 }
 
 /**
@@ -1632,28 +2187,41 @@ export class HttpClient {
     return this;
   }
 
-  /** Joins the base URL, path, and serialized query string. */
-  protected buildUrl(path: string, query?: Record<string, unknown>): string {
+  /**
+   * Joins the base URL, path, and serialized query string. Array values are
+   * comma-joined, or repeated once per item when their key is in \`explode\`.
+   */
+  protected buildUrl(
+    path: string,
+    query?: Record<string, unknown>,
+    explode?: readonly string[],
+  ): string {
     const url = \`\${this.config.baseUrl.replace(/\\/$/, "")}\${path}\`;
     if (!query) return url;
-    const qs = new URLSearchParams(
-      Object.entries(query)
-        .filter(([, v]) => v !== undefined && v !== null)
-        .map(([k, v]) => [k, String(v)]),
-    ).toString();
+    const params = new URLSearchParams();
+    for (const [key, value] of Object.entries(query)) {
+      if (value === undefined || value === null) continue;
+      if (!Array.isArray(value)) {
+        params.append(key, formatQueryValue(value));
+      } else if (explode?.includes(key)) {
+        for (const item of value) params.append(key, formatQueryValue(item));
+      } else {
+        params.append(key, value.map(formatQueryValue).join(","));
+      }
+    }
+    const qs = params.toString();
     return qs ? \`\${url}?\${qs}\` : url;
   }
 
   protected async request<T>(
     method: string,
     path: string,
-    options?: RequestOptions & {
-      body?: unknown;
-      query?: Record<string, unknown>;
-    },
+    options?: TransportOptions & { body?: unknown },
   ): Promise<T> {
-    const { maxAttempts = 3, baseDelayMs = 1000, retryOn = [429, 503] } =
+    const { baseDelayMs = 1000, retryOn = [429, 503] } =
       this.config.retry ?? {};
+    // At least one attempt, so a misconfigured \`maxAttempts: 0\` still sends.
+    const maxAttempts = Math.max(1, this.config.retry?.maxAttempts ?? 3);
 
     // Resolved without the query string up front so the error context always
     // carries a URL, even if building the real one throws below.
@@ -1661,32 +2229,57 @@ export class HttpClient {
     let attempt = 0;
     let lastError: unknown;
     try {
-      url = this.buildUrl(path, options?.query);
+      url = this.buildUrl(path, options?.query, options?.explode);
 
-      const headers: Record<string, string> = {
-        "Content-Type": "application/json",
-        Accept: "application/json",
-        ...this.config.defaultHeaders,
-        ...options?.headers,
-      };
+      // A Headers object matches names case-insensitively, so a per-request
+      // \`content-type\` replaces the default instead of being sent alongside it.
+      const headers = new Headers({
+        Accept: options?.accept ?? "application/json",
+      });
+      setHeaders(headers, this.config.defaultHeaders);
+      setHeaders(headers, options?.headers);
 
-      let signal = options?.signal;
-      if (this.config.timeout && !signal) {
-        signal = AbortSignal.timeout(this.config.timeout);
+      // The timeout bounds the whole call, retries and backoff included, and
+      // applies alongside a caller's own signal rather than being dropped.
+      const signals = [options?.signal];
+      if (this.config.timeout) {
+        signals.push(AbortSignal.timeout(this.config.timeout));
       }
+      const active = signals.filter((s): s is AbortSignal => s !== undefined);
+      const signal = active.length > 1 ? AbortSignal.any(active) : active[0];
 
       // Serialized inside the try so that an unserializable body (a circular
-      // reference, a BigInt) reaches onError like any other failure.
-      const body =
-        options?.body !== undefined ? JSON.stringify(options.body) : undefined;
+      // reference, a BigInt) reaches onError like any other failure. Only a
+      // request that actually has a body gets a Content-Type: on a GET it would
+      // force a CORS preflight for no reason.
+      // A Content-Type the caller set explicitly decides the serialization,
+      // so the payload always matches the media type it is labelled with.
+      const contentType =
+        headers.get("Content-Type") ??
+        options?.contentType ??
+        "application/json";
+      let body: BodyInit | undefined;
+      if (options?.body !== undefined) {
+        body =
+          isRawBody(options.body) || !isJsonContentType(contentType)
+            ? (options.body as BodyInit)
+            : JSON.stringify(options.body);
+        if (!headers.has("Content-Type") && !hasImplicitContentType(body)) {
+          headers.set("Content-Type", contentType);
+        }
+      }
       const dispatch = composeMiddleware(
         this.middleware,
         this.config.fetch ?? ((request) => fetch(request)),
       );
 
+      const backoff = (failedAttempt: number) =>
+        baseDelayMs * Math.pow(2, failedAttempt);
+      let wait = 0;
       let succeeded: Response | undefined;
       for (; attempt < maxAttempts; attempt++) {
-        if (attempt > 0) await delay(baseDelayMs * Math.pow(2, attempt - 1));
+        if (attempt > 0) await delay(wait, signal);
+        signal?.throwIfAborted();
         const context: RequestContext = { method, url, attempt };
         try {
           let request = new Request(url, { method, headers, body, signal });
@@ -1702,28 +2295,42 @@ export class HttpClient {
             break;
           }
           if (retryOn.includes(resp.status) && attempt < maxAttempts - 1) {
-            if (resp.status === 429) {
-              const after = retryAfterMs(resp);
-              if (after !== undefined) await delay(after);
-            }
+            // The server's own Retry-After replaces the backoff, rather than
+            // adding to it.
+            wait = retryAfterMs(resp) ?? backoff(attempt);
             lastError = toApiError(resp);
+            discardBody(resp);
             continue;
           }
           const errorBody = await resp.json().catch(() => undefined);
           throw toApiError(resp, errorBody);
         } catch (err) {
-          if (err instanceof ApiError) throw err;
+          // A status error is final, a cancelled or timed-out call must not be
+          // resent, and a network failure is only retried when resending
+          // cannot apply the request twice.
+          if (
+            err instanceof ApiError ||
+            signal?.aborted ||
+            !IDEMPOTENT_METHODS.has(method.toUpperCase())
+          ) {
+            throw err;
+          }
+          wait = backoff(attempt);
           lastError = err;
         }
       }
-      if (!succeeded) throw lastError ?? new ApiError(0, "Unknown error");
+      if (!succeeded) throw lastError;
       // Parsed outside the retry loop so a malformed success body is surfaced
       // rather than retried.
       if (method === "HEAD" || succeeded.status === 204 || succeeded.status === 205) {
         return undefined as T;
       }
-      return (await succeeded.json()) as T;
+      return (await readBody(succeeded, options?.responseFormat)) as T;
     } catch (err) {
+      // Cancelling is something the caller did, not a failure to report: the
+      // error still reaches them, but onError is not called for it. A timeout
+      // is a failure, so it does reach onError.
+      if (options?.signal?.aborted) throw err;
       throw await this.applyErrorHook(err, {
         method,
         url,
@@ -1744,7 +2351,7 @@ export class HttpClient {
 
   protected httpGet<T>(
     path: string,
-    options?: RequestOptions & { query?: Record<string, unknown> },
+    options?: TransportOptions,
   ): Promise<T> {
     return this.request<T>("GET", path, options);
   }
@@ -1752,7 +2359,7 @@ export class HttpClient {
   protected httpPost<T>(
     path: string,
     body?: unknown,
-    options?: RequestOptions & { query?: Record<string, unknown> },
+    options?: TransportOptions,
   ): Promise<T> {
     return this.request<T>("POST", path, { ...options, body });
   }
@@ -1760,7 +2367,7 @@ export class HttpClient {
   protected httpPut<T>(
     path: string,
     body?: unknown,
-    options?: RequestOptions & { query?: Record<string, unknown> },
+    options?: TransportOptions,
   ): Promise<T> {
     return this.request<T>("PUT", path, { ...options, body });
   }
@@ -1768,14 +2375,14 @@ export class HttpClient {
   protected httpPatch<T>(
     path: string,
     body?: unknown,
-    options?: RequestOptions & { query?: Record<string, unknown> },
+    options?: TransportOptions,
   ): Promise<T> {
     return this.request<T>("PATCH", path, { ...options, body });
   }
 
   protected httpDelete<T>(
     path: string,
-    options?: RequestOptions & { query?: Record<string, unknown> },
+    options?: TransportOptions & { body?: unknown },
   ): Promise<T> {
     return this.request<T>("DELETE", path, options);
   }
@@ -1787,7 +2394,7 @@ export class HttpClient {
    */
   protected httpHead<T = void>(
     path: string,
-    options?: RequestOptions & { query?: Record<string, unknown> },
+    options?: TransportOptions,
   ): Promise<T> {
     return this.request<T>("HEAD", path, options);
   }
@@ -1816,6 +2423,7 @@ export const API_CLIENT_EXPORTS: readonly { name: string; isType: boolean }[] =
     { name: "ErrorHook", isType: true },
     { name: "ClientConfig", isType: true },
     { name: "RequestOptions", isType: true },
+    { name: "TransportOptions", isType: true },
     { name: "ApiError", isType: false },
     { name: "RateLimitError", isType: false },
     { name: "ServiceUnavailableError", isType: false },
@@ -1825,7 +2433,7 @@ export const API_CLIENT_EXPORTS: readonly { name: string; isType: boolean }[] =
 // ─── client/ApiClientRx.ts — RxJS Observable transport ───────────────────────
 
 const RX_API_CLIENT_CONTENT = `import { Observable } from "rxjs";
-import { HttpClient, type RequestOptions } from "./ApiClient.js";
+import { HttpClient, type TransportOptions } from "./ApiClient.js";
 
 /**
  * RxJS-flavored HTTP client base. Extends {@link HttpClient} and exposes
@@ -1849,8 +2457,12 @@ import { HttpClient, type RequestOptions } from "./ApiClient.js";
 export class RxHttpClient extends HttpClient {
   /**
    * Wraps a Promise-returning transport call in a cold Observable, wiring
-   * unsubscribe (and any configured request timeout / outer signal) to an
-   * AbortController passed into the underlying request.
+   * unsubscribe (and any outer signal) to an AbortController passed into the
+   * underlying request as the caller's signal. The transport applies the
+   * configured timeout itself, so both flavors time out the same way.
+   *
+   * Unsubscribing counts as the caller cancelling: the in-flight request is
+   * aborted, no further retry is attempted, and \`onError\` is not called.
    */
   protected observe<T>(
     run: (signal: AbortSignal) => Promise<T>,
@@ -1858,14 +2470,10 @@ export class RxHttpClient extends HttpClient {
   ): Observable<T> {
     return new Observable<T>((subscriber) => {
       const controller = new AbortController();
-      const onAbort = () => controller.abort();
+      const onAbort = () => controller.abort(outerSignal?.reason);
       if (outerSignal) {
-        if (outerSignal.aborted) controller.abort();
+        if (outerSignal.aborted) controller.abort(outerSignal.reason);
         else outerSignal.addEventListener("abort", onAbort, { once: true });
-      }
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      if (this.config.timeout) {
-        timer = setTimeout(() => controller.abort(), this.config.timeout);
       }
       run(controller.signal).then(
         (value) => {
@@ -1875,7 +2483,6 @@ export class RxHttpClient extends HttpClient {
         (err) => subscriber.error(err),
       );
       return () => {
-        if (timer) clearTimeout(timer);
         if (outerSignal) outerSignal.removeEventListener("abort", onAbort);
         controller.abort();
       };
@@ -1884,7 +2491,7 @@ export class RxHttpClient extends HttpClient {
 
   protected httpGet$<T>(
     path: string,
-    options?: RequestOptions & { query?: Record<string, unknown> },
+    options?: TransportOptions,
   ): Observable<T> {
     return this.observe<T>(
       (signal) => this.httpGet<T>(path, { ...options, signal }),
@@ -1895,7 +2502,7 @@ export class RxHttpClient extends HttpClient {
   protected httpPost$<T>(
     path: string,
     body?: unknown,
-    options?: RequestOptions & { query?: Record<string, unknown> },
+    options?: TransportOptions,
   ): Observable<T> {
     return this.observe<T>(
       (signal) => this.httpPost<T>(path, body, { ...options, signal }),
@@ -1906,7 +2513,7 @@ export class RxHttpClient extends HttpClient {
   protected httpPut$<T>(
     path: string,
     body?: unknown,
-    options?: RequestOptions & { query?: Record<string, unknown> },
+    options?: TransportOptions,
   ): Observable<T> {
     return this.observe<T>(
       (signal) => this.httpPut<T>(path, body, { ...options, signal }),
@@ -1917,7 +2524,7 @@ export class RxHttpClient extends HttpClient {
   protected httpPatch$<T>(
     path: string,
     body?: unknown,
-    options?: RequestOptions & { query?: Record<string, unknown> },
+    options?: TransportOptions,
   ): Observable<T> {
     return this.observe<T>(
       (signal) => this.httpPatch<T>(path, body, { ...options, signal }),
@@ -1927,7 +2534,7 @@ export class RxHttpClient extends HttpClient {
 
   protected httpDelete$<T>(
     path: string,
-    options?: RequestOptions & { query?: Record<string, unknown> },
+    options?: TransportOptions & { body?: unknown },
   ): Observable<T> {
     return this.observe<T>(
       (signal) => this.httpDelete<T>(path, { ...options, signal }),
@@ -1937,7 +2544,7 @@ export class RxHttpClient extends HttpClient {
 
   protected httpHead$<T = void>(
     path: string,
-    options?: RequestOptions & { query?: Record<string, unknown> },
+    options?: TransportOptions,
   ): Observable<T> {
     return this.observe<T>(
       (signal) => this.httpHead<T>(path, { ...options, signal }),
@@ -2209,7 +2816,7 @@ function buildClientView(
   discriminatedRequestUnions: Map<string, DiscriminatedRequestUnion>,
   program: Program,
   models: Map<string, Model>,
-  enums: Map<string, Enum>,
+  enums: Map<string, Enum | Union>,
   renameMap: Map<string, string>,
   reserved: ReadonlySet<string>,
 ): ClientView {
@@ -2284,54 +2891,6 @@ function buildClientView(
 }
 
 /**
- * Globals that `models.ts` references as the target of a scalar mapping:
- * `utcDateTime`/`offsetDateTime` → `Date`, `bytes` → `Uint8Array`.
- *
- * A generated type of the same name shadows the global *within that file*, so
- * a sibling model's `utcDateTime` property would silently resolve to the
- * user's own `Date` interface. It still compiles, which is what makes it
- * dangerous — the property is simply typed as the wrong thing.
- *
- * `Record` is not listed: TypeSpec rejects a `model Record` declaration before
- * the emitter ever sees it, since that shadows its own built-in template.
- */
-const MODEL_SCALAR_GLOBALS: readonly string[] = ["Date", "Uint8Array"];
-
-/**
- * For each scalar global shadowed by a generated type, picks a local alias and
- * the declaration that recovers the real global.
- *
- * A plain `type GlobalDate = Date` would not work: module-scope declarations
- * are hoisted, so it would resolve to the shadowing interface too. Going
- * through `globalThis` sidesteps the type namespace entirely.
- *
- * The declaration deliberately names no type other than the global itself:
- * `InstanceType<…>` would break for a spec that also declares `model
- * InstanceType`, which shadows that utility in this very file. Reading
- * `.prototype` off the constructor value has no such dependency — and
- * `globalThis` is resolved in the *value* namespace, so even a `model
- * globalThis` cannot shadow it.
- */
-function resolveShadowedScalarGlobals(
-  generatedTypeNames: ReadonlySet<string>,
-): { aliases: Map<string, string>; declarations: string[] } {
-  const aliases = new Map<string, string>();
-  const declarations: string[] = [];
-  const claimed = new Set(generatedTypeNames);
-  for (const global of MODEL_SCALAR_GLOBALS) {
-    if (!generatedTypeNames.has(global)) continue;
-    const alias = uniqueName(`Global${global}`, claimed);
-    claimed.add(alias);
-    aliases.set(global, alias);
-    declarations.push(
-      `/** The global \`${global}\`, aliased because a generated type shadows that name. */\n` +
-        `type ${alias} = typeof globalThis.${global}.prototype;`,
-    );
-  }
-  return { aliases, declarations };
-}
-
-/**
  * Global identifiers the generated client text references by name. A model
  * import with one of these names would shadow the global inside the client
  * module — `import type { Promise }` turns every `Promise<T>` return type into
@@ -2342,6 +2901,9 @@ const CLIENT_REFERENCED_GLOBALS: readonly string[] = [
   "Record",
   "Date",
   "Uint8Array",
+  "Blob",
+  "ArrayBuffer",
+  "FormData",
 ];
 
 /**
@@ -2427,78 +2989,51 @@ function buildClientMethodView(
   discriminatedRequestUnions: Map<string, DiscriminatedRequestUnion>,
   program: Program,
   models: Map<string, Model>,
-  enums: Map<string, Enum>,
+  enums: Map<string, Enum | Union>,
   modelImportSet: Set<string>,
   renameMap: Map<string, string>,
   siblingNames: ReadonlySet<string>,
   reserved: ReadonlySet<string>,
   localNames: ClientLocalNames,
 ): import("./renderer.js").ClientMethodView {
-  const pathParams = op.parameters.parameters
-    .filter((p) => p.type === "path")
-    .map((p) => ({ name: p.param.name, tsType: "string" }));
+  const pathArgs = resolvePathArgs(op);
 
-  const queryParams = op.parameters.parameters
-    .filter((p) => p.type === "query")
-    .map((p) => ({
-      name: p.param.name,
-      tsType: mapTsType(p.param.type, program, models, enums),
-      optional: p.param.optional,
-    }));
-
-  // Determine request body type
-  let bodyType: string | null = null;
-  if (
-    op.parameters.body?.bodyKind === "single" &&
-    op.parameters.body.type.kind === "Model"
-  ) {
-    const bodyModel = op.parameters.body.type as Model;
-    if (bodyModel.name) {
-      const mergePatchBase = getMergePatchBaseName(bodyModel.name);
-      const baseName = mergePatchBase ?? bodyModel.name;
-      const suffix = requestTypeSuffix(op.verb);
-      const requestTypeName = `${baseName}${suffix}Request`;
-      let resolvedRequestTypeName: string | undefined;
-      if (
-        requestTypes.has(requestTypeName) ||
-        discriminatedRequestUnions.has(requestTypeName)
-      ) {
-        resolvedRequestTypeName = requestTypeName;
-      } else {
-        // A name collision may have forced this request type to be renamed
-        // under its operation's own @tag prefix (see storeRequestType /
-        // collectDiscriminatedRequestType) — retry under that name before
-        // falling back to the unfiltered base model.
-        const tags = getTags(program, op.operation);
-        if (tags.length) {
-          const prefixedRequestTypeName = `${capitalize(tags[0])}${requestTypeName}`;
-          if (
-            requestTypes.has(prefixedRequestTypeName) ||
-            discriminatedRequestUnions.has(prefixedRequestTypeName)
-          ) {
-            resolvedRequestTypeName = prefixedRequestTypeName;
-          }
-        }
-      }
-      if (resolvedRequestTypeName) {
-        bodyType = resolvedRequestTypeName;
-        modelImportSet.add(resolvedRequestTypeName);
-      } else if (bodyModel.name && !isSynthesizedMergePatchModel(bodyModel)) {
-        // Through the rename map like every other type reference, so a model
-        // aliased to dodge a shadowed global (`Promise` → `PromiseModel`) is
-        // aliased here too. Both rewrite kinds are consulted, in the same order
-        // mapTsType uses. The import specifier is derived from the raw name.
-        bodyType =
-          renameMap.get(bodyModel.name) ??
-          renameMap.get(`${RENAME_ALIAS}${bodyModel.name}`) ??
-          bodyModel.name;
-        modelImportSet.add(bodyModel.name);
-      }
-    }
+  const queryParams = op.parameters.parameters.filter(
+    (p) => p.type === "query",
+  );
+  // `Content-Type` is decided by the body's declared media type, not by the
+  // caller, so it is not offered as a header argument.
+  const headerParams = op.parameters.parameters.filter(
+    (p) => p.type === "header" && p.name.toLowerCase() !== "content-type",
+  );
+  const objectType = (
+    params: readonly HttpOperationParameter[],
+    indexSignature: boolean,
+  ) =>
+    `{ ${[
+      ...params.map(
+        (p) =>
+          `${formatPropertyKey(p.name)}${p.param.optional ? "?" : ""}: ${mapPropertyTsType(p.param, program, models, enums, renameMap)}`,
+      ),
+      ...(indexSignature ? ["[key: string]: unknown"] : []),
+    ].join("; ")} }`;
+  for (const p of [...queryParams, ...headerParams]) {
+    collectModelNamesFromType(p.param.type, modelImportSet);
   }
 
+  const body = resolveBodyParameter(
+    op,
+    requestTypes,
+    discriminatedRequestUnions,
+    program,
+    models,
+    enums,
+    modelImportSet,
+    renameMap,
+  );
+
   // Determine response type from first 2xx response body
-  const responseType = resolveResponseType(
+  const response = resolveResponseType(
     op,
     program,
     models,
@@ -2507,52 +3042,79 @@ function buildClientMethodView(
     renameMap,
   );
 
-  // Build method parameters string
-  const paramParts: string[] = [];
-  for (const { name, tsType } of pathParams) {
-    paramParts.push(`${name}: ${tsType}`);
+  // Arguments in call order. A `query` argument is always offered — whether or
+  // not the operation declares query parameters — so callers can pass ad-hoc
+  // ones; declared parameters keep their types, keyed by their wire names.
+  const args: ParameterSpec[] = pathArgs.map((a) => ({
+    name: a.argName,
+    type: "string",
+    optional: a.optional,
+  }));
+  if (body) {
+    args.push({ name: "body", type: body.type, optional: body.optional });
   }
-  if (bodyType) {
-    paramParts.push(`body: ${bodyType}`);
+  args.push({
+    name: "query",
+    type:
+      queryParams.length > 0
+        ? objectType(queryParams, true)
+        : "Record<string, unknown>",
+    optional: !queryParams.some((p) => !p.param.optional),
+  });
+  if (headerParams.length > 0) {
+    args.push({
+      name: "headers",
+      type: objectType(headerParams, false),
+      optional: !headerParams.some((p) => !p.param.optional),
+    });
   }
-  // A `query` parameter is always available — regardless of HTTP verb or
-  // whether the TypeSpec operation declares any query params — so callers can
-  // pass ad-hoc custom query parameters on any call. Declared query params keep
-  // their specific types; the index signature allows any additional keys.
-  const queryFields = queryParams
-    .map((q) => `${q.name}${q.optional ? "?" : ""}: ${q.tsType}`)
-    .join("; ");
-  const queryType = queryFields
-    ? `{ ${queryFields}; [key: string]: unknown }`
-    : `Record<string, unknown>`;
-  paramParts.push(`query?: ${queryType}`);
-  paramParts.push(`options?: ${localNames.requestOptionsName}`);
-  const methodParams = paramParts.join(", ");
+  args.push({
+    name: "options",
+    type: localNames.requestOptionsName,
+    optional: true,
+  });
+  const methodParams = renderParameterList(args);
 
-  // Build endpoint call expression
-  const pathParamArgs = pathParams.map((p) => p.name).join(", ");
-  const endpointCall = `${localNames.endpointsLocalName}.${op.operation.name}(${pathParamArgs})`;
+  const pathArgNames = pathArgs.map((a) => a.argName).join(", ");
+  const endpointCall = `${localNames.endpointsLocalName}.${op.operation.name}(${pathArgNames})`;
 
-  // Build method body. The Promise flavor calls the base verb helpers
-  // (`this.get`, `this.post`, …); the Observable flavor calls the `$`-suffixed
-  // helpers on RxHttpClient (`this.get$`, `this.post$`, …). Both share the same
-  // unwrapped `responseType` — the wrapping `Promise<…>` / `Observable<…>` is
-  // applied by the respective template.
-  // The base transport helpers are prefixed (`httpGet`, `httpPost`, …) so that a
-  // TypeSpec operation named after an HTTP verb (e.g. `delete`) does not shadow —
-  // and clash with the signature of — the inherited helper it delegates to.
-  const httpMethod = op.verb.toLowerCase();
-  const helper = `http${capitalize(httpMethod)}`;
-  let methodBody: string;
-  let methodBodyObservable: string;
-  if (op.verb === "get" || op.verb === "head" || op.verb === "delete") {
-    methodBody = `return this.${helper}<${responseType}>(${endpointCall}, { ...options, query });`;
-    methodBodyObservable = `return this.${helper}$<${responseType}>(${endpointCall}, { ...options, query });`;
-  } else {
-    const bodyArg = bodyType ? "body" : "undefined";
-    methodBody = `return this.${helper}<${responseType}>(${endpointCall}, ${bodyArg}, { ...options, query });`;
-    methodBodyObservable = `return this.${helper}$<${responseType}>(${endpointCall}, ${bodyArg}, { ...options, query });`;
+  const transport = ["...options", "query"];
+  if (headerParams.length > 0) {
+    // Explicit `options.headers` win, so a caller can always override.
+    transport.push("headers: { ...headers, ...options?.headers }");
   }
+  const exploded = queryParams
+    .filter((p) => p.type === "query" && p.explode)
+    .map((p) => p.name);
+  if (exploded.length > 0) {
+    transport.push(`explode: ${JSON.stringify(exploded)}`);
+  }
+  if (body?.contentType) {
+    transport.push(`contentType: ${JSON.stringify(body.contentType)}`);
+  }
+  if (response.format) {
+    transport.push(`responseFormat: ${JSON.stringify(response.format)}`);
+  }
+  if (response.accept) {
+    transport.push(`accept: ${JSON.stringify(response.accept)}`);
+  }
+  // DELETE takes no positional body, so a declared one rides in the options.
+  if (body && op.verb === "delete") transport.push("body");
+  const responseType = response.type;
+  const transportArg = `{ ${transport.join(", ")} }`;
+
+  // The Promise flavor calls the base verb helpers (`this.httpGet`,
+  // `this.httpPost`, …); the Observable flavor calls the `$`-suffixed helpers
+  // on RxHttpClient. Both share the same unwrapped `responseType` — the
+  // wrapping `Promise<…>` / `Observable<…>` is applied by the template.
+  // The helpers are prefixed so that a TypeSpec operation named after an HTTP
+  // verb (e.g. `delete`) does not shadow — and clash with the signature of —
+  // the inherited helper it delegates to.
+  const helper = `http${capitalize(op.verb.toLowerCase())}`;
+  const callArgs =
+    op.verb === "get" || op.verb === "head" || op.verb === "delete"
+      ? `${endpointCall}, ${transportArg}`
+      : `${endpointCall}, ${body ? "body" : "undefined"}, ${transportArg}`;
 
   return {
     doc: getDoc(program, op.operation) ?? undefined,
@@ -2560,10 +3122,185 @@ function buildClientMethodView(
     // method name is renamed when it would shadow an inherited base member.
     name: clientMethodName(op.operation.name, siblingNames, reserved),
     methodParams,
-    methodBody,
-    methodBodyObservable,
+    methodBody: `return this.${helper}<${responseType}>(${callArgs});`,
+    methodBodyObservable: `return this.${helper}$<${responseType}>(${callArgs});`,
     responseType,
   };
+}
+
+/** One parameter of a generated method signature. */
+interface ParameterSpec {
+  /** Parameter name. */
+  name: string;
+  /** TypeScript type. */
+  type: string;
+  /** Whether the caller may omit it. */
+  optional: boolean;
+}
+
+/**
+ * Renders a parameter list. An optional parameter followed by a required one
+ * cannot use `?` (TS1016), so it is typed `T | undefined` instead and the
+ * caller passes `undefined` explicitly.
+ */
+function renderParameterList(args: readonly ParameterSpec[]): string {
+  let requiredAfter = false;
+  const rendered: string[] = [];
+  for (let i = args.length - 1; i >= 0; i--) {
+    const { name, type, optional } = args[i];
+    if (!optional) {
+      rendered.unshift(`${name}: ${type}`);
+      requiredAfter = true;
+    } else if (requiredAfter) {
+      rendered.unshift(`${name}: ${type} | undefined`);
+    } else {
+      rendered.unshift(`${name}?: ${type}`);
+    }
+  }
+  return rendered.join(", ");
+}
+
+/** The `body` argument of a generated client method. */
+interface BodyParameter {
+  /** TypeScript type of the argument. */
+  type: string;
+  /** Whether the body may be omitted. */
+  optional: boolean;
+  /**
+   * Media type to send, when it is not plain `application/json`. JSON media
+   * types such as `application/merge-patch+json` are still serialized as JSON.
+   */
+  contentType?: string;
+}
+
+/**
+ * Resolves the request body argument for any body TypeSpec can declare: a
+ * named model (narrowed to its visibility-filtered request type when one was
+ * synthesized), an inline or spread model, an array, a scalar, a raw `bytes`
+ * or text payload, a file, or a multipart form.
+ */
+function resolveBodyParameter(
+  op: HttpOperation,
+  requestTypes: Map<string, RequestType>,
+  discriminatedRequestUnions: Map<string, DiscriminatedRequestUnion>,
+  program: Program,
+  models: Map<string, Model>,
+  enums: Map<string, Enum | Union>,
+  modelImportSet: Set<string>,
+  renameMap: Map<string, string>,
+): BodyParameter | undefined {
+  const body = op.parameters.body;
+  if (!body) return undefined;
+  const declared = body.contentTypes[0];
+  const contentType =
+    declared && declared.toLowerCase() !== "application/json"
+      ? declared
+      : undefined;
+  const optional = body.property?.optional ?? false;
+
+  // The caller assembles a multipart form; `fetch` then sets the multipart
+  // boundary itself, so no content type is passed for it.
+  if (body.bodyKind === "multipart") {
+    return { type: "FormData", optional };
+  }
+  if (body.bodyKind === "file") {
+    return { type: "Blob", optional, contentType };
+  }
+
+  const isJson = !contentType || /[/+]json\s*(;|$)/i.test(contentType);
+  if (
+    !isJson &&
+    body.type.kind === "Scalar" &&
+    builtinScalarName(body.type) === "bytes"
+  ) {
+    return { type: "Blob | ArrayBuffer | Uint8Array", optional, contentType };
+  }
+
+  const named = resolveNamedBodyModelType(
+    op,
+    body.type,
+    requestTypes,
+    discriminatedRequestUnions,
+    program,
+    modelImportSet,
+    renameMap,
+  );
+  if (named) return { type: named, optional, contentType };
+
+  collectModelNamesFromType(body.type, modelImportSet);
+  return {
+    type: mapTsType(body.type, program, models, enums, renameMap),
+    optional,
+    contentType,
+  };
+}
+
+/**
+ * For a body that is a single named, non-generic model, returns the type the
+ * client should accept: its synthesized request type (`WidgetPostRequest`)
+ * when one exists, otherwise the model itself. Returns `undefined` for
+ * anything else — arrays, records, generic instances, inline models, scalars —
+ * which map like any other type.
+ */
+function resolveNamedBodyModelType(
+  op: HttpOperation,
+  type: Type,
+  requestTypes: Map<string, RequestType>,
+  discriminatedRequestUnions: Map<string, DiscriminatedRequestUnion>,
+  program: Program,
+  modelImportSet: Set<string>,
+  renameMap: Map<string, string>,
+): string | undefined {
+  if (type.kind !== "Model") return undefined;
+  const bodyModel = type as Model;
+  if (
+    !bodyModel.name ||
+    isArrayModelType(bodyModel) ||
+    isPlainRecord(bodyModel)
+  ) {
+    return undefined;
+  }
+  const mergePatchBase = getMergePatchBaseName(bodyModel.name);
+  const baseName = mergePatchBase ?? bodyModel.name;
+  const requestTypeName = `${baseName}${requestTypeSuffix(op.verb)}Request`;
+  const exists = (name: string) =>
+    requestTypes.has(name) || discriminatedRequestUnions.has(name);
+  const emitted = (name: string) =>
+    emittedRequestTypeName(name, requestTypes, discriminatedRequestUnions);
+  if (exists(requestTypeName)) {
+    modelImportSet.add(emitted(requestTypeName));
+    return emitted(requestTypeName);
+  }
+  // A name collision may have forced this request type to be renamed under its
+  // operation's own @tag prefix (see storeRequestType /
+  // collectDiscriminatedRequestType) — retry under that name before falling
+  // back to the unfiltered base model.
+  const tags = getTags(program, op.operation);
+  if (tags.length) {
+    const prefixed = `${capitalize(tags[0])}${requestTypeName}`;
+    if (exists(prefixed)) {
+      modelImportSet.add(emitted(prefixed));
+      return emitted(prefixed);
+    }
+  }
+  // A generic instance (`Box<string>`) with no request type of its own maps
+  // like any other type, so its arguments are kept.
+  if (
+    isSynthesizedMergePatchModel(bodyModel) ||
+    bodyModel.templateMapper?.args
+  ) {
+    return undefined;
+  }
+  // Through the rename map like every other type reference, so a model aliased
+  // to dodge a shadowed global (`Promise` → `PromiseModel`) is aliased here
+  // too. Both rewrite kinds are consulted, in the same order mapTsType uses.
+  // The import specifier is derived from the raw name.
+  modelImportSet.add(bodyModel.name);
+  return (
+    renameMap.get(bodyModel.name) ??
+    renameMap.get(`${RENAME_ALIAS}${bodyModel.name}`) ??
+    bodyModel.name
+  );
 }
 
 function is2xxStatusCode(code: HttpStatusCodeRange | number | "*"): boolean {
@@ -2577,29 +3314,48 @@ function resolveResponseType(
   op: HttpOperation,
   program: Program,
   models: Map<string, Model>,
-  enums: Map<string, Enum>,
+  enums: Map<string, Enum | Union>,
   modelImportSet: Set<string>,
   renameMap: Map<string, string>,
-): string {
+): ResponseShape {
   for (const resp of op.responses) {
     if (!is2xxStatusCode(resp.statusCodes)) continue;
     for (const content of resp.responses) {
-      if (content.body) {
-        const tsType = mapTsType(
-          content.body.type,
-          program,
-          models,
-          enums,
-          renameMap,
-        );
-        if (tsType !== "void" && tsType !== "unknown") {
-          collectModelNamesFromType(content.body.type, modelImportSet);
-          return tsType;
-        }
+      if (!content.body) continue;
+      const bodyType = content.body.type;
+      const contentType = content.body.contentTypes[0];
+      const isJson = !contentType || /[/+]json\s*(;|$)/i.test(contentType);
+      const isBytes =
+        bodyType.kind === "Scalar" && builtinScalarName(bodyType) === "bytes";
+      if (!isJson) {
+        // A non-JSON body is read raw, so it is typed as what that yields —
+        // a `text/plain` int32 resolves to "42", not 42 — and the request
+        // asks for the declared media type rather than JSON.
+        return isBytes
+          ? { type: "Uint8Array", format: "binary", accept: contentType }
+          : { type: "string", format: "text", accept: contentType };
+      }
+      const tsType = mapTsType(bodyType, program, models, enums, renameMap);
+      if (tsType !== "void" && tsType !== "unknown") {
+        collectModelNamesFromType(bodyType, modelImportSet);
+        return { type: tsType };
       }
     }
   }
-  return "void";
+  return { type: "void" };
+}
+
+/** The success response a generated client method resolves to. */
+interface ResponseShape {
+  /** TypeScript type of the resolved value. */
+  type: string;
+  /**
+   * How the transport must read the body when it is not JSON: `text` for a
+   * textual media type, `binary` for raw `bytes`.
+   */
+  format?: "text" | "binary";
+  /** Media type to request in `Accept`, when it is not JSON. */
+  accept?: string;
 }
 
 function collectModelNamesFromType(type: Type, into: Set<string>): void {
@@ -2609,26 +3365,43 @@ function collectModelNamesFromType(type: Type, into: Set<string>): void {
       collectModelNamesFromType(m.indexer.value, into);
       return;
     }
-    if (isRecordModelType(m) && m.indexer) {
+    if (isPlainRecord(m) && m.indexer) {
       collectModelNamesFromType(m.indexer.value, into);
       return;
     }
-    if (m.name && !m.templateMapper?.args) {
+    if (!m.name) {
+      // An inline model is rendered in place, so the models it references
+      // are what the client must import.
+      for (const [, prop] of flattenProperties(m)) {
+        collectModelNamesFromType(prop.type, into);
+      }
+      if (m.indexer) collectModelNamesFromType(m.indexer.value, into);
+    } else if (!m.templateMapper?.args) {
       into.add(m.name);
     } else if (m.name && m.templateMapper?.args) {
       // Mirrors mapTsType's own `Array<T>` shortcut, which renders the native
       // `T[]` and never names the model. Adding it here anyway would import a
       // type the emitted code does not reference — and, when that model is the
       // only one in the spec, from a models.ts that is never written.
-      if (!isNativeArrayShortcut(m)) into.add(m.name);
+      if (!isNativeArrayShortcut(m) && !isNativeRecordShortcut(m)) {
+        into.add(m.name);
+      }
       for (const arg of m.templateMapper.args) {
         if ((arg as { entityKind?: string }).entityKind === "Type") {
           collectModelNamesFromType(arg as Type, into);
         }
       }
     }
+  } else if (type.kind === "Tuple") {
+    for (const value of (type as Tuple).values) {
+      collectModelNamesFromType(value, into);
+    }
   } else if (type.kind === "Union") {
     const u = type as Union;
+    if (isAliasedUnion(u)) {
+      into.add(u.name!);
+      return;
+    }
     for (const [, variant] of u.variants) {
       collectModelNamesFromType(variant.type, into);
     }
@@ -2648,6 +3421,9 @@ function nsToPackageName(nsFullName: string): string {
     )
     .join("-");
 }
+
+/** TypeScript version range the generated package builds with. */
+export const GENERATED_TYPESCRIPT_RANGE = "^5.9.0";
 
 function buildPackageJson(
   nsFullName: string,
@@ -2670,15 +3446,17 @@ function buildPackageJson(
   if (useVersionedFolders && versionsToEmit.length > 0) {
     const exports: Record<string, Record<string, string>> = {};
     for (const v of versionsToEmit) {
+      // `types` must precede `import`: conditions match in order, and
+      // TypeScript stops at the first one it recognizes.
       exports[`./${v.value}`] = {
-        import: `./dist/${v.value}/index.js`,
         types: `./dist/${v.value}/index.d.ts`,
+        import: `./dist/${v.value}/index.js`,
       };
     }
     pkg.exports = exports;
   } else {
     pkg.exports = {
-      ".": { import: "./dist/index.js", types: "./dist/index.d.ts" },
+      ".": { types: "./dist/index.d.ts", import: "./dist/index.js" },
     };
     pkg.main = "./dist/index.js";
     pkg.types = "./dist/index.d.ts";
@@ -2686,7 +3464,9 @@ function buildPackageJson(
 
   pkg.files = ["dist"];
   pkg.scripts = { build: "tsc" };
-  pkg.devDependencies = { typescript: "latest" };
+  // Pinned to the TypeScript line the generated code is tested against, so a
+  // fresh install builds the same way today as it will after the next major.
+  pkg.devDependencies = { typescript: GENERATED_TYPESCRIPT_RANGE };
 
   // The Observable client flavor imports from `rxjs`. Declare it as an optional
   // peer dependency so consumers who only use the Promise client are never
@@ -2729,7 +3509,7 @@ function buildTsConfig(): string {
 // ─── Type mapping ────────────────────────────────────────────────────────────
 
 /**
- * Three kinds of rewrite share one rename map during rendering, distinguished
+ * Two kinds of rewrite share one rename map during rendering, distinguished
  * by key prefix. Keeping them separate matters: they are not interchangeable.
  *
  * | Key              | Meaning                                                |
@@ -2739,12 +3519,8 @@ function buildTsConfig(): string {
  * |                  | are dropped, because the replacement is already concrete. |
  * | `alias:<name>`   | Name-only rewrite. The type is unchanged, so generic    |
  * |                  | arguments are preserved.                                 |
- * | `scalar:<name>`  | Rewrite of a scalar mapping's target (the global `Date` |
- * |                  | a `utcDateTime` maps to), never of a declared type.     |
  */
 const RENAME_ALIAS = "alias:";
-/** See {@link RENAME_ALIAS}. */
-const RENAME_SCALAR = "scalar:";
 
 /**
  * Whether a templated model renders as the native `T[]` rather than by name.
@@ -2757,31 +3533,61 @@ function isNativeArrayShortcut(m: Model): boolean {
   return m.name === "Array" && (m.templateMapper?.args?.length ?? 0) === 1;
 }
 
+/**
+ * Whether a model is nothing but a string-keyed map, and so renders as the
+ * native `Record<string, T>`. A model that also declares properties —
+ * `model Extra { known: string; ...Record<int32> }` or
+ * `model X is Record<string> { known: string }` — is not: it is emitted as an
+ * interface with an index signature, so its declared properties survive.
+ */
+function isPlainRecord(m: Model): boolean {
+  return isRecordModelType(m) && flattenProperties(m).size === 0;
+}
+
+/**
+ * Whether a templated model renders as the native `Record<string, T>`. A
+ * `Record<T>` whose argument is still a template parameter is not recognized
+ * by `isRecordModelType`, so it reaches the generic path and would otherwise
+ * be emitted as `Record<T>` — one type argument where TypeScript needs two.
+ */
+function isNativeRecordShortcut(m: Model): boolean {
+  return m.name === "Record" && (m.templateMapper?.args?.length ?? 0) === 1;
+}
+
 function mapTsType(
   type: Type,
   program: Program,
   models: Map<string, Model>,
-  enums: Map<string, Enum>,
+  enums: Map<string, Enum | Union>,
   renameMap?: Map<string, string>,
 ): string {
   switch (type.kind) {
-    case "Scalar": {
-      const mapped = mapScalar(type as Scalar, program);
-      return renameMap?.get(`${RENAME_SCALAR}${mapped}`) ?? mapped;
-    }
+    case "Scalar":
+      return mapScalar(type as Scalar, program);
 
     case "Model": {
       const m = type as Model;
       if (isArrayModelType(m)) {
         return `${mapTsType(m.indexer!.value, program, models, enums, renameMap)}[]`;
       }
-      if (isRecordModelType(m)) {
-        return `Record<string, ${mapTsType(m.indexer!.value, program, models, enums, renameMap)}>`;
+      if (isPlainRecord(m)) {
+        const value = mapTsType(
+          m.indexer!.value,
+          program,
+          models,
+          enums,
+          renameMap,
+        );
+        // A type alias may refer to itself through an object type but not
+        // through the `Record` alias (TS2456), so a record inside a recursive
+        // union such as `union Json { …, Record<Json> }` is spelled out.
+        return referencesAliasedUnion(m.indexer!.value)
+          ? `{ [key: string]: ${value} }`
+          : `Record<string, ${value}>`;
       }
-      if (isErrorModel(program, m)) {
-        // Emit error models — just note them
+      if (!m.name) {
+        return renderInlineModel(m, program, models, enums, renameMap);
       }
-      if (!m.name) return "unknown";
 
       // During the rendering phase, synthesized MergePatch model names are
       // rewritten to their canonical output names (e.g. PetPatchRequest or Tag).
@@ -2803,18 +3609,19 @@ function mapTsType(
           )
           .map((a) => mapTsType(a, program, models, enums, renameMap));
         if (isNativeArrayShortcut(m)) return `${args[0]}[]`;
+        if (isNativeRecordShortcut(m)) return `Record<string, ${args[0]}>`;
         const decl = m.namespace?.models.get(m.name);
-        models.set(m.name, decl ?? m);
+        registerNamedType(program, models, enums, decl ?? m);
         return args.length > 0 ? `${aliased}<${args.join(", ")}>` : aliased;
       }
 
-      models.set(m.name, m);
+      registerNamedType(program, models, enums, m);
       return aliased;
     }
 
     case "Enum": {
       const e = type as Enum;
-      if (e.name) enums.set(e.name, e);
+      if (e.name) registerNamedType(program, models, enums, e);
       return e.name || "string";
     }
 
@@ -2829,12 +3636,12 @@ function mapTsType(
 
     case "Union": {
       const u = type as Union;
-      const parts: string[] = [];
-      for (const [, variant] of u.variants) {
-        parts.push(mapTsType(variant.type, program, models, enums, renameMap));
+      if (isAliasedUnion(u)) {
+        registerNamedType(program, models, enums, u);
+        return renameMap?.get(`${RENAME_ALIAS}${u.name}`) ?? u.name!;
       }
-      const unique = [...new Set(parts)].filter((p) => p !== "never");
-      return unique.length > 0 ? unique.join(" | ") : "unknown";
+      const parts = unionMemberTypes(u, program, models, enums, renameMap);
+      return parts.length > 0 ? parts.join(" | ") : "unknown";
     }
 
     case "String":
@@ -2856,20 +3663,165 @@ function mapTsType(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       return (type as any).node?.id?.sv ?? "T";
 
+    case "Tuple":
+      return `[${(type as Tuple).values
+        .map((v) => mapTsType(v, program, models, enums, renameMap))
+        .join(", ")}]`;
+
     default:
       return "unknown";
   }
 }
 
+/**
+ * Whether a union is declared with a name (`union Status { … }`) and so is
+ * emitted as its own `export type` alias and referenced by name. Referring to
+ * it by name is what lets a recursive union (`union Json { …, Json[] }`)
+ * render at all; inlining it would recurse forever. Anonymous unions
+ * (`A | B`) and instances of generic unions are still written in place.
+ */
+function isAliasedUnion(u: Union): boolean {
+  return !!u.name && !u.templateMapper && isEmittable(u);
+}
+
+/**
+ * Whether a type names an aliased union, directly or through arrays, records,
+ * and anonymous unions — the positions a recursive alias can reach itself
+ * through.
+ */
+function referencesAliasedUnion(
+  type: Type,
+  seen: Set<Type> = new Set(),
+): boolean {
+  if (seen.has(type)) return false;
+  seen.add(type);
+  if (type.kind === "Union") {
+    if (isAliasedUnion(type)) return true;
+    return [...type.variants.values()].some((v) =>
+      referencesAliasedUnion(v.type, seen),
+    );
+  }
+  if (type.kind === "Model" && type.indexer) {
+    return referencesAliasedUnion(type.indexer.value, seen);
+  }
+  return false;
+}
+
+/**
+ * The member types of a union, as TypeScript type strings, ready to be joined
+ * with `|`. Duplicates and `never` are dropped.
+ *
+ * A `@discriminated` union is written in its wire shape: with the default
+ * `envelope: "object"` each member is `{ kind: "a"; value: Cat }`, and with
+ * `envelope: "none"` the discriminator is merged into the variant itself,
+ * `Cat & { kind: "a" }`.
+ */
+function unionMemberTypes(
+  u: Union,
+  program: Program,
+  models: Map<string, Model>,
+  enums: Map<string, Enum | Union>,
+  renameMap?: Map<string, string>,
+): string[] {
+  const map = (t: Type) => mapTsType(t, program, models, enums, renameMap);
+  const [discriminated] = getDiscriminatedUnion(program, u);
+  if (discriminated) {
+    const { envelope, discriminatorPropertyName, envelopePropertyName } =
+      discriminated.options;
+    const kindKey = formatPropertyKey(discriminatorPropertyName);
+    const parts: string[] = [];
+    for (const [name, variantType] of discriminated.variants) {
+      const tag = `${kindKey}: ${JSON.stringify(name)}`;
+      parts.push(
+        envelope === "none"
+          ? `${map(variantType)} & { ${tag} }`
+          : `{ ${tag}; ${formatPropertyKey(envelopePropertyName)}: ${map(variantType)} }`,
+      );
+    }
+    // A default variant is sent bare, without a discriminator or envelope.
+    if (discriminated.defaultVariant) {
+      parts.push(map(discriminated.defaultVariant));
+    }
+    return [...new Set(parts)];
+  }
+  const parts = [...u.variants.values()].map((v) => map(v.type));
+  return [...new Set(parts)].filter((p) => p !== "never");
+}
+
+/**
+ * Renders an anonymous model — an inline `{ … }` type, a spread operation
+ * body, or an inline response — as a TypeScript object type. HTTP metadata
+ * (`@header`, `@query`, `@path`, `@statusCode`) travels outside the body and
+ * is left out.
+ */
+function renderInlineModel(
+  m: Model,
+  program: Program,
+  models: Map<string, Model>,
+  enums: Map<string, Enum | Union>,
+  renameMap?: Map<string, string>,
+): string {
+  const fields: string[] = [];
+  const props = [...flattenProperties(m).values()].filter(
+    (prop) => !isMetadata(program, prop),
+  );
+  for (const prop of props) {
+    const optional = prop.optional ? "?" : "";
+    const type = mapPropertyTsType(prop, program, models, enums, renameMap);
+    const key = formatPropertyKey(jsonPropertyName(program, prop));
+    fields.push(`${key}${optional}: ${type}`);
+  }
+  const index = indexSignatureType(m, props, program, models, enums, renameMap);
+  if (index) fields.push(`[key: string]: ${index}`);
+  return fields.length > 0 ? `{ ${fields.join("; ")} }` : "{}";
+}
+
+/**
+ * The value type of a model's string index signature, or `undefined` when it
+ * has none. TypeScript requires every declared property to fit the index
+ * signature (TS2411), so the indexer's own type is widened with the type of
+ * each declared property — `{ known: string; ...Record<int32> }` gets
+ * `[key: string]: number | string` — plus `undefined` when one is optional.
+ */
+function indexSignatureType(
+  m: Model,
+  props: readonly ModelProperty[],
+  program: Program,
+  models: Map<string, Model>,
+  enums: Map<string, Enum | Union>,
+  renameMap?: Map<string, string>,
+): string | undefined {
+  if (!m.indexer) return undefined;
+  const types = [
+    mapTsType(m.indexer.value, program, models, enums, renameMap),
+    ...props.map((p) =>
+      mapPropertyTsType(p, program, models, enums, renameMap),
+    ),
+  ];
+  if (props.some((p) => p.optional)) types.push("undefined");
+  return [...new Set(types)].join(" | ");
+}
+
+/**
+ * Maps a scalar to the TypeScript type of its JSON wire value.
+ *
+ * The generated client sends and receives plain JSON (`JSON.stringify` and
+ * `response.json()`) with no per-field conversion, so every type says what is
+ * actually on the wire: `utcDateTime`, `offsetDateTime`, `plainDate`,
+ * `plainTime` and `duration` are strings, and `bytes` is a base64 string.
+ * An `@encode` on the scalar declaration picks the wire type instead — for
+ * example `@encode(unixTimestamp, int32)` makes a date a `number`.
+ */
 function mapScalar(scalar: Scalar, program: Program): string {
   const fmt = getFormat(program, scalar);
   if (fmt) return "string"; // all formats (uuid, uri, email, phone, etc.) → string
+  const encode = getEncode(program, scalar);
+  return mapBuiltinScalar(builtinScalarName(encode?.type ?? scalar));
+}
 
-  const builtin = builtinScalarName(scalar);
-  switch (builtin) {
-    case "string":
-    case "url":
-      return "string";
+/** Maps a built-in scalar name to the TypeScript type of its JSON value. */
+function mapBuiltinScalar(name: string): string {
+  switch (name) {
     case "int8":
     case "int16":
     case "int32":
@@ -2889,16 +3841,9 @@ function mapScalar(scalar: Scalar, program: Program): string {
       return "number";
     case "boolean":
       return "boolean";
-    case "bytes":
-      return "Uint8Array";
-    case "utcDateTime":
-    case "offsetDateTime":
-      return "Date";
-    case "plainDate":
-    case "plainTime":
-    case "duration":
-      return "string";
     default:
+      // string, url, bytes (base64), utcDateTime, offsetDateTime, plainDate,
+      // plainTime, duration, and any custom scalar not derived from the above.
       return "string";
   }
 }
@@ -2942,31 +3887,86 @@ function builtinScalarName(scalar: Scalar): string {
 
 // ─── Emission filters ────────────────────────────────────────────────────────
 
-function isEmittable(model: Model, serviceNsName: string): boolean {
-  if (!model.name) return false;
-  const ns = model.namespace ? getNamespaceFullName(model.namespace) : "";
-  return (
-    ns === serviceNsName ||
-    ns.startsWith(`${serviceNsName}.`) ||
-    ns === "" ||
-    serviceNsName.startsWith(`${ns}.`)
-  );
+/**
+ * Whether a referenced type belongs in models.ts. Any named type the service
+ * references is emitted, wherever it is declared — the service namespace, a
+ * sibling such as `MyOrg.Shared`, or the global namespace — except the
+ * TypeSpec standard library's own types (`TypeSpec.Http.*` and the like),
+ * which describe the protocol rather than the API's data.
+ */
+function isEmittable(type: Model | Enum | Union): boolean {
+  if (!type.name) return false;
+  const ns = namespaceNameOf(type);
+  return ns !== "TypeSpec" && !ns.startsWith("TypeSpec.");
 }
 
-function isEmittableEnum(e: Enum, serviceNsName: string): boolean {
-  if (!e.name) return false;
-  const ns = e.namespace ? getNamespaceFullName(e.namespace) : "";
-  return (
-    ns === serviceNsName ||
-    ns.startsWith(`${serviceNsName}.`) ||
-    ns === "" ||
-    serviceNsName.startsWith(`${ns}.`)
-  );
+/** Full name of the namespace a type is declared in; `""` for global. */
+function namespaceNameOf(type: Model | Enum | Union): string {
+  return type.namespace ? getNamespaceFullName(type.namespace) : "";
+}
+
+/** Names already reported as `duplicate-type-name`, per program. */
+const reportedDuplicateNames = new WeakMap<Program, Set<string>>();
+
+/**
+ * Records a named model, enum, or union for emission. Every generated type
+ * shares one `models.ts`, so two different types with the same name from
+ * different namespaces cannot both be emitted — whether both are models or one
+ * is a model and the other an enum or union. The first one keeps the name, and
+ * the clash is reported once as an error instead of the second silently
+ * replacing the first (or being declared twice).
+ */
+function registerNamedType(
+  program: Program,
+  models: Map<string, Model>,
+  enums: Map<string, Enum | Union>,
+  type: Model | Enum | Union,
+): void {
+  const name = type.name!;
+  const existing = models.get(name) ?? enums.get(name);
+  if (existing && existing !== type) {
+    const kept = namespaceNameOf(existing);
+    const other = namespaceNameOf(type);
+    if (kept !== other) {
+      let reported = reportedDuplicateNames.get(program);
+      if (!reported) {
+        reported = new Set();
+        reportedDuplicateNames.set(program, reported);
+      }
+      if (!reported.has(name)) {
+        reported.add(name);
+        reportDiagnostic(program, {
+          code: "duplicate-type-name",
+          format: {
+            name,
+            kept: kept || "(global)",
+            other: other || "(global)",
+          },
+          target: type,
+        });
+      }
+      return;
+    }
+  }
+  if (type.kind === "Model") models.set(name, type);
+  else enums.set(name, type);
 }
 
 // ─── Model helpers ───────────────────────────────────────────────────────────
 
+/**
+ * Type parameters of a generic model, in declaration order.
+ *
+ * Taken from the template declaration itself, so `model Two<A, B> { a: B; b: A }`
+ * stays `Two<A, B>` — a reference `Two<string, boolean>` must bind `A` to
+ * `string` — and a parameter that no property mentions directly (only through
+ * a union, a base model, or not at all) is still declared.
+ */
 function collectTypeParams(model: Model): string[] {
+  const node = model.node;
+  if (node && "templateParameters" in node && node.templateParameters.length) {
+    return node.templateParameters.map((p) => p.id.sv);
+  }
   const params: string[] = [];
   for (const [, prop] of model.properties) {
     gatherTemplateParams(prop.type, params);
@@ -3001,6 +4001,90 @@ function gatherTemplateParams(
 }
 
 // ─── Misc helpers ────────────────────────────────────────────────────────────
+
+/** Matches a valid JavaScript identifier (ASCII subset). */
+const IDENTIFIER_PATTERN = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
+
+/**
+ * Words that cannot name a function parameter. Property keys may use them, so
+ * {@link formatPropertyKey} does not consult this list.
+ */
+const RESERVED_WORDS = new Set([
+  "arguments",
+  "await",
+  "break",
+  "case",
+  "catch",
+  "class",
+  "const",
+  "continue",
+  "debugger",
+  "default",
+  "delete",
+  "do",
+  "else",
+  "enum",
+  "eval",
+  "export",
+  "extends",
+  "false",
+  "finally",
+  "for",
+  "function",
+  "if",
+  "implements",
+  "import",
+  "in",
+  "instanceof",
+  "interface",
+  "let",
+  "new",
+  "null",
+  "package",
+  "private",
+  "protected",
+  "public",
+  "return",
+  "static",
+  "super",
+  "switch",
+  "this",
+  "throw",
+  "true",
+  "try",
+  "typeof",
+  "var",
+  "void",
+  "while",
+  "with",
+  "yield",
+]);
+
+/**
+ * Renders an object-type property key, quoting it when it is not a valid
+ * identifier (`x-ms-id` → `"x-ms-id"`).
+ */
+export function formatPropertyKey(name: string): string {
+  return IDENTIFIER_PATTERN.test(name) ? name : JSON.stringify(name);
+}
+
+/**
+ * Converts a name to a valid JavaScript identifier that is not in `taken`, and
+ * claims it. Invalid characters are dropped and the next character
+ * upper-cased (`widget-id` → `widgetId`); a reserved word or a taken name gets
+ * a `Param` suffix, numbered if that is taken too.
+ */
+export function toIdentifier(name: string, taken: Set<string>): string {
+  let id = name.replace(/[^A-Za-z0-9_$]+(.)?/g, (_, next?: string) =>
+    next ? next.toUpperCase() : "",
+  );
+  if (!id || /^[0-9]/.test(id)) id = `_${id}`;
+  if (RESERVED_WORDS.has(id) || taken.has(id)) {
+    id = uniqueName(`${id}Param`, taken);
+  }
+  taken.add(id);
+  return id;
+}
 
 function sanitizeVersionForPath(version: string): string {
   return version.replace(/\./g, "_").replace(/^v/i, "v");

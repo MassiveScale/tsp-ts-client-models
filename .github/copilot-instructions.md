@@ -133,6 +133,15 @@ After being asked to cleanup the codebase, or making any change to the codebase:
 
 All steps must pass before a change is considered complete.
 
+## Publishing
+
+The package is published to npm as `@massivescale/tsp-ts-client-models`.
+
+- `package.json` `files` limits the tarball to `dist/src` (JavaScript and declarations), `dist/templates`, `README.md`, and `LICENSE`. Run `npm pack --dry-run` to check what will ship.
+- `publishConfig` sets `access: public` (scoped packages default to restricted) and `tag: beta`, so `npm publish` never moves `latest` while the package is in beta. Remove `tag` from `publishConfig` for the first stable release.
+- `prepublishOnly` runs lint, build, and tests before every publish, and `prepack` builds `dist/`. There is deliberately no `prepare` script: npm can run `prepare` on install, and the published tarball has no TypeScript compiler or `scripts/` folder to run it with.
+- Before publishing, bump `version`, move the `[Unreleased]` changelog entries under a heading for that version, and run `./build-examples.ps1`.
+
 ## Maintenance
 
 - **CLAUDE.md** — Redirects to this file. Do not add content there.

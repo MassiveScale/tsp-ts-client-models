@@ -1,8 +1,28 @@
 {
   "name": "@massivescale/tsp-ts-client-models",
-  "version": "0.8.0",
+  "version": "1.0.0-beta.1",
+  "description": "TypeSpec emitter that generates a typed, publishable TypeScript client package: models, request types, endpoint utilities, and a fetch-based HTTP client.",
+  "keywords": [
+    "typespec",
+    "typespec-emitter",
+    "emitter",
+    "typescript",
+    "client",
+    "sdk",
+    "codegen"
+  ],
+  "homepage": "https://github.com/MassiveScale/tsp-ts-client-models#readme",
+  "bugs": {
+    "url": "https://github.com/MassiveScale/tsp-ts-client-models/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MassiveScale/tsp-ts-client-models.git"
+  },
+  "license": "MIT",
   "type": "module",
   "main": "dist/src/index.js",
+  "types": "dist/src/index.d.ts",
   "exports": {
     ".": {
       "types": "./dist/src/index.d.ts",
@@ -12,6 +32,19 @@
       "types": "./dist/src/testing/index.d.ts",
       "default": "./dist/src/testing/index.js"
     }
+  },
+  "files": [
+    "dist/src/**/*.js",
+    "dist/src/**/*.d.ts",
+    "dist/templates/*.hbs",
+    "!dist/src/**/*.map"
+  ],
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "publishConfig": {
+    "access": "public",
+    "tag": "beta"
   },
   "dependencies": {
     "handlebars": "^4.7.9"
@@ -33,7 +66,6 @@
     "typescript-eslint": "^8.60.1"
   },
   "scripts": {
-    "prepare": "tsc && node scripts/copy-templates.mjs",
     "build": "tsc && node scripts/copy-templates.mjs",
     "watch": "tsc --watch",
     "test": "node --test \"dist/test/**/*.test.js\"",
@@ -41,7 +73,9 @@
     "lint:fix": "eslint . --report-unused-disable-directives --fix",
     "format": "prettier .  --write",
     "format:check": "prettier --check .",
-    "sweep": "node scripts/name-collision-sweep.mjs"
+    "sweep": "node scripts/name-collision-sweep.mjs",
+    "prepublishOnly": "npm run lint && npm run build && npm test",
+    "prepack": "npm run build"
   },
   "packageManager": "npm@11.14.1+sha512.6a8a4d67478497a2dbc6815cad72e64c43f33413717e242756047d466241ab39bee61e691683a64658e94496ec5f1a1c05e4a5ec62dcc773280dfd949443a367"
 }

@@ -407,69 +407,43 @@ describe("generated package compiles", () => {
     },
   );
 
-  // Regression: a generated type named after a global that a scalar maps to
-  // shadows it inside models.ts, so a sibling model's `utcDateTime` silently
-  // resolved to the user's own interface. It compiled — which is what made it
-  // dangerous — so the probe asserts the property is really a JS Date.
-  for (const [global, builtin, witness] of [
-    ["Date", "utcDateTime", "getTime()"],
-    ["Uint8Array", "bytes", "byteLength"],
-  ] as const) {
-    it(
-      `keeps the global ${global} usable when a model shadows it`,
-      { timeout: TYPE_CHECK_TIMEOUT },
-      async () => {
-        const { errors, files } = await emitAndTypeCheck(
-          `
-          import "@typespec/http";
-          using Http;
+  // Dates and bytes are typed as their JSON wire values (strings), so a model
+  // named after the global they used to map to no longer changes what a
+  // sibling property means — and needs no alias.
+  it(
+    "keeps scalar properties as wire strings when models shadow Date and Uint8Array",
+    { timeout: TYPE_CHECK_TIMEOUT },
+    async () => {
+      const { errors, files } = await emitAndTypeCheck(
+        `
+        import "@typespec/http";
+        using Http;
 
-          @service(#{ title: "Test API" })
-          namespace TestApi;
+        @service(#{ title: "Test API" })
+        namespace TestApi;
 
-          model ${global} { id: string; }
-          model Widget { real: ${builtin}; shadow: ${global}; }
+        model Date { id: string; }
+        model Uint8Array { id: string; }
+        model Widget { when: utcDateTime; raw: bytes; a: Date; b: Uint8Array; }
 
-          @route("/widgets")
-          interface Widgets { @get list(): Widget[]; }
+        @route("/widgets")
+        interface Widgets { @get list(): Widget[]; }
+      `,
+        undefined,
+        `import type { Widget } from "./models.js";
+         declare const w: Widget;
+         export const when: string = w.when;
+         export const raw: string = w.raw;
+         export const a: string = w.a.id;
         `,
-          undefined,
-          // `real` must be the global; `shadow` must be the user's model.
-          `import type { Widget } from "./models.js";
-           declare const w: Widget;
-           export const a = w.real.${witness};
-           export const b: string = w.shadow.id;
-          `,
-        );
+      );
 
-        deepStrictEqual(errors, []);
-
-        const modelsKey = Object.keys(files).find((k) =>
-          k.endsWith("models.ts"),
-        );
-        ok(modelsKey, "Expected models.ts");
-        const models = files[modelsKey];
-        ok(
-          models.includes(
-            `type Global${global} = typeof globalThis.${global}.prototype;`,
-          ),
-          "Expected the global alias declaration",
-        );
-        ok(
-          models.includes(`real: Global${global};`),
-          "The scalar property must use the alias",
-        );
-        ok(
-          models.includes(`shadow: ${global};`),
-          "A reference to the user's own model must not be aliased",
-        );
-        ok(
-          !/^export type Global/m.test(models),
-          "The alias must not be exported into the barrel",
-        );
-      },
-    );
-  }
+      deepStrictEqual(errors, []);
+      const key = Object.keys(files).find((k) => k.endsWith("models.ts"));
+      ok(key, "Expected models.ts");
+      ok(!files[key].includes("Global"), "No global alias is needed");
+    },
+  );
 
   // Regression: the shadow alias is a name-only rewrite, so it must not swallow
   // the model's generic arguments — `Date<string>` became a bare `DateModel`,
@@ -500,52 +474,6 @@ describe("generated package compiles", () => {
       ok(
         files[key].includes("Promise<DateModel<string>>"),
         "The alias must carry the generic argument through",
-      );
-    },
-  );
-
-  // Regression: the shadow alias used `InstanceType<…>`, which a spec declaring
-  // `model InstanceType` shadows in that very file — TS2315.
-  it(
-    "builds the shadow alias without depending on another global name",
-    { timeout: TYPE_CHECK_TIMEOUT },
-    async () => {
-      const { errors, files } = await emitAndTypeCheck(
-        `
-        import "@typespec/http";
-        using Http;
-
-        @service(#{ title: "Test API" })
-        namespace TestApi;
-
-        model InstanceType { id: string; }
-        model globalThis { id: string; }
-        model Date { id: string; }
-        model Widget { real: utcDateTime; a: InstanceType; b: globalThis; c: Date; }
-
-        @route("/widgets")
-        interface Widgets { @get list(): Widget[]; }
-      `,
-        undefined,
-        `import type { Widget } from "./models.js";
-         declare const w: Widget;
-         export const t: number = w.real.getTime();
-        `,
-      );
-
-      deepStrictEqual(errors, []);
-
-      const key = Object.keys(files).find((k) => k.endsWith("models.ts"));
-      ok(key, "Expected models.ts");
-      ok(
-        files[key].includes(
-          "type GlobalDate = typeof globalThis.Date.prototype;",
-        ),
-        "Expected the alias to read .prototype off the constructor",
-      );
-      ok(
-        !files[key].includes("InstanceType<"),
-        "The alias must not depend on the InstanceType utility",
       );
     },
   );
@@ -648,8 +576,8 @@ describe("generated package compiles", () => {
           "The body parameter must use the alias too",
         );
         ok(
-          client.includes("since?: Date"),
-          "A scalar query param must still mean the global Date",
+          client.includes("since?: string"),
+          "A date query param is its wire string, not the Date model",
         );
       },
     );
@@ -838,6 +766,284 @@ describe("generated package compiles", () => {
       });
 
       deepStrictEqual(errors, []);
+    },
+  );
+
+  const parameterSpec = `
+    import "@typespec/http";
+    using Http;
+
+    @service(#{ title: "Test API" })
+    namespace TestApi;
+
+    model Widget { id: string; name: string; }
+
+    @route("/widgets")
+    interface Widgets {
+      @post createInline(name: string, size?: int32): Widget;
+      @post @route("bulk") createMany(@body items: Widget[]): void;
+      @get @route("{widget-id}") read(
+        @path("widget-id") widgetId: string,
+        @header("x-tenant") tenant: string,
+        @query("api-version") apiVersion: string,
+        @query(#{ explode: true }) tags?: string[],
+      ): Widget;
+      @put @route("{id}/raw") upload(
+        @path id: string,
+        @header contentType: "application/octet-stream",
+        @body data: bytes,
+      ): void;
+      @post @route("text") text(@header contentType: "text/plain", @body data: string): void;
+      @post @route("form") form(
+        @header contentType: "multipart/form-data",
+        @multipartBody body: { name: HttpPart<string> },
+      ): void;
+      @get @route("{id}") optional(@path id: string, @path tail?: string): void;
+      @get @route("reserved/{default}") reserved(@path("default") \`default\`: string): void;
+      @delete @route("bulk") removeMany(@body ids: string[]): void;
+      @get @route("count") count(): { @header contentType: "text/plain"; @body body: int32 };
+      @patch @route("{id}") update(
+        @path id: string,
+        @header ifMatch?: string,
+        @body patch: MergePatchUpdate<Widget>,
+      ): Widget;
+    }
+  `;
+
+  /** Calls every generated method the way a consumer would. */
+  const parameterProbe = `
+    import { WidgetsClient, WidgetsEndpoints } from "./index.js";
+    declare const client: WidgetsClient;
+    void client.createInline({ name: "w" });
+    void client.createMany([{ id: "1", name: "w" }]);
+    void client.read("w1", { "api-version": "2024", tags: ["a"] }, { "x-tenant": "t" });
+    void client.upload("w1", new Uint8Array([1]));
+    void client.text("hello");
+    void client.form(new FormData());
+    void client.optional("w1");
+    void client.optional("w1", "tail");
+    void client.reserved("d");
+    void client.removeMany(["a", "b"]);
+    const count: Promise<string> = client.count();
+    void count;
+    void client.update("w1", { name: "x" }, undefined, { "if-match": "etag" });
+    const path: string = WidgetsEndpoints.read("w1");
+    void path;
+  `;
+
+  for (const clientStyle of ["promise", "both"] as const) {
+    it(
+      `compiles every parameter and body shape (${clientStyle})`,
+      { timeout: TYPE_CHECK_TIMEOUT },
+      async () => {
+        const { errors } = await emitAndTypeCheck(
+          parameterSpec,
+          { "client-style": clientStyle },
+          parameterProbe,
+        );
+
+        deepStrictEqual(errors, []);
+      },
+    );
+  }
+
+  it(
+    "compiles enums and properties whose names are not identifiers",
+    { timeout: TYPE_CHECK_TIMEOUT },
+    async () => {
+      const { errors } = await emitAndTypeCheck(
+        `
+          import "@typespec/http";
+          using Http;
+
+          @service(#{ title: "Test API" })
+          namespace TestApi;
+
+          @doc("Closes early */ unless escaped")
+          enum Kind { \`x-y\`: "x-y", Its: "it's", \`1st\`: "first" }
+          enum Priority { Low: 1, High: 10 }
+          model Widget {
+            \`x-ms-id\`: string;
+            \`1abc\`?: int32;
+            kind: Kind;
+            priority: Priority;
+            fixed: Priority.High;
+          }
+
+          @route("/widgets")
+          interface Widgets { @get list(): Widget[]; }
+        `,
+        undefined,
+        `
+          import { Kind, Priority, type Widget } from "./index.js";
+          const widget: Widget = {
+            "x-ms-id": "1",
+            kind: Kind["x-y"],
+            priority: Priority.Low,
+            fixed: 10,
+          };
+          const high: 10 = Priority.High;
+          void widget;
+          void high;
+        `,
+      );
+
+      deepStrictEqual(errors, []);
+    },
+  );
+
+  it(
+    "compiles generic, inline, tuple, and cross-namespace types",
+    { timeout: TYPE_CHECK_TIMEOUT },
+    async () => {
+      const { errors } = await emitAndTypeCheck(
+        `
+          import "@typespec/http";
+          using Http;
+
+          @service(#{ title: "Test API" })
+          namespace MyOrg.Api {
+            model Two<A, B> { a: B; b: A; }
+            model Opt<T> { v: T | null; }
+            model Phantom<T> { x: string; }
+            model Base<T> { b: T; }
+            model Sub<T> extends Base<T> { s: string; }
+            model Rec<T> { m: Record<T>; }
+            model Widget {
+              price: MyOrg.Shared.Money;
+              pair: [string, int32];
+              inline: { a: string; b?: int32 };
+            }
+            @route("/w") interface W {
+              @get two(): Two<string, boolean>;
+              @get @route("o") opt(): Opt<int32>;
+              @get @route("p") phantom(): Phantom<int32>;
+              @get @route("s") subs(): Sub<string>;
+              @get @route("r") rec(): Rec<int32>;
+              @get @route("l") list(): { items: Widget[]; total: int32 };
+            }
+          }
+          namespace MyOrg.Shared {
+            model Money { amount: decimal; unit: Unit; }
+            enum Unit { USD, EUR }
+          }
+        `,
+        undefined,
+        `
+          import type { Two, Sub, Rec } from "./index.js";
+          // The arguments bind in declaration order: A = string, B = boolean.
+          const two: Two<string, boolean> = { a: true, b: "x" };
+          const sub: Sub<string> = { b: "base", s: "own" };
+          const rec: Rec<number> = { m: { k: 1 } };
+          void two;
+          void sub;
+          void rec;
+        `,
+      );
+
+      deepStrictEqual(errors, []);
+    },
+  );
+
+  it(
+    "compiles when write bodies share models with responses and each other",
+    { timeout: TYPE_CHECK_TIMEOUT },
+    async () => {
+      const { errors } = await emitAndTypeCheck(`
+        import "@typespec/http";
+        using Http;
+
+        @service(#{ title: "Test API" })
+        namespace TestApi;
+
+        model Widget { @visibility(Lifecycle.Read) id: string; name: string; }
+        model Gadget { @visibility(Lifecycle.Read) id: string; label: string; }
+        model Order { @visibility(Lifecycle.Read) id: string; gadget: Gadget; }
+
+        @route("/x") interface X {
+          @post create(@body body: Widget): Widget;
+          @post @route("orders") order(@body body: Order): void;
+          @post @route("bulk") bulk(@body body: Widget[]): void;
+        }
+      `);
+
+      deepStrictEqual(errors, []);
+    },
+  );
+
+  it(
+    "compiles named, recursive and discriminated unions, record spreads, and renamed request types",
+    { timeout: TYPE_CHECK_TIMEOUT },
+    async () => {
+      const { errors } = await emitAndTypeCheck(
+        `
+          import "@typespec/http";
+          using Http;
+
+          @service(#{ title: "Test API" })
+          namespace TestApi;
+
+          union JsonValue { string, int32, boolean, null, JsonValue[], Record<JsonValue> }
+          union Status { "active", "inactive" }
+          model Cat { meow: boolean; }
+          model Dog { bark: boolean; }
+          @discriminated union Boxed { cat: Cat, dog: Dog }
+          @discriminated(#{ envelope: "none" }) union Flat { cat: Cat, dog: Dog }
+          @discriminator("kind") model Lonely { kind: string; }
+          model Extra { known: string; opt?: boolean; ...Record<int32> }
+          model Widget {
+            @visibility(Lifecycle.Read) id: string;
+            data: JsonValue;
+            status: Status;
+            boxed: Boxed;
+            flat: Flat;
+            lonely: Lonely;
+            extra: Extra;
+          }
+          model WidgetPostRequest { note: string; }
+
+          @route("/w") interface W {
+            @get read(): Widget;
+            @post create(@body body: Widget): void;
+            @get @route("note") note(): WidgetPostRequest;
+          }
+        `,
+        undefined,
+        `
+          import type { JsonValue, Boxed, Flat, Extra, WidgetPostRequest2 } from "./index.js";
+          const json: JsonValue = { a: [1, "two", null, { b: true }] };
+          const boxed: Boxed = { kind: "cat", value: { meow: true } };
+          const flat: Flat = { kind: "dog", bark: true };
+          const extra: Extra = { known: "k", other: 1 };
+          const request: WidgetPostRequest2["status"] = "active";
+          void json;
+          void boxed;
+          void flat;
+          void extra;
+          void request;
+        `,
+      );
+
+      deepStrictEqual(errors, []);
+    },
+  );
+
+  it(
+    "rejects a call that omits a required header",
+    { timeout: TYPE_CHECK_TIMEOUT },
+    async () => {
+      const { errors } = await emitAndTypeCheck(
+        parameterSpec,
+        undefined,
+        `
+          import { WidgetsClient } from "./index.js";
+          declare const client: WidgetsClient;
+          void client.read("w1", { "api-version": "2024" });
+        `,
+      );
+
+      strictEqual(errors.length, 1, errors.join("\n"));
+      ok(errors[0].startsWith("TS2554"), errors[0]);
     },
   );
 });

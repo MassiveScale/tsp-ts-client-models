@@ -28,7 +28,7 @@ Passed to the constructor of every client class.
 interface ClientConfig {
   baseUrl: string; // Required. No trailing slash needed.
   defaultHeaders?: Record<string, string>; // Sent with every request.
-  timeout?: number; // Milliseconds. Uses AbortSignal.timeout().
+  timeout?: number; // Milliseconds, for the whole call including retries.
   retry?: RetryConfig;
 
   // Extensibility — see docs/client-extensibility.md
@@ -36,7 +36,7 @@ interface ClientConfig {
   middleware?: HttpMiddleware[]; // Onion-style layers, outermost first.
   onRequest?: RequestHook; // Before middleware, once per attempt.
   onResponse?: ResponseHook; // After middleware, once per attempt.
-  onError?: ErrorHook; // Once, after retries are exhausted.
+  onError?: ErrorHook; // Once, after retries are exhausted. Not on cancel.
 }
 ```
 
@@ -54,7 +54,12 @@ interface RetryConfig {
 }
 ```
 
-Retries use **exponential backoff**: `baseDelayMs * 2^attempt`. For `429` responses, the `Retry-After` header is honored when present.
+Retries use **exponential backoff**: `baseDelayMs * 2^attempt`. When a retried `429` or `503` carries a `Retry-After` header (in seconds), the client waits that long instead.
+
+- A `retryOn` status is retried for every method. The defaults, `429` and `503`, normally mean the server turned the request away without acting on it. A status you add, such as `500`, gives no such promise: a `POST` may have been saved before the server failed, and retrying it can apply it twice. Only add statuses like that when your API makes mutations safe to replay, for example with idempotency keys.
+- A network failure, where no response arrived, is retried only for idempotent methods: `GET`, `HEAD`, `PUT`, `DELETE` and `OPTIONS`. A `POST` or `PATCH` may already have reached the server, so resending it could apply it twice.
+- A call the caller cancelled, or one that timed out, is never retried. Aborting during a backoff wait ends the wait at once.
+- The body of a response that is retried is discarded, so it does not hold the connection open.
 
 ### `RequestOptions`
 
@@ -66,6 +71,8 @@ interface RequestOptions {
   signal?: AbortSignal; // For manual cancellation.
 }
 ```
+
+Every request sends `Accept: application/json`, or the media type the operation declares for its response when that is not JSON (`text/plain`, `application/octet-stream`). Your own `Accept` header still wins. A `Content-Type` is sent only when the request has a body, so a cross-origin `GET` does not trigger a CORS preflight just for that header. Header names are matched case-insensitively, so a per-request `content-type` replaces the default instead of being sent alongside it.
 
 ### Error classes
 
@@ -103,7 +110,7 @@ const client = new WidgetsClient({
 
 ## Generated client classes
 
-Each TypeSpec interface becomes a class that extends `HttpClient`.
+Each TypeSpec interface becomes a class that extends `HttpClient`. Operations declared directly in a namespace are grouped by that namespace instead: operations in the service namespace itself take the service's name (`namespace PetStore` → `PetStoreClient`), and operations in a sub-namespace take the sub-namespace's name (`namespace PetStore.Pets` → `PetsClient`). When two interfaces or sub-namespaces share a name, both are qualified with their namespace path (`Pets.Ops` and `Stores.Ops` → `PetsOpsClient` and `StoresOpsClient`), so neither overwrites the other.
 
 ```typescript
 // TypeSpec
@@ -126,10 +133,52 @@ export class WidgetsClient extends HttpClient {
 }
 ```
 
-- Path parameters become leading positional arguments.
+- Arguments come in this order: path parameters, `body`, `query`, `headers` (only when the operation declares `@header` parameters), then `options`.
+- Path parameters become leading positional arguments, required ones first. Their values are percent-encoded (`encodeURIComponent`), so an id such as `a/b` stays one path segment. A parameter declared with `allowReserved` (`{+path}`) keeps reserved characters such as `/`. An optional path parameter can be omitted, and its separator is omitted with it.
+- A path parameter whose name is a reserved word, or clashes with `body`, `query`, `headers` or `options`, gets a `Param` suffix (`default` → `defaultParam`). The route still uses the TypeSpec wire name.
 - If a request type was generated for the body model, the body parameter uses that type (e.g. `WidgetPostRequest`). Otherwise the raw model is used.
-- The response type is the TypeScript equivalent of the first 2xx response body. Operations with no body response use `void`.
-- Every method accepts an optional `query` parameter, regardless of HTTP verb — see [Query parameters](#query-parameters).
+- Every other body shape is supported too. See [Request bodies](#request-bodies).
+- The response type is the TypeScript equivalent of the first 2xx response body. Operations with no body response use `void`. A JSON body is parsed, and an empty one (a `201` with no content, for example) resolves to `undefined`. A textual response such as `text/plain` resolves to the raw string, and is typed `string` whatever its TypeSpec type: a `text/plain` `int32` arrives as `"42"`. A `bytes` response with a non-JSON media type resolves to a `Uint8Array`.
+- Every method accepts a `query` parameter, regardless of HTTP verb. See [Query parameters](#query-parameters).
+- When an argument after an optional one is required, the optional one is typed `T | undefined`, and you pass `undefined` to skip it.
+
+### Request bodies
+
+| TypeSpec body                                                        | Generated `body` type               | Sent as                                           |
+| -------------------------------------------------------------------- | ----------------------------------- | ------------------------------------------------- |
+| `@body body: Widget`                                                 | `WidgetPostRequest` or `Widget`     | JSON                                              |
+| Spread or inline (`op create(name: string, size: int32)`)            | `{ name: string; size: number }`    | JSON                                              |
+| `@body items: Widget[]`                                              | `Widget[]`                          | JSON                                              |
+| `@body patch: MergePatchUpdate<Widget>`                              | `WidgetPatchRequest`                | JSON, as `application/merge-patch+json`           |
+| `@body data: string` (or another scalar)                             | `string`                            | As-is, as `text/plain` (TypeSpec's default)       |
+| `@header contentType: "application/octet-stream", @body data: bytes` | `Blob \| ArrayBuffer \| Uint8Array` | As-is, with the declared media type               |
+| `@body file: File`                                                   | `Blob`                              | As-is, with the declared media type               |
+| `@multipartBody body: { … }`                                         | `FormData`                          | As-is; `fetch` sets the multipart boundary itself |
+
+A `Content-Type` you set in `options.headers` decides how the body is serialized, so a JSON media type always gets JSON and any other is sent as-is. A `@delete` operation with a `@body` sends it too.
+
+For a multipart body you build the `FormData` yourself, using the part names from the TypeSpec definition. A `Content-Type` header parameter is never offered as an argument, because the body's declared media type decides it. You can still override it through `options.headers`.
+
+### Header parameters
+
+`@header` parameters become a `headers` argument, keyed by their wire names. It is required when any of them is required:
+
+```typespec
+@get read(@path id: string, @header("x-tenant") tenant: string, @header ifMatch?: string): Widget;
+```
+
+```typescript
+async read(
+  id: string,
+  query: Record<string, unknown> | undefined,
+  headers: { "x-tenant": string; "if-match"?: string },
+  options?: RequestOptions,
+): Promise<Widget>;
+
+await client.read("w1", undefined, { "x-tenant": "contoso" });
+```
+
+A `Date` value is sent as an HTTP-date, an array is joined with commas, and `undefined`/`null` values are skipped. Headers in `options.headers` override the declared ones. Header names are matched case-insensitively.
 
 ### Reserved method names
 
@@ -191,38 +240,6 @@ The same applies inside a generated client module: if a model used as a response
 
 The one case where the **model** import is aliased instead is a model named after a global the client text references — `Promise`, `Record`, `Date`, or `Uint8Array`. Importing `Promise` from `models.ts` would shadow the global that every return type is wrapped in, so the client imports it as `Promise as PromiseModel` and uses that alias in its signatures. The model's exported name is unchanged; only the client module's local binding differs.
 
-### Shadowed globals in `models.ts`
-
-The same clash happens inside `models.ts`, where the type is _declared_ rather than imported — and there it is quieter, because it still compiles. A model or enum named `Date` or `Uint8Array` shadows the global that `utcDateTime` and `bytes` map to, so a sibling model's property would silently be typed as the user's own interface:
-
-```typespec
-model Date { id: string; }
-model Widget { when: utcDateTime; shadow: Date; }
-```
-
-The emitter detects this, reports a `shadowed-global-type` warning, and declares a non-exported alias that recovers the real global:
-
-```typescript
-/** The global `Date`, aliased because a generated type shadows that name. */
-type GlobalDate = InstanceType<typeof globalThis.Date>;
-
-export interface Widget {
-  when: GlobalDate; // the JS Date, as intended
-  shadow: Date; // the user's own model, unchanged
-}
-export interface Date {
-  id: string;
-}
-```
-
-A plain `type GlobalDate = Date` would not work — module-scope declarations are hoisted, so it would resolve to the shadowing interface too. Going through `globalThis` sidesteps the type namespace, and reading `.prototype` off the constructor keeps the alias from depending on any other name: an `InstanceType<…>` form would itself break for a spec that declares `model InstanceType`. The alias is not exported, so it never reaches the package barrel.
-
-Aliasing is name-only, so a generic model keeps its arguments — `Date<string>` becomes `DateModel<string>`, not a bare `DateModel`.
-
-`Record` needs no such handling: TypeSpec rejects a `model Record` declaration outright, since it shadows TypeSpec's own built-in template.
-
-When nothing collides, the barrel stays a plain list of `export *` lines.
-
 ### Client module name collisions
 
 Generated client class names are allocated from one shared pool, so no two land on the same file. A client steps aside — taking a numeric suffix and reporting a `client-module-name-collision` warning — when its preferred name is already taken by:
@@ -237,9 +254,9 @@ The infrastructure path cannot move (every client imports `./ApiClient.js`) and 
 
 ## Query parameters
 
-Every generated client method accepts an optional `query` object, whether or not the TypeSpec operation declares any `@query` parameters, and regardless of HTTP verb (`GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `HEAD` all support it).
+Every generated client method accepts a `query` object, whether or not the TypeSpec operation declares any `@query` parameters, and regardless of HTTP verb (`GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `HEAD` all support it). It is optional unless one of the declared query parameters is required.
 
-If the operation declares `@query` parameters, they keep their specific types and the object also accepts arbitrary additional keys:
+If the operation declares `@query` parameters, they keep their specific types and the object also accepts arbitrary additional keys. Keys are the parameters' wire names, so `@query("api-version") apiVersion: string` is passed as `{ "api-version": "2024-01-01" }`:
 
 ```typespec
 @get list(@query status?: string): Widget[];
@@ -264,7 +281,12 @@ async create(body: WidgetPostRequest, query?: Record<string, unknown>, options?:
 await client.create(newWidget, { dryRun: "true" });
 ```
 
-Values passed in `query` are appended to the URL as a query string (via `URLSearchParams`); `undefined`/`null` values are omitted.
+Values passed in `query` are appended to the URL as a query string (via `URLSearchParams`):
+
+- `undefined` and `null` values are omitted.
+- A `Date` is sent as an ISO 8601 string.
+- An array is joined with commas (`ids=a,b`). For a parameter declared with `@query(#{ explode: true })` it is repeated instead (`tags=a&tags=b`).
+- Any other object is sent as JSON.
 
 ## Instantiation
 
@@ -325,7 +347,7 @@ The method signatures, path/body/query parameters, and `RequestOptions` are iden
 ### Semantics
 
 - **Cold:** the underlying `fetch` fires on `subscribe`, not when the Observable is created. Each subscription triggers its own request; use `shareReplay`/`share` (or Angular's `async` pipe with a single subscription) if you need to share one result across subscribers.
-- **Cancellation:** unsubscribing aborts the in-flight request via `AbortController`. A `RequestOptions.signal` you pass also aborts it, and a configured `timeout` still applies.
+- **Cancellation:** unsubscribing aborts the in-flight request via `AbortController` and stops any pending retry. A `RequestOptions.signal` you pass also aborts it, and a configured `timeout` still applies and rejects with the same `TimeoutError` as the Promise client. Neither unsubscribing nor your own signal calls `onError`.
 - **Errors:** `ApiError` / `RateLimitError` / `ServiceUnavailableError` are delivered via the Observable's error channel, so `catchError` sees the same types as the Promise client. Retry/backoff and timeout behavior are shared with `HttpClient` — `RxHttpClient` reuses the same transport.
 - **Extensibility:** `config.fetch`, `config.middleware`, `client.useMiddleware()`, and the `onRequest`/`onResponse`/`onError` hooks all behave identically, for the same reason. `onError` fires before the error reaches `subscriber.error`, so a `catchError` downstream sees whatever the hook decided to throw.
 
@@ -381,12 +403,16 @@ Or extend `HttpClient` directly to build a fully custom client that still partic
 
 ## Timeout
 
-Set a global timeout (milliseconds) via `ClientConfig.timeout`. Per-request timeout can be applied using a manual `AbortSignal`:
+Set a global timeout (milliseconds) via `ClientConfig.timeout`. It bounds the whole call, retries and backoff waits included, and it applies even when a request passes its own `signal`: whichever fires first wins. A timeout rejects with a `TimeoutError` and is reported to `onError`.
+
+A per-request timeout or cancellation uses an `AbortSignal`:
 
 ```typescript
-const widget = await client.read("abc123", {
+const widget = await client.read("abc123", undefined, {
   signal: AbortSignal.timeout(5_000), // 5 seconds
 });
 ```
+
+A call the caller aborts rejects with the signal's reason (an `AbortError` by default) and is **not** reported to `onError`, since the caller already knows. The same applies to unsubscribing from an Observable client.
 
 `AbortSignal.timeout()` is available in Node.js 17.3+ and all modern browsers.

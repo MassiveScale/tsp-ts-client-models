@@ -34,8 +34,14 @@ export type TemplateOverrides = Partial<Record<TemplateName, string>>;
 export interface PropertyView {
   /** Optional JSDoc text. */
   doc?: string;
-  /** Property name (camelCase). */
+  /** Property name, as declared in TypeSpec. */
   name: string;
+  /**
+   * The JSON name as an object-type key: the `@encodedName` for
+   * `application/json` when there is one, otherwise `name`, and quoted when
+   * it is not a valid identifier (`"x-ms-id"`).
+   */
+  key: string;
   /** Full TypeScript type string, e.g. `"string"`, `"number"`, `"Widget[]"`. */
   type: string;
   /** When true the property is emitted as `name?: type`. */
@@ -52,6 +58,11 @@ export interface InterfaceView {
   genericSuffix: string;
   /** Ordered list of property view models. */
   properties: PropertyView[];
+  /**
+   * Value type of a `[key: string]: …` index signature, for a model that
+   * spreads or extends a `Record`. Absent when the model has none.
+   */
+  indexSignature?: string;
 }
 
 /**
@@ -75,8 +86,18 @@ export interface EnumMemberView {
   doc?: string;
   /** Member name (as declared in TypeSpec). */
   name: string;
-  /** Wire string value written to / read from JSON. */
+  /**
+   * The name as an enum member key: `name` itself when it is a valid
+   * identifier, otherwise quoted (`"x-y"`).
+   */
+  key: string;
+  /** Wire value written to / read from JSON, as a string. */
   memberValue: string;
+  /**
+   * The wire value as a TypeScript literal: a single-quoted, escaped string
+   * (`'it\'s'`) or a bare number (`10`).
+   */
+  valueLiteral: string;
 }
 
 /** View model for a TypeScript `export enum` declaration. */
@@ -227,6 +248,14 @@ export interface Renderer {
 // Handlebars environment
 // ---------------------------------------------------------------------------
 
+/**
+ * Makes doc text safe inside a JSDoc block: a `*` followed by `/` in the text
+ * would end the comment early and turn the rest of the line into code.
+ */
+export function escapeDocText(doc: string): string {
+  return doc.replace(/\*\//g, "*\\/");
+}
+
 function createHandlebarsEnv(): typeof Handlebars {
   const env = Handlebars.create();
 
@@ -235,11 +264,12 @@ function createHandlebarsEnv(): typeof Handlebars {
   env.registerHelper("docLines", (doc: unknown, prefix: unknown) => {
     if (typeof doc !== "string" || !doc) return "";
     const sep = typeof prefix === "string" ? `\n${prefix}` : "\n * ";
-    return doc.split("\n").join(sep);
+    return escapeDocText(doc).split("\n").join(sep);
   });
 
-  env.registerHelper("renderDoc", (doc: unknown, indent: unknown) => {
-    if (typeof doc !== "string" || !doc) return "";
+  env.registerHelper("renderDoc", (rawDoc: unknown, indent: unknown) => {
+    if (typeof rawDoc !== "string" || !rawDoc) return "";
+    const doc = escapeDocText(rawDoc);
     const ind = typeof indent === "string" ? indent : "";
     if (!doc.includes("\n")) return `${ind}/** ${doc} */\n`;
     const lines = [`${ind}/**`];
@@ -260,7 +290,9 @@ function loadTemplate(
   override: string | undefined,
 ): HandlebarsTemplateDelegate {
   const path = override ?? resolve(TEMPLATES_DIR, `${name}.hbs`);
-  const source = readFileSync(path, "utf-8");
+  // Normalize to LF so a template saved (or checked out) with CRLF line endings
+  // cannot leak mixed line endings into the generated files.
+  const source = readFileSync(path, "utf-8").replace(/\r\n?/g, "\n");
   return env.compile(source, { noEscape: true });
 }
 

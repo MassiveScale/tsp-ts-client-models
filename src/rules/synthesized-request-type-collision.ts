@@ -21,7 +21,7 @@ import {
   discriminatedVariantShapesMatch,
   filterPropsForRequest,
   getMergePatchBaseName,
-  hasHiddenProperties,
+  bodyHasHiddenProperties,
   isOpInVersion,
   propsHaveSameKeys,
   requestTypeSuffix,
@@ -90,7 +90,7 @@ function checkVersion(
     }
 
     const visibility = resolveRequestVisibility(program, op.operation, op.verb);
-    if (!hasHiddenProperties(bodyModel, visibility, program)) continue;
+    if (!bodyHasHiddenProperties(bodyModel, visibility, program)) continue;
 
     const suffix = requestTypeSuffix(op.verb);
 

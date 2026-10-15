@@ -6,7 +6,15 @@ import {
   toCalVer,
   deriveNpmVersion,
   resolveRoutePrefix,
+  GENERATED_TYPESCRIPT_RANGE,
 } from "../src/emitter.js";
+
+/** Returns the body of `export interface <name> { … }` from a models file. */
+function interfaceBlock(models: string, name: string): string {
+  const start = models.indexOf(`export interface ${name} {`);
+  ok(start >= 0, `Expected interface ${name}`);
+  return models.slice(start, models.indexOf("\n}", start));
+}
 
 describe("emitter", () => {
   // ─── Basic sanity ────────────────────────────────────────────────────────────
@@ -86,7 +94,7 @@ describe("emitter", () => {
       "Expected path param in function signature",
     );
     ok(
-      content.includes("`/api/widgets/${id}`"),
+      content.includes("`/api/widgets/${encodeURIComponent(String(id))}`"),
       "Expected template literal with path param",
     );
   });
@@ -144,7 +152,9 @@ describe("emitter", () => {
       "Expected both path params",
     );
     ok(
-      content.includes("`/api/stores/${storeId}/items/${itemId}`"),
+      content.includes(
+        "`/api/stores/${encodeURIComponent(String(storeId))}/items/${encodeURIComponent(String(itemId))}`",
+      ),
       "Expected full path template",
     );
   });
@@ -326,8 +336,8 @@ describe("emitter", () => {
     ok(content.includes("i64: number;"), "int64 → number");
     ok(content.includes("f: number;"), "float64 → number");
     ok(content.includes("b: boolean;"), "boolean → boolean");
-    ok(content.includes("dt: Date;"), "utcDateTime → Date");
-    ok(content.includes("by: Uint8Array;"), "bytes → Uint8Array");
+    ok(content.includes("dt: string;"), "utcDateTime → string");
+    ok(content.includes("by: string;"), "bytes → base64 string");
     ok(content.includes("uid: string;"), "@format(uuid) → string");
   });
 
@@ -454,12 +464,18 @@ describe("emitter", () => {
       content.includes("export interface ItemPostRequest"),
       "Expected ItemPostRequest interface",
     );
-    ok(content.includes("name: string;"), "Expected name property");
-    ok(content.includes("count: number;"), "Expected count property");
-    ok(!content.includes("id: string"), "Read-only id should be excluded");
+    const request = interfaceBlock(content, "ItemPostRequest");
+    ok(request.includes("name: string;"), "Expected name property");
+    ok(request.includes("count: number;"), "Expected count property");
+    ok(!request.includes("id: string"), "Read-only id should be excluded");
     ok(
-      !content.includes("createdAt"),
+      !request.includes("createdAt"),
       "Read-only createdAt should be excluded",
+    );
+    // The operation returns Item, so Item itself must be declared too.
+    ok(
+      interfaceBlock(content, "Item").includes("id: string;"),
+      "Expected the response model Item",
     );
   });
 
@@ -494,10 +510,11 @@ describe("emitter", () => {
       content.includes("export interface ItemPatchRequest"),
       "Expected ItemPatchRequest",
     );
-    ok(content.includes("name: string;"), "Expected name");
-    ok(!content.includes("id: string"), "id should be excluded");
+    const request = interfaceBlock(content, "ItemPatchRequest");
+    ok(request.includes("name: string;"), "Expected name");
+    ok(!request.includes("id: string"), "id should be excluded");
     ok(
-      !content.includes("tenantId"),
+      !request.includes("tenantId"),
       "create-only tenantId should be excluded from patch",
     );
   });
@@ -1132,7 +1149,12 @@ describe("emitter", () => {
     strictEqual(pkg.types, "./dist/index.d.ts");
     deepStrictEqual(pkg.files, ["dist"]);
     deepStrictEqual(pkg.scripts, { build: "tsc" });
-    ok(pkg.devDependencies?.typescript, "Expected typescript devDependency");
+    strictEqual(pkg.devDependencies?.typescript, GENERATED_TYPESCRIPT_RANGE);
+    deepStrictEqual(
+      Object.keys(pkg.exports["."]),
+      ["types", "import"],
+      "The types condition must come first so TypeScript resolves it",
+    );
   });
 
   it("emits versioned exports when all-versions is true", async () => {
@@ -1171,6 +1193,7 @@ describe("emitter", () => {
     strictEqual(pkg.exports["./v1.0"].types, "./dist/v1.0/index.d.ts");
     strictEqual(pkg.exports["./v2.0"].import, "./dist/v2.0/index.js");
     strictEqual(pkg.exports["./v2.0"].types, "./dist/v2.0/index.d.ts");
+    deepStrictEqual(Object.keys(pkg.exports["./v1.0"]), ["types", "import"]);
     strictEqual(pkg.main, undefined, "No main for versioned output");
     deepStrictEqual(pkg.files, ["dist"]);
     deepStrictEqual(pkg.scripts, { build: "tsc" });
@@ -1371,13 +1394,19 @@ describe("emitter", () => {
       strictEqual(tryParseSemver("2022-10-15"), undefined));
     it("returns undefined for plain label", () =>
       strictEqual(tryParseSemver("preview"), undefined));
+    it("strips leading zeros, which npm rejects", () =>
+      strictEqual(tryParseSemver("v01.02.03"), "1.2.3"));
+    it("preserves build metadata", () =>
+      strictEqual(tryParseSemver("1.0.0+build.5"), "1.0.0+build.5"));
+    it("rejects a suffix with characters semver does not allow", () =>
+      strictEqual(tryParseSemver("1.0-preview_1"), undefined));
   });
 
   describe("toCalVer", () => {
-    it("formats as YYYY.MM.DD", () =>
-      strictEqual(toCalVer(new Date(2026, 4, 21)), "2026.05.21"));
-    it("zero-pads month and day", () =>
-      strictEqual(toCalVer(new Date(2026, 0, 3)), "2026.01.03"));
+    it("formats as YYYY.M.D", () =>
+      strictEqual(toCalVer(new Date(2026, 10, 21)), "2026.11.21"));
+    it("does not zero-pad month and day, which would be invalid semver", () =>
+      strictEqual(toCalVer(new Date(2026, 0, 3)), "2026.1.3"));
   });
 
   it("uses semver parsed from TypeSpec API version as npm version", async () => {
@@ -1435,7 +1464,7 @@ describe("emitter", () => {
     ok(pkgFile);
     match(
       JSON.parse(results[pkgFile]).version,
-      /^\d{4}\.\d{2}\.\d{2}$/,
+      /^\d{4}\.[1-9]\d?\.[1-9]\d?$/,
       "Expected CalVer fallback",
     );
   });
@@ -1460,7 +1489,7 @@ describe("emitter", () => {
     ok(pkgFile);
     match(
       JSON.parse(results[pkgFile]).version,
-      /^\d{4}\.\d{2}\.\d{2}$/,
+      /^\d{4}\.[1-9]\d?\.[1-9]\d?$/,
       "Expected CalVer for unversioned API",
     );
   });
@@ -1722,7 +1751,9 @@ describe("emitter", () => {
     );
     ok(endpointsFile);
     ok(
-      results[endpointsFile].includes("`/api/v1/widgets/${id}`"),
+      results[endpointsFile].includes(
+        "`/api/v1/widgets/${encodeURIComponent(String(id))}`",
+      ),
       "Expected prefixed path with path param",
     );
   });
@@ -2771,7 +2802,7 @@ describe("emitter", () => {
     );
     ok(
       rx.includes(
-        'import { HttpClient, type RequestOptions } from "./ApiClient.js";',
+        'import { HttpClient, type TransportOptions } from "./ApiClient.js";',
       ),
       "Expected RxHttpClient to reuse the Promise transport from ApiClient.js",
     );
@@ -2945,7 +2976,7 @@ describe("emitter", () => {
     });
 
     it("returns CalVer when no versions and no option", () => {
-      match(deriveNpmVersion(noVersions, {}), /^\d{4}\.\d{2}\.\d{2}$/);
+      match(deriveNpmVersion(noVersions, {}), /^\d{4}\.[1-9]\d?\.[1-9]\d?$/);
     });
   });
 });

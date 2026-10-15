@@ -1,5 +1,5 @@
 import { describe, it } from "node:test";
-import { ok, strictEqual, deepStrictEqual, rejects } from "node:assert";
+import { ok, strictEqual, deepStrictEqual, match, rejects } from "node:assert";
 import * as ts from "typescript";
 import { emit } from "./test-host.js";
 
@@ -88,6 +88,94 @@ function sequence(...responses: Response[]): Transport & { calls: Request[] } {
     return Promise.resolve(next.clone());
   };
   return Object.assign(transport, { calls });
+}
+
+/**
+ * A transport that never answers on its own: it settles only when the
+ * request's signal aborts, rejecting with the signal's reason as `fetch` does.
+ */
+function hanging(): Transport & { calls: Request[] } {
+  const calls: Request[] = [];
+  const transport = (request: Request) => {
+    calls.push(request);
+    return new Promise<Response>((_, reject) => {
+      request.signal.addEventListener(
+        "abort",
+        () => reject(request.signal.reason),
+        { once: true },
+      );
+    });
+  };
+  return Object.assign(transport, { calls });
+}
+
+/** The subset of the generated `RxHttpClient` these tests drive. */
+interface RxHttpClientLike {
+  httpGet$(
+    path: string,
+    options?: Record<string, unknown>,
+  ): {
+    subscribe(observer: {
+      next?: (value: unknown) => void;
+      error?: (error: unknown) => void;
+    }): { unsubscribe(): void };
+  };
+}
+
+/**
+ * A minimal stand-in for rxjs's `Observable`: cold, closes on error or
+ * complete, and runs the teardown on unsubscribe. rxjs is an optional peer of
+ * the generated package and is not installed here.
+ */
+const OBSERVABLE_STUB = `class Observable {
+  constructor(subscribe) { this._subscribe = subscribe; }
+  subscribe(observer) {
+    let closed = false;
+    const teardown = this._subscribe({
+      next: (v) => { if (!closed) observer.next?.(v); },
+      error: (e) => { if (!closed) { closed = true; observer.error?.(e); } },
+      complete: () => { if (!closed) { closed = true; observer.complete?.(); } },
+    });
+    return { unsubscribe() { closed = true; teardown?.(); } };
+  }
+}`;
+
+let cachedRx:
+  | Promise<{
+      RxHttpClient: new (config: Record<string, unknown>) => RxHttpClientLike;
+    }>
+  | undefined;
+
+/**
+ * Emits the Observable flavor, then imports its `ApiClientRx.ts` with the
+ * `ApiClient.js` import pointed at the transpiled infrastructure module and
+ * rxjs replaced by {@link OBSERVABLE_STUB}.
+ */
+function loadRxClient(): NonNullable<typeof cachedRx> {
+  cachedRx ??= (async () => {
+    const results = await emit(MINIMAL_SPEC, { "client-style": "observable" });
+    const source = (suffix: string) => {
+      const key = Object.keys(results).find((k) => k.endsWith(suffix));
+      ok(key, `Expected ${suffix} to be emitted`);
+      return ts.transpileModule(results[key], {
+        compilerOptions: {
+          target: ts.ScriptTarget.ES2022,
+          module: ts.ModuleKind.ESNext,
+          useDefineForClassFields: false,
+        },
+      }).outputText;
+    };
+    const toUrl = (js: string) =>
+      `data:text/javascript;base64,${Buffer.from(js).toString("base64")}`;
+    const rx = source("client/ApiClientRx.ts")
+      .replace(/import \{ Observable \} from "rxjs";/, OBSERVABLE_STUB)
+      .replace(
+        '"./ApiClient.js"',
+        JSON.stringify(toUrl(source("client/ApiClient.ts"))),
+      );
+    return import(toUrl(rx));
+  })();
+  return cachedRx;
 }
 
 /** Config defaults that keep retry-driven tests from sleeping for seconds. */
@@ -213,6 +301,238 @@ describe("generated ApiClient transport", () => {
       await client.request("POST", "/widgets", { body: { name: "New" } });
 
       strictEqual(await transport.calls[0].text(), '{"name":"New"}');
+    });
+  });
+
+  describe("request serialization", () => {
+    /** Sends one request through a recording transport and returns it. */
+    async function send(
+      method: string,
+      options?: Record<string, unknown>,
+      config?: Record<string, unknown>,
+    ): Promise<Request> {
+      const { HttpClient } = await loadApiClient();
+      const transport = sequence(jsonResponse({}));
+      const client = new HttpClient({
+        baseUrl: "https://api.example.com",
+        retry: FAST_RETRY,
+        fetch: transport,
+        ...config,
+      });
+      await client.request(method, "/widgets", options);
+      return transport.calls[0];
+    }
+
+    it("sends no Content-Type on a request without a body", async () => {
+      const request = await send("GET");
+      strictEqual(request.headers.get("Content-Type"), null);
+      strictEqual(request.headers.get("Accept"), "application/json");
+    });
+
+    it("labels a JSON body as application/json", async () => {
+      const request = await send("POST", { body: { a: 1 } });
+      strictEqual(request.headers.get("Content-Type"), "application/json");
+      strictEqual(await request.text(), '{"a":1}');
+    });
+
+    it("serializes a JSON-family media type as JSON", async () => {
+      const request = await send("PATCH", {
+        body: { a: null },
+        contentType: "application/merge-patch+json",
+      });
+      strictEqual(
+        request.headers.get("Content-Type"),
+        "application/merge-patch+json",
+      );
+      strictEqual(await request.text(), '{"a":null}');
+    });
+
+    it("sends a text body as-is with its declared media type", async () => {
+      const request = await send("POST", {
+        body: "hello",
+        contentType: "text/plain",
+      });
+      strictEqual(request.headers.get("Content-Type"), "text/plain");
+      strictEqual(await request.text(), "hello");
+    });
+
+    it("sends a binary body as-is with its declared media type", async () => {
+      const request = await send("PUT", {
+        body: new Uint8Array([1, 2, 3]),
+        contentType: "application/octet-stream",
+      });
+      strictEqual(
+        request.headers.get("Content-Type"),
+        "application/octet-stream",
+      );
+      deepStrictEqual(
+        [...new Uint8Array(await request.arrayBuffer())],
+        [1, 2, 3],
+      );
+    });
+
+    it("lets fetch label a FormData body with its multipart boundary", async () => {
+      const form = new FormData();
+      form.append("name", "w1");
+      const request = await send("POST", { body: form });
+      match(
+        request.headers.get("Content-Type") ?? "",
+        /^multipart\/form-data; boundary=/,
+      );
+      ok((await request.text()).includes("w1"));
+    });
+
+    it("merges header names case-insensitively, later layers winning", async () => {
+      const request = await send(
+        "POST",
+        { body: "x", headers: { "content-type": "text/csv" } },
+        { defaultHeaders: { ACCEPT: "text/plain" } },
+      );
+      strictEqual(request.headers.get("Content-Type"), "text/csv");
+      strictEqual(request.headers.get("Accept"), "text/plain");
+    });
+
+    it("formats header values and skips missing ones", async () => {
+      const when = new Date(Date.UTC(2026, 0, 2, 3, 4, 5));
+      const request = await send("GET", {
+        headers: {
+          "if-modified-since": when,
+          "x-tags": ["a", "b"],
+          "x-count": 3,
+          "x-absent": undefined,
+          "x-null": null,
+        },
+      });
+      strictEqual(
+        request.headers.get("if-modified-since"),
+        "Fri, 02 Jan 2026 03:04:05 GMT",
+      );
+      strictEqual(request.headers.get("x-tags"), "a,b");
+      strictEqual(request.headers.get("x-count"), "3");
+      strictEqual(request.headers.has("x-absent"), false);
+      strictEqual(request.headers.has("x-null"), false);
+    });
+
+    it("asks for the declared response media type", async () => {
+      const request = await send("GET", { accept: "text/plain" });
+      strictEqual(request.headers.get("Accept"), "text/plain");
+    });
+
+    it("lets a caller's Accept header override the declared one", async () => {
+      const request = await send("GET", {
+        accept: "text/plain",
+        headers: { accept: "text/csv" },
+      });
+      strictEqual(request.headers.get("Accept"), "text/csv");
+    });
+
+    it("serializes by an explicit Content-Type header over the declared one", async () => {
+      const request = await send("POST", {
+        body: "hello",
+        contentType: "text/plain",
+        headers: { "Content-Type": "application/json" },
+      });
+      strictEqual(await request.text(), '"hello"');
+    });
+
+    it("sends a body as-is when the header overrides JSON with text", async () => {
+      const request = await send("POST", {
+        body: "hello",
+        headers: { "Content-Type": "text/plain" },
+      });
+      strictEqual(request.headers.get("Content-Type"), "text/plain");
+      strictEqual(await request.text(), "hello");
+    });
+
+    it("formats query values: dates, arrays, objects", async () => {
+      const request = await send("GET", {
+        query: {
+          since: new Date(Date.UTC(2026, 0, 2)),
+          ids: ["a", "b"],
+          filter: { x: 1 },
+        },
+      });
+      const params = new URL(request.url).searchParams;
+      strictEqual(params.get("since"), "2026-01-02T00:00:00.000Z");
+      strictEqual(params.get("ids"), "a,b");
+      strictEqual(params.get("filter"), '{"x":1}');
+    });
+
+    it("repeats an exploded array query parameter", async () => {
+      const request = await send("GET", {
+        query: { tags: ["a", "b"], ids: ["c", "d"] },
+        explode: ["tags"],
+      });
+      const params = new URL(request.url).searchParams;
+      deepStrictEqual(params.getAll("tags"), ["a", "b"]);
+      deepStrictEqual(params.getAll("ids"), ["c,d"]);
+    });
+  });
+
+  describe("success bodies", () => {
+    /** Sends one GET that receives `response` and returns what it resolves to. */
+    async function receive(
+      response: Response,
+      options?: Record<string, unknown>,
+    ): Promise<unknown> {
+      const { HttpClient } = await loadApiClient();
+      const client = new HttpClient({
+        baseUrl: "https://api.example.com",
+        retry: FAST_RETRY,
+        fetch: sequence(response),
+      });
+      return client.request("POST", "/widgets", options);
+    }
+
+    it("resolves an empty 201 to undefined instead of failing to parse", async () => {
+      strictEqual(
+        await receive(new Response(null, { status: 201 })),
+        undefined,
+      );
+    });
+
+    it("resolves an empty 200 to undefined", async () => {
+      strictEqual(await receive(new Response("", { status: 200 })), undefined);
+    });
+
+    it("resolves a whitespace-only JSON body to undefined", async () => {
+      strictEqual(
+        await receive(new Response(" \n", { status: 200 })),
+        undefined,
+      );
+    });
+
+    it("parses a JSON body", async () => {
+      deepStrictEqual(await receive(jsonResponse({ id: "w1" }, 201)), {
+        id: "w1",
+      });
+    });
+
+    it("returns a text body as a string", async () => {
+      strictEqual(
+        await receive(new Response("hello", { status: 200 }), {
+          responseFormat: "text",
+        }),
+        "hello",
+      );
+    });
+
+    it("returns an empty text body as an empty string", async () => {
+      strictEqual(
+        await receive(new Response(null, { status: 200 }), {
+          responseFormat: "text",
+        }),
+        "",
+      );
+    });
+
+    it("returns a binary body as bytes", async () => {
+      const result = await receive(
+        new Response(new Uint8Array([7, 8]), { status: 200 }),
+        { responseFormat: "binary" },
+      );
+      ok(result instanceof Uint8Array);
+      deepStrictEqual([...result], [7, 8]);
     });
   });
 
@@ -601,10 +921,10 @@ describe("generated ApiClient transport", () => {
         },
       });
 
-      // Stringifying this throws, so buildUrl fails before a full URL exists.
+      // Serializing this throws, so buildUrl fails before a full URL exists.
       const hostile = {
-        toString() {
-          throw new TypeError("cannot stringify");
+        toJSON() {
+          throw new TypeError("cannot serialize");
         },
       };
       await rejects(() =>
@@ -915,10 +1235,139 @@ describe("generated ApiClient transport", () => {
         retry: FAST_RETRY,
         fetch: transport,
       });
+      const controller = new AbortController();
 
-      await client.request("GET", "/widgets", { signal: AbortSignal.abort() });
+      await client.request("GET", "/widgets", { signal: controller.signal });
+      controller.abort();
 
       strictEqual(transport.calls[0].signal.aborted, true);
+    });
+
+    it("rejects an already-aborted call without sending it", async () => {
+      const { HttpClient } = await loadApiClient();
+      const transport = sequence(jsonResponse({}));
+      const client = new HttpClient({
+        baseUrl: "https://api.example.com",
+        fetch: transport,
+      });
+
+      await rejects(
+        () =>
+          client.request("GET", "/widgets", { signal: AbortSignal.abort() }),
+        { name: "AbortError" },
+      );
+      strictEqual(transport.calls.length, 0);
+    });
+
+    it("does not retry a request the caller aborted in flight", async () => {
+      const { HttpClient } = await loadApiClient();
+      const transport = hanging();
+      const client = new HttpClient({
+        baseUrl: "https://api.example.com",
+        retry: { maxAttempts: 3, baseDelayMs: 0 },
+        fetch: transport,
+      });
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(), 10);
+
+      await rejects(
+        () => client.request("GET", "/widgets", { signal: controller.signal }),
+        { name: "AbortError" },
+      );
+      strictEqual(transport.calls.length, 1);
+    });
+
+    it("stops waiting out a retry backoff as soon as the caller aborts", async () => {
+      const { HttpClient } = await loadApiClient();
+      const transport = sequence(new Response(null, { status: 503 }));
+      const client = new HttpClient({
+        baseUrl: "https://api.example.com",
+        retry: { maxAttempts: 3, baseDelayMs: 60_000 },
+        fetch: transport,
+      });
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(), 10);
+      const started = Date.now();
+
+      await rejects(
+        () => client.request("GET", "/widgets", { signal: controller.signal }),
+        { name: "AbortError" },
+      );
+      ok(Date.now() - started < 5_000, "the backoff must not be sat out");
+      strictEqual(transport.calls.length, 1);
+    });
+
+    it("applies config.timeout together with a caller's signal", async () => {
+      const { HttpClient } = await loadApiClient();
+      const transport = hanging();
+      const client = new HttpClient({
+        baseUrl: "https://api.example.com",
+        retry: { maxAttempts: 3, baseDelayMs: 0 },
+        timeout: 20,
+        fetch: transport,
+      });
+
+      await rejects(
+        () =>
+          client.request("GET", "/widgets", {
+            signal: new AbortController().signal,
+          }),
+        { name: "TimeoutError" },
+      );
+      strictEqual(transport.calls.length, 1, "a timeout is not retried");
+    });
+
+    it("bounds the whole call, backoff included, by config.timeout", async () => {
+      const { HttpClient } = await loadApiClient();
+      const transport = sequence(new Response(null, { status: 503 }));
+      const client = new HttpClient({
+        baseUrl: "https://api.example.com",
+        retry: { maxAttempts: 3, baseDelayMs: 60_000 },
+        timeout: 20,
+        fetch: transport,
+      });
+      const started = Date.now();
+
+      await rejects(() => client.request("GET", "/widgets"), {
+        name: "TimeoutError",
+      });
+      ok(Date.now() - started < 5_000);
+      strictEqual(transport.calls.length, 1);
+    });
+
+    it("does not call onError when the caller cancels", async () => {
+      const { HttpClient } = await loadApiClient();
+      let reported = 0;
+      const client = new HttpClient({
+        baseUrl: "https://api.example.com",
+        fetch: hanging(),
+        onError: () => {
+          reported++;
+        },
+      });
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(), 10);
+
+      await rejects(() =>
+        client.request("GET", "/widgets", { signal: controller.signal }),
+      );
+      strictEqual(reported, 0);
+    });
+
+    it("calls onError when the call times out", async () => {
+      const { HttpClient } = await loadApiClient();
+      let seen: unknown;
+      const client = new HttpClient({
+        baseUrl: "https://api.example.com",
+        timeout: 10,
+        fetch: hanging(),
+        onError: (error: unknown) => {
+          seen = error;
+        },
+      });
+
+      await rejects(() => client.request("GET", "/widgets"));
+      strictEqual((seen as Error | undefined)?.name, "TimeoutError");
     });
 
     it("applies config.timeout when no signal is supplied", async () => {
@@ -938,6 +1387,268 @@ describe("generated ApiClient transport", () => {
       await client.request("GET", "/widgets");
 
       ok(abortedDuringFlight, "the timeout signal fires while in flight");
+    });
+  });
+
+  describe("retry policy", () => {
+    /** A transport that fails at the network level every time. */
+    function failing(): Transport & { calls: Request[] } {
+      const calls: Request[] = [];
+      return Object.assign(
+        (request: Request) => {
+          calls.push(request);
+          return Promise.reject(new TypeError("fetch failed"));
+        },
+        { calls },
+      );
+    }
+
+    for (const method of ["POST", "PATCH"]) {
+      it(`does not resend a ${method} after a network failure`, async () => {
+        const { HttpClient } = await loadApiClient();
+        const transport = failing();
+        const client = new HttpClient({
+          baseUrl: "https://api.example.com",
+          retry: { maxAttempts: 3, baseDelayMs: 0 },
+          fetch: transport,
+        });
+
+        await rejects(
+          () => client.request(method, "/widgets", { body: {} }),
+          /fetch failed/,
+        );
+        strictEqual(transport.calls.length, 1);
+      });
+    }
+
+    for (const method of ["GET", "HEAD", "PUT", "DELETE", "OPTIONS"]) {
+      it(`resends an idempotent ${method} after a network failure`, async () => {
+        const { HttpClient } = await loadApiClient();
+        const transport = failing();
+        const client = new HttpClient({
+          baseUrl: "https://api.example.com",
+          retry: { maxAttempts: 3, baseDelayMs: 0 },
+          fetch: transport,
+        });
+
+        await rejects(() => client.request(method, "/widgets"), /fetch failed/);
+        strictEqual(transport.calls.length, 3);
+      });
+    }
+
+    it("matches the method case-insensitively", async () => {
+      const { HttpClient } = await loadApiClient();
+      const transport = failing();
+      const client = new HttpClient({
+        baseUrl: "https://api.example.com",
+        retry: { maxAttempts: 2, baseDelayMs: 0 },
+        fetch: transport,
+      });
+
+      await rejects(() => client.request("get", "/widgets"));
+      strictEqual(transport.calls.length, 2);
+    });
+
+    it("still retries a POST on a retryOn status", async () => {
+      const { HttpClient } = await loadApiClient();
+      const transport = sequence(
+        new Response(null, { status: 503 }),
+        jsonResponse({ id: "w1" }, 201),
+      );
+      const client = new HttpClient({
+        baseUrl: "https://api.example.com",
+        retry: { maxAttempts: 2, baseDelayMs: 0 },
+        fetch: transport,
+      });
+
+      deepStrictEqual(await client.request("POST", "/widgets", { body: {} }), {
+        id: "w1",
+      });
+      strictEqual(transport.calls.length, 2);
+    });
+
+    for (const status of [429, 503]) {
+      it(`waits for Retry-After on a ${status} instead of the backoff`, async () => {
+        const { HttpClient } = await loadApiClient();
+        const transport = sequence(
+          new Response(null, { status, headers: { "Retry-After": "0" } }),
+          jsonResponse({ ok: true }),
+        );
+        const client = new HttpClient({
+          baseUrl: "https://api.example.com",
+          // The backoff alone would take a minute; Retry-After says now.
+          retry: { maxAttempts: 2, baseDelayMs: 60_000 },
+          fetch: transport,
+        });
+        const started = Date.now();
+
+        deepStrictEqual(await client.request("GET", "/widgets"), { ok: true });
+        ok(Date.now() - started < 5_000, "Retry-After replaces the backoff");
+      });
+    }
+
+    it("backs off exponentially when there is no Retry-After", async () => {
+      const { HttpClient } = await loadApiClient();
+      const times: number[] = [];
+      const client = new HttpClient({
+        baseUrl: "https://api.example.com",
+        retry: { maxAttempts: 3, baseDelayMs: 20 },
+        fetch: () => {
+          times.push(Date.now());
+          return Promise.resolve(new Response(null, { status: 503 }));
+        },
+      });
+
+      await rejects(() => client.request("GET", "/widgets"));
+      strictEqual(times.length, 3);
+      ok(times[1] - times[0] >= 15, "first retry waits about baseDelayMs");
+      ok(times[2] - times[1] >= 35, "second retry waits about 2 x baseDelayMs");
+    });
+
+    it("discards the body of a response it retries", async () => {
+      const { HttpClient } = await loadApiClient();
+      let cancelled = false;
+      const stream = new ReadableStream({
+        cancel() {
+          cancelled = true;
+        },
+      });
+      let call = 0;
+      const client = new HttpClient({
+        baseUrl: "https://api.example.com",
+        retry: { maxAttempts: 2, baseDelayMs: 0 },
+        fetch: () =>
+          Promise.resolve(
+            call++ === 0
+              ? new Response(stream, { status: 503 })
+              : jsonResponse({}),
+          ),
+      });
+
+      await client.request("GET", "/widgets");
+      ok(cancelled, "the retried response's body must be cancelled");
+    });
+
+    it("does not wait for a body cancellation that never settles", async () => {
+      const { HttpClient } = await loadApiClient();
+      // Cancelling a tee'd branch can stay pending while its sibling is held.
+      const stuck = new ReadableStream({
+        cancel: () => new Promise<void>(() => undefined),
+      });
+      let call = 0;
+      const client = new HttpClient({
+        baseUrl: "https://api.example.com",
+        retry: { maxAttempts: 2, baseDelayMs: 0 },
+        timeout: 2_000,
+        fetch: () =>
+          Promise.resolve(
+            call++ === 0
+              ? new Response(stuck, { status: 503 })
+              : jsonResponse({ ok: true }),
+          ),
+      });
+
+      deepStrictEqual(await client.request("GET", "/widgets"), { ok: true });
+    });
+
+    it("sends a DELETE body", async () => {
+      const { HttpClient } = await loadApiClient();
+      const transport = sequence(new Response(null, { status: 204 }));
+      const client = new HttpClient({
+        baseUrl: "https://api.example.com",
+        fetch: transport,
+      });
+
+      await client.request("DELETE", "/widgets", { body: ["a", "b"] });
+      strictEqual(await transport.calls[0].text(), '["a","b"]');
+    });
+
+    it("still sends once when maxAttempts is 0", async () => {
+      const { HttpClient } = await loadApiClient();
+      const transport = sequence(jsonResponse({ ok: true }));
+      const client = new HttpClient({
+        baseUrl: "https://api.example.com",
+        retry: { maxAttempts: 0 },
+        fetch: transport,
+      });
+
+      deepStrictEqual(await client.request("GET", "/widgets"), { ok: true });
+      strictEqual(transport.calls.length, 1);
+    });
+  });
+
+  describe("Observable flavor", () => {
+    it("stops retrying and skips onError once unsubscribed", async () => {
+      const { RxHttpClient } = await loadRxClient();
+      const transport = sequence(new Response(null, { status: 503 }));
+      let reported = 0;
+      const client = new RxHttpClient({
+        baseUrl: "https://api.example.com",
+        retry: { maxAttempts: 3, baseDelayMs: 50 },
+        fetch: transport,
+        onError: () => {
+          reported++;
+        },
+      });
+
+      const subscription = client.httpGet$("/widgets").subscribe({});
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      subscription.unsubscribe();
+      await new Promise((resolve) => setTimeout(resolve, 200));
+
+      strictEqual(transport.calls.length, 1, "no retry after unsubscribe");
+      strictEqual(reported, 0, "onError is not called for unsubscribe");
+    });
+
+    it("times out with the same error as the Promise flavor", async () => {
+      const { RxHttpClient } = await loadRxClient();
+      const client = new RxHttpClient({
+        baseUrl: "https://api.example.com",
+        timeout: 10,
+        fetch: hanging(),
+      });
+
+      const error = await new Promise<unknown>((resolve) => {
+        client.httpGet$("/widgets").subscribe({ error: resolve });
+      });
+      strictEqual((error as Error).name, "TimeoutError");
+    });
+
+    it("aborts when the outer signal aborts", async () => {
+      const { RxHttpClient } = await loadRxClient();
+      const transport = hanging();
+      const client = new RxHttpClient({
+        baseUrl: "https://api.example.com",
+        fetch: transport,
+      });
+      const controller = new AbortController();
+
+      const error = new Promise<unknown>((resolve) => {
+        client
+          .httpGet$("/widgets", { signal: controller.signal })
+          .subscribe({ error: resolve });
+      });
+      controller.abort();
+
+      strictEqual(((await error) as Error).name, "AbortError");
+      strictEqual(transport.calls.length, 1);
+    });
+
+    it("never sends when the outer signal is already aborted", async () => {
+      const { RxHttpClient } = await loadRxClient();
+      const transport = hanging();
+      const client = new RxHttpClient({
+        baseUrl: "https://api.example.com",
+        fetch: transport,
+      });
+
+      const error = await new Promise<unknown>((resolve) => {
+        client
+          .httpGet$("/widgets", { signal: AbortSignal.abort() })
+          .subscribe({ error: resolve });
+      });
+      strictEqual((error as Error).name, "AbortError");
+      strictEqual(transport.calls.length, 0);
     });
   });
 });

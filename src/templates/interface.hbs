@@ -1,6 +1,10 @@
 {{{renderDoc doc ""}}}export interface {{interfaceName}}{{genericSuffix}} {
 {{#each properties}}
 
-{{{renderDoc doc "  "}}}  {{name}}{{#if optional}}?{{/if}}: {{type}};
+{{{renderDoc doc "  "}}}  {{key}}{{#if optional}}?{{/if}}: {{type}};
 {{/each}}
+{{#if indexSignature}}
+
+  [key: string]: {{indexSignature}};
+{{/if}}
 }

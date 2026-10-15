@@ -151,16 +151,29 @@ export const $lib = createTypeSpecLibrary({
         default: paramMessage`The generated client for this interface would be written to "client/${"preferred"}.ts", but that name is already taken — by the emitter's client infrastructure, by another generated client, or by a declared type of the same name. It was emitted as "${"resolved"}" instead. Rename the interface, or the type it collides with, to keep the name you intended.`,
       },
     },
-    "shadowed-global-type": {
-      severity: "warning",
-      messages: {
-        default: paramMessage`A generated type is named "${"name"}", which shadows the global type of that name inside models.ts. Properties that map to the global (e.g. \`utcDateTime\` → \`Date\`, \`bytes\` → \`Uint8Array\`) now reference "${"alias"}" so they keep their intended type. Rename the TypeSpec declaration to avoid the alias.`,
-      },
-    },
     "generated-export-name-collision": {
       severity: "warning",
       messages: {
         default: paramMessage`"${"name"}" is exported by more than one generated module. The copy in "${"module"}" is re-exported from the package root as "${"alias"}" so the barrel stays unambiguous. Rename the colliding TypeSpec declaration to avoid the alias.`,
+      },
+    },
+    "duplicate-type-name": {
+      severity: "error",
+      messages: {
+        default: paramMessage`Two different types are named "${"name"}": one in namespace "${"kept"}" and one in "${"other"}". Every generated type lives in one models.ts, so only the one in "${"kept"}" is emitted, and references to the other resolve to it. Rename one of them.`,
+      },
+    },
+    "request-type-name-collision": {
+      severity: "warning",
+      messages: {
+        default: paramMessage`The request type synthesized for this operation would be named "${"name"}", but a declared type already has that name. It was emitted as "${"renamed"}" instead. Rename the declared type to keep the generated name.`,
+      },
+    },
+    "multiple-services": {
+      severity: "warning",
+      messages: {
+        default: paramMessage`This project declares ${"count"} HTTP services. Each is emitted to its own subfolder (${"folders"}) as a separate package named after its namespace.`,
+        packageNameIgnored: paramMessage`This project declares ${"count"} HTTP services. Each is emitted to its own subfolder (${"folders"}) as a separate package named after its namespace. The "npm-package-name" option is ignored, because one name cannot be given to several packages.`,
       },
     },
     "reserved-client-method-name": {
