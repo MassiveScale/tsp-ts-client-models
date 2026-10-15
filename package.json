@@ -66,7 +66,6 @@
     "typescript-eslint": "^8.60.1"
   },
   "scripts": {
-    "prepare": "tsc && node scripts/copy-templates.mjs",
     "build": "tsc && node scripts/copy-templates.mjs",
     "watch": "tsc --watch",
     "test": "node --test \"dist/test/**/*.test.js\"",
@@ -75,7 +74,8 @@
     "format": "prettier .  --write",
     "format:check": "prettier --check .",
     "sweep": "node scripts/name-collision-sweep.mjs",
-    "prepublishOnly": "npm run lint && npm run build && npm test"
+    "prepublishOnly": "npm run lint && npm run build && npm test",
+    "prepack": "npm run build"
   },
   "packageManager": "npm@11.14.1+sha512.6a8a4d67478497a2dbc6815cad72e64c43f33413717e242756047d466241ab39bee61e691683a64658e94496ec5f1a1c05e4a5ec62dcc773280dfd949443a367"
 }
