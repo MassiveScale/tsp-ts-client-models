@@ -27,6 +27,7 @@ import {
   isVoidType,
   isNeverType,
   getNamespaceFullName,
+  resolveEncodedName,
   resolvePath,
   isService,
   NoTarget,
@@ -1502,7 +1503,7 @@ function buildPropertyViews(
     result.push({
       doc: doc ?? undefined,
       name: prop.name,
-      key: formatPropertyKey(prop.name),
+      key: formatPropertyKey(jsonPropertyName(program, prop)),
       type: tsType,
       optional: prop.optional,
     });
@@ -1528,6 +1529,15 @@ function buildEnumView(e: Enum, program: Program): EnumView {
     });
   }
   return { doc: doc ?? undefined, enumName: e.name, members };
+}
+
+/**
+ * The property's name in JSON: its `@encodedName("application/json", …)`
+ * when it has one, otherwise its declared name. The client sends and receives
+ * plain objects, so the TypeScript key must be the name on the wire.
+ */
+function jsonPropertyName(program: Program, prop: ModelProperty): string {
+  return resolveEncodedName(program, prop, "application/json");
 }
 
 /** Renders a string as a single-quoted TypeScript literal, escaping as needed. */
@@ -3492,7 +3502,8 @@ function renderInlineModel(
     if (isMetadata(program, prop)) continue;
     const optional = prop.optional ? "?" : "";
     const type = mapTsType(prop.type, program, models, enums, renameMap);
-    fields.push(`${formatPropertyKey(prop.name)}${optional}: ${type}`);
+    const key = formatPropertyKey(jsonPropertyName(program, prop));
+    fields.push(`${key}${optional}: ${type}`);
   }
   if (m.indexer) {
     const value = mapTsType(m.indexer.value, program, models, enums, renameMap);

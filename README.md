@@ -94,17 +94,17 @@ Each template receives the corresponding view model as its Handlebars context.
 
 **`interface`** — `InterfaceView`
 
-| Field                   | Type                  | Description                                    |
-| ----------------------- | --------------------- | ---------------------------------------------- |
-| `doc`                   | `string \| undefined` | JSDoc text from `@doc`.                        |
-| `interfaceName`         | `string`              | PascalCase interface name.                     |
-| `genericSuffix`         | `string`              | Generic parameter string, e.g. `<T>`, or `""`. |
-| `properties[]`          | `PropertyView[]`      | Ordered list of properties.                    |
-| `properties[].doc`      | `string \| undefined` | Per-property `@doc` text.                      |
-| `properties[].name`     | `string`              | Property name, as declared.                    |
-| `properties[].key`      | `string`              | Name ready to use as a key: quoted if needed.  |
-| `properties[].type`     | `string`              | TypeScript type string.                        |
-| `properties[].optional` | `boolean`             | When `true`, emit `name?`.                     |
+| Field                   | Type                  | Description                                                   |
+| ----------------------- | --------------------- | ------------------------------------------------------------- |
+| `doc`                   | `string \| undefined` | JSDoc text from `@doc`.                                       |
+| `interfaceName`         | `string`              | PascalCase interface name.                                    |
+| `genericSuffix`         | `string`              | Generic parameter string, e.g. `<T>`, or `""`.                |
+| `properties[]`          | `PropertyView[]`      | Ordered list of properties.                                   |
+| `properties[].doc`      | `string \| undefined` | Per-property `@doc` text.                                     |
+| `properties[].name`     | `string`              | Property name, as declared.                                   |
+| `properties[].key`      | `string`              | JSON name (`@encodedName` if set) as a key, quoted if needed. |
+| `properties[].type`     | `string`              | TypeScript type string.                                       |
+| `properties[].optional` | `boolean`             | When `true`, emit `name?`.                                    |
 
 **`union`** — `UnionView`
 

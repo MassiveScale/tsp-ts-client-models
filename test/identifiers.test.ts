@@ -67,6 +67,33 @@ describe("property names", () => {
     ok(models.includes("plain: string;"));
   });
 
+  it("uses the JSON encoded name as the key", async () => {
+    const models = await emitModels(`
+      model Widget {
+        @encodedName("application/json", "created_at") createdAt: string;
+        @encodedName("application/json", "x-trace") trace?: string;
+        @encodedName("application/xml", "Plain") plain: string;
+      }
+    `);
+    ok(models.includes("created_at: string;"), models);
+    ok(models.includes(`"x-trace"?: string;`));
+    ok(models.includes("plain: string;"), "Only the JSON name applies");
+  });
+
+  it("uses the JSON encoded name in an inline body", async () => {
+    const out = await emit(`
+      import "@typespec/http";
+      using Http;
+      @service(#{ title: "Test API" }) namespace TestApi;
+      @route("/widgets") interface Widgets {
+        @post create(@encodedName("application/json", "display_name") displayName: string): void;
+      }
+    `);
+    ok(
+      out["client/WidgetsClient.ts"].includes("body: { display_name: string }"),
+    );
+  });
+
   it("quotes property names in synthesized request types", async () => {
     const out = await emit(`
       import "@typespec/http";

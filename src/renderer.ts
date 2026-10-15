@@ -37,8 +37,9 @@ export interface PropertyView {
   /** Property name, as declared in TypeSpec. */
   name: string;
   /**
-   * The name as an object-type key: `name` itself when it is a valid
-   * identifier, otherwise quoted (`"x-ms-id"`).
+   * The JSON name as an object-type key: the `@encodedName` for
+   * `application/json` when there is one, otherwise `name`, and quoted when
+   * it is not a valid identifier (`"x-ms-id"`).
    */
   key: string;
   /** Full TypeScript type string, e.g. `"string"`, `"number"`, `"Widget[]"`. */
