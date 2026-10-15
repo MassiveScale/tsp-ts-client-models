@@ -915,6 +915,51 @@ describe("generated package compiles", () => {
   }
 
   it(
+    "compiles enums and properties whose names are not identifiers",
+    { timeout: TYPE_CHECK_TIMEOUT },
+    async () => {
+      const { errors } = await emitAndTypeCheck(
+        `
+          import "@typespec/http";
+          using Http;
+
+          @service(#{ title: "Test API" })
+          namespace TestApi;
+
+          @doc("Closes early */ unless escaped")
+          enum Kind { \`x-y\`: "x-y", Its: "it's", \`1st\`: "first" }
+          enum Priority { Low: 1, High: 10 }
+          model Widget {
+            \`x-ms-id\`: string;
+            \`1abc\`?: int32;
+            kind: Kind;
+            priority: Priority;
+            fixed: Priority.High;
+          }
+
+          @route("/widgets")
+          interface Widgets { @get list(): Widget[]; }
+        `,
+        undefined,
+        `
+          import { Kind, Priority, type Widget } from "./index.js";
+          const widget: Widget = {
+            "x-ms-id": "1",
+            kind: Kind["x-y"],
+            priority: Priority.Low,
+            fixed: 10,
+          };
+          const high: 10 = Priority.High;
+          void widget;
+          void high;
+        `,
+      );
+
+      deepStrictEqual(errors, []);
+    },
+  );
+
+  it(
     "rejects a call that omits a required header",
     { timeout: TYPE_CHECK_TIMEOUT },
     async () => {

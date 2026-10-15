@@ -81,14 +81,16 @@ Each template receives the corresponding view model as its Handlebars context.
 
 **`enum`** — `EnumView`
 
-| Field                   | Type                  | Description              |
-| ----------------------- | --------------------- | ------------------------ |
-| `doc`                   | `string \| undefined` | JSDoc text from `@doc`.  |
-| `enumName`              | `string`              | Enum name.               |
-| `members[]`             | `EnumMemberView[]`    | Ordered list of members. |
-| `members[].doc`         | `string \| undefined` | Per-member `@doc` text.  |
-| `members[].name`        | `string`              | Member name.             |
-| `members[].memberValue` | `string`              | Wire string value.       |
+| Field                    | Type                  | Description                                                                                             |
+| ------------------------ | --------------------- | ------------------------------------------------------------------------------------------------------- |
+| `doc`                    | `string \| undefined` | JSDoc text from `@doc`.                                                                                 |
+| `enumName`               | `string`              | Enum name.                                                                                              |
+| `members[]`              | `EnumMemberView[]`    | Ordered list of members.                                                                                |
+| `members[].doc`          | `string \| undefined` | Per-member `@doc` text.                                                                                 |
+| `members[].name`         | `string`              | Member name, as declared.                                                                               |
+| `members[].key`          | `string`              | Member name ready to use as an enum key: quoted when it is not a valid identifier (`"x-y"`).            |
+| `members[].memberValue`  | `string`              | Wire value, as a string.                                                                                |
+| `members[].valueLiteral` | `string`              | Wire value as a TypeScript literal: an escaped, single-quoted string (`'red'`) or a bare number (`10`). |
 
 **`interface`** — `InterfaceView`
 
@@ -99,7 +101,8 @@ Each template receives the corresponding view model as its Handlebars context.
 | `genericSuffix`         | `string`              | Generic parameter string, e.g. `<T>`, or `""`. |
 | `properties[]`          | `PropertyView[]`      | Ordered list of properties.                    |
 | `properties[].doc`      | `string \| undefined` | Per-property `@doc` text.                      |
-| `properties[].name`     | `string`              | Property name.                                 |
+| `properties[].name`     | `string`              | Property name, as declared.                    |
+| `properties[].key`      | `string`              | Name ready to use as a key: quoted if needed.  |
 | `properties[].type`     | `string`              | TypeScript type string.                        |
 | `properties[].optional` | `boolean`             | When `true`, emit `name?`.                     |
 

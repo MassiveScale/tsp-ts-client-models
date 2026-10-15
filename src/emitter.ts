@@ -1461,6 +1461,7 @@ function buildPropertyViews(
     result.push({
       doc: doc ?? undefined,
       name: prop.name,
+      key: formatPropertyKey(prop.name),
       type: tsType,
       optional: prop.optional,
     });
@@ -1473,15 +1474,31 @@ function buildEnumView(e: Enum, program: Program): EnumView {
   const members: EnumMemberView[] = [];
   for (const [, member] of e.members) {
     const memberDoc = getDoc(program, member);
-    const stringValue =
-      typeof member.value === "string" ? member.value : member.name;
+    // A member with no explicit value is serialized as its name, so a
+    // numeric enum is only one whose values are actually numbers.
+    const value = member.value ?? member.name;
     members.push({
       doc: memberDoc ?? undefined,
       name: member.name,
-      memberValue: stringValue,
+      key: formatPropertyKey(member.name),
+      memberValue: String(value),
+      valueLiteral:
+        typeof value === "number" ? String(value) : singleQuoted(value),
     });
   }
   return { doc: doc ?? undefined, enumName: e.name, members };
+}
+
+/** Renders a string as a single-quoted TypeScript literal, escaping as needed. */
+function singleQuoted(value: string): string {
+  const escaped = value
+    .replace(/\\/g, "\\\\")
+    .replace(/'/g, "\\'")
+    .replace(/\n/g, "\\n")
+    .replace(/\r/g, "\\r")
+    .replace(/\u2028/g, "\\u2028")
+    .replace(/\u2029/g, "\\u2029");
+  return `'${escaped}'`;
 }
 
 // ─── endpoints/*.ts generation ────────────────────────────────────────────────
