@@ -840,6 +840,98 @@ describe("generated package compiles", () => {
       deepStrictEqual(errors, []);
     },
   );
+
+  const parameterSpec = `
+    import "@typespec/http";
+    using Http;
+
+    @service(#{ title: "Test API" })
+    namespace TestApi;
+
+    model Widget { id: string; name: string; }
+
+    @route("/widgets")
+    interface Widgets {
+      @post createInline(name: string, size?: int32): Widget;
+      @post @route("bulk") createMany(@body items: Widget[]): void;
+      @get @route("{widget-id}") read(
+        @path("widget-id") widgetId: string,
+        @header("x-tenant") tenant: string,
+        @query("api-version") apiVersion: string,
+        @query(#{ explode: true }) tags?: string[],
+      ): Widget;
+      @put @route("{id}/raw") upload(
+        @path id: string,
+        @header contentType: "application/octet-stream",
+        @body data: bytes,
+      ): void;
+      @post @route("text") text(@header contentType: "text/plain", @body data: string): void;
+      @post @route("form") form(
+        @header contentType: "multipart/form-data",
+        @multipartBody body: { name: HttpPart<string> },
+      ): void;
+      @get @route("{id}") optional(@path id: string, @path tail?: string): void;
+      @get @route("reserved/{default}") reserved(@path("default") \`default\`: string): void;
+      @patch @route("{id}") update(
+        @path id: string,
+        @header ifMatch?: string,
+        @body patch: MergePatchUpdate<Widget>,
+      ): Widget;
+    }
+  `;
+
+  /** Calls every generated method the way a consumer would. */
+  const parameterProbe = `
+    import { WidgetsClient, WidgetsEndpoints } from "./index.js";
+    declare const client: WidgetsClient;
+    void client.createInline({ name: "w" });
+    void client.createMany([{ id: "1", name: "w" }]);
+    void client.read("w1", { "api-version": "2024", tags: ["a"] }, { "x-tenant": "t" });
+    void client.upload("w1", new Uint8Array([1]));
+    void client.text("hello");
+    void client.form(new FormData());
+    void client.optional("w1");
+    void client.optional("w1", "tail");
+    void client.reserved("d");
+    void client.update("w1", { name: "x" }, undefined, { "if-match": "etag" });
+    const path: string = WidgetsEndpoints.read("w1");
+    void path;
+  `;
+
+  for (const clientStyle of ["promise", "both"] as const) {
+    it(
+      `compiles every parameter and body shape (${clientStyle})`,
+      { timeout: TYPE_CHECK_TIMEOUT },
+      async () => {
+        const { errors } = await emitAndTypeCheck(
+          parameterSpec,
+          { "client-style": clientStyle },
+          parameterProbe,
+        );
+
+        deepStrictEqual(errors, []);
+      },
+    );
+  }
+
+  it(
+    "rejects a call that omits a required header",
+    { timeout: TYPE_CHECK_TIMEOUT },
+    async () => {
+      const { errors } = await emitAndTypeCheck(
+        parameterSpec,
+        undefined,
+        `
+          import { WidgetsClient } from "./index.js";
+          declare const client: WidgetsClient;
+          void client.read("w1", { "api-version": "2024" });
+        `,
+      );
+
+      strictEqual(errors.length, 1, errors.join("\n"));
+      ok(errors[0].startsWith("TS2554"), errors[0]);
+    },
+  );
 });
 
 describe("client infrastructure export metadata", () => {

@@ -87,7 +87,7 @@ describe("emitter", () => {
       "Expected path param in function signature",
     );
     ok(
-      content.includes("`/api/widgets/${id}`"),
+      content.includes("`/api/widgets/${encodeURIComponent(String(id))}`"),
       "Expected template literal with path param",
     );
   });
@@ -145,7 +145,9 @@ describe("emitter", () => {
       "Expected both path params",
     );
     ok(
-      content.includes("`/api/stores/${storeId}/items/${itemId}`"),
+      content.includes(
+        "`/api/stores/${encodeURIComponent(String(storeId))}/items/${encodeURIComponent(String(itemId))}`",
+      ),
       "Expected full path template",
     );
   });
@@ -1735,7 +1737,9 @@ describe("emitter", () => {
     );
     ok(endpointsFile);
     ok(
-      results[endpointsFile].includes("`/api/v1/widgets/${id}`"),
+      results[endpointsFile].includes(
+        "`/api/v1/widgets/${encodeURIComponent(String(id))}`",
+      ),
       "Expected prefixed path with path param",
     );
   });
@@ -2784,7 +2788,7 @@ describe("emitter", () => {
     );
     ok(
       rx.includes(
-        'import { HttpClient, type RequestOptions } from "./ApiClient.js";',
+        'import { HttpClient, type TransportOptions } from "./ApiClient.js";',
       ),
       "Expected RxHttpClient to reuse the Promise transport from ApiClient.js",
     );

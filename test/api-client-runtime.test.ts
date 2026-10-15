@@ -1,5 +1,5 @@
 import { describe, it } from "node:test";
-import { ok, strictEqual, deepStrictEqual, rejects } from "node:assert";
+import { ok, strictEqual, deepStrictEqual, match, rejects } from "node:assert";
 import * as ts from "typescript";
 import { emit } from "./test-host.js";
 
@@ -213,6 +213,140 @@ describe("generated ApiClient transport", () => {
       await client.request("POST", "/widgets", { body: { name: "New" } });
 
       strictEqual(await transport.calls[0].text(), '{"name":"New"}');
+    });
+  });
+
+  describe("request serialization", () => {
+    /** Sends one request through a recording transport and returns it. */
+    async function send(
+      method: string,
+      options?: Record<string, unknown>,
+      config?: Record<string, unknown>,
+    ): Promise<Request> {
+      const { HttpClient } = await loadApiClient();
+      const transport = sequence(jsonResponse({}));
+      const client = new HttpClient({
+        baseUrl: "https://api.example.com",
+        retry: FAST_RETRY,
+        fetch: transport,
+        ...config,
+      });
+      await client.request(method, "/widgets", options);
+      return transport.calls[0];
+    }
+
+    it("sends no Content-Type on a request without a body", async () => {
+      const request = await send("GET");
+      strictEqual(request.headers.get("Content-Type"), null);
+      strictEqual(request.headers.get("Accept"), "application/json");
+    });
+
+    it("labels a JSON body as application/json", async () => {
+      const request = await send("POST", { body: { a: 1 } });
+      strictEqual(request.headers.get("Content-Type"), "application/json");
+      strictEqual(await request.text(), '{"a":1}');
+    });
+
+    it("serializes a JSON-family media type as JSON", async () => {
+      const request = await send("PATCH", {
+        body: { a: null },
+        contentType: "application/merge-patch+json",
+      });
+      strictEqual(
+        request.headers.get("Content-Type"),
+        "application/merge-patch+json",
+      );
+      strictEqual(await request.text(), '{"a":null}');
+    });
+
+    it("sends a text body as-is with its declared media type", async () => {
+      const request = await send("POST", {
+        body: "hello",
+        contentType: "text/plain",
+      });
+      strictEqual(request.headers.get("Content-Type"), "text/plain");
+      strictEqual(await request.text(), "hello");
+    });
+
+    it("sends a binary body as-is with its declared media type", async () => {
+      const request = await send("PUT", {
+        body: new Uint8Array([1, 2, 3]),
+        contentType: "application/octet-stream",
+      });
+      strictEqual(
+        request.headers.get("Content-Type"),
+        "application/octet-stream",
+      );
+      deepStrictEqual(
+        [...new Uint8Array(await request.arrayBuffer())],
+        [1, 2, 3],
+      );
+    });
+
+    it("lets fetch label a FormData body with its multipart boundary", async () => {
+      const form = new FormData();
+      form.append("name", "w1");
+      const request = await send("POST", { body: form });
+      match(
+        request.headers.get("Content-Type") ?? "",
+        /^multipart\/form-data; boundary=/,
+      );
+      ok((await request.text()).includes("w1"));
+    });
+
+    it("merges header names case-insensitively, later layers winning", async () => {
+      const request = await send(
+        "POST",
+        { body: "x", headers: { "content-type": "text/csv" } },
+        { defaultHeaders: { ACCEPT: "text/plain" } },
+      );
+      strictEqual(request.headers.get("Content-Type"), "text/csv");
+      strictEqual(request.headers.get("Accept"), "text/plain");
+    });
+
+    it("formats header values and skips missing ones", async () => {
+      const when = new Date(Date.UTC(2026, 0, 2, 3, 4, 5));
+      const request = await send("GET", {
+        headers: {
+          "if-modified-since": when,
+          "x-tags": ["a", "b"],
+          "x-count": 3,
+          "x-absent": undefined,
+          "x-null": null,
+        },
+      });
+      strictEqual(
+        request.headers.get("if-modified-since"),
+        "Fri, 02 Jan 2026 03:04:05 GMT",
+      );
+      strictEqual(request.headers.get("x-tags"), "a,b");
+      strictEqual(request.headers.get("x-count"), "3");
+      strictEqual(request.headers.has("x-absent"), false);
+      strictEqual(request.headers.has("x-null"), false);
+    });
+
+    it("formats query values: dates, arrays, objects", async () => {
+      const request = await send("GET", {
+        query: {
+          since: new Date(Date.UTC(2026, 0, 2)),
+          ids: ["a", "b"],
+          filter: { x: 1 },
+        },
+      });
+      const params = new URL(request.url).searchParams;
+      strictEqual(params.get("since"), "2026-01-02T00:00:00.000Z");
+      strictEqual(params.get("ids"), "a,b");
+      strictEqual(params.get("filter"), '{"x":1}');
+    });
+
+    it("repeats an exploded array query parameter", async () => {
+      const request = await send("GET", {
+        query: { tags: ["a", "b"], ids: ["c", "d"] },
+        explode: ["tags"],
+      });
+      const params = new URL(request.url).searchParams;
+      deepStrictEqual(params.getAll("tags"), ["a", "b"]);
+      deepStrictEqual(params.getAll("ids"), ["c,d"]);
     });
   });
 
@@ -601,10 +735,10 @@ describe("generated ApiClient transport", () => {
         },
       });
 
-      // Stringifying this throws, so buildUrl fails before a full URL exists.
+      // Serializing this throws, so buildUrl fails before a full URL exists.
       const hostile = {
-        toString() {
-          throw new TypeError("cannot stringify");
+        toJSON() {
+          throw new TypeError("cannot serialize");
         },
       };
       await rejects(() =>

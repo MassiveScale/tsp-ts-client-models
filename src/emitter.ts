@@ -27,7 +27,6 @@ import {
   isNeverType,
   getNamespaceFullName,
   resolvePath,
-  isErrorModel,
   isService,
   NoTarget,
 } from "@typespec/compiler";
@@ -38,6 +37,9 @@ import {
 import {
   getAllHttpServices,
   getHttpService,
+  HttpOperationParameter,
+  HttpOperationPathParameter,
+  isMetadata,
   HttpOperation,
   HttpStatusCodeRange,
   Visibility,
@@ -1430,21 +1432,92 @@ function buildEndpointMethodView(
   routePrefix: string,
   program: Program,
 ): EndpointMethodView {
-  const pathParams = op.parameters.parameters
-    .filter((p) => p.type === "path")
-    .map((p) => p.param.name);
-
-  const functionText = buildEndpointFunctionText(
-    op.path,
-    pathParams,
-    routePrefix,
-  );
-
   return {
     doc: getDoc(program, op.operation) ?? undefined,
     name: op.operation.name,
-    functionText,
+    functionText: buildEndpointFunctionText(
+      op.path,
+      resolvePathArgs(op),
+      routePrefix,
+    ),
   };
+}
+
+/** A path parameter as the generated endpoint function and client see it. */
+interface PathArg {
+  /** Name of the `{token}` in the route, e.g. `widget-id`. */
+  wireName: string;
+  /** JavaScript parameter name, e.g. `widgetId`. */
+  argName: string;
+  /** Whether the parameter may be omitted. */
+  optional: boolean;
+  /** RFC 6570 expansion style. */
+  style: HttpOperationPathParameter["style"];
+  /** Whether reserved characters such as `/` are left unencoded. */
+  allowReserved: boolean;
+}
+
+/**
+ * Parameter names a generated client method declares itself. Path arguments
+ * precede them in the same parameter list, so they must not reuse these.
+ */
+const CLIENT_METHOD_PARAMETER_NAMES: readonly string[] = [
+  "body",
+  "query",
+  "headers",
+  "options",
+];
+
+/**
+ * Resolves each path parameter's route token and argument name, required
+ * arguments first — TypeScript rejects a required parameter after an optional
+ * one. The endpoint function and the client method share this order.
+ */
+function resolvePathArgs(op: HttpOperation): PathArg[] {
+  const taken = new Set(CLIENT_METHOD_PARAMETER_NAMES);
+  const args = op.parameters.parameters
+    .filter((p): p is HttpOperationPathParameter => p.type === "path")
+    .map((p) => ({
+      wireName: p.name,
+      argName: toIdentifier(p.param.name, taken),
+      optional: p.param.optional,
+      style: p.style,
+      allowReserved: p.allowReserved,
+    }));
+  return [
+    ...args.filter((a) => !a.optional),
+    ...args.filter((a) => a.optional),
+  ];
+}
+
+/**
+ * Text a path parameter's style places before its value (RFC 6570). The route
+ * TypeSpec produces leaves it out of the path, since an omitted optional
+ * parameter must omit its prefix too. `matrix` is handled separately because
+ * its prefix includes the parameter name.
+ */
+const PATH_STYLE_PREFIX: Record<string, string> = {
+  simple: "",
+  label: ".",
+  path: "/",
+  fragment: "#",
+};
+
+/**
+ * JavaScript expression that renders one path parameter into the route. The
+ * value is percent-encoded so that an id such as `a/b` or `50%` cannot change
+ * which route is called; `allowReserved` keeps reserved characters such as `/`
+ * intact, as RFC 6570's `{+x}` does.
+ */
+function pathArgExpression(arg: PathArg): string {
+  const encoder = arg.allowReserved ? "encodeURI" : "encodeURIComponent";
+  const prefix =
+    arg.style === "matrix"
+      ? `;${arg.wireName}=`
+      : (PATH_STYLE_PREFIX[arg.style] ?? "");
+  const value = `${encoder}(String(${arg.argName}))`;
+  const expr = prefix ? `${JSON.stringify(prefix)} + ${value}` : value;
+  return arg.optional ? `${arg.argName} === undefined ? "" : ${expr}` : expr;
 }
 
 /** Backtick character constant — avoids escape issues in template literals. */
@@ -1468,20 +1541,22 @@ export function resolveRoutePrefix(
 
 function buildEndpointFunctionText(
   path: string,
-  pathParamNames: string[],
+  pathArgs: PathArg[],
   routePrefix: string,
 ): string {
-  // Convert {param} to ${param} for JS template literals.
-  // In replacement strings: $$ → $, $1 → first capture group.
   const fullPath = routePrefix ? `/${routePrefix}${path}` : path;
-  const templatePath = fullPath.replace(/\{([^}]+)\}/g, "$${$1}");
+  const byWireName = new Map(pathArgs.map((a) => [a.wireName, a]));
+  const templatePath = fullPath.replace(
+    /\{([^}]+)\}/g,
+    (token, name: string) => {
+      const arg = byWireName.get(name);
+      return arg ? "${" + pathArgExpression(arg) + "}" : token;
+    },
+  );
   const pathExpr = BT + templatePath + BT;
-
-  if (pathParamNames.length === 0) {
-    return `() => ${pathExpr}`;
-  }
-
-  const params = pathParamNames.map((p) => `${p}: string`).join(", ");
+  const params = pathArgs
+    .map((a) => `${a.argName}${a.optional ? "?" : ""}: string`)
+    .join(", ");
   return `(${params}) => ${pathExpr}`;
 }
 
@@ -1595,6 +1670,33 @@ export interface RequestOptions {
   signal?: AbortSignal;
 }
 
+/**
+ * Options the protected verb helpers accept. Generated client methods build
+ * these from their typed arguments; consumers normally pass
+ * {@link RequestOptions} instead.
+ */
+export interface TransportOptions extends Omit<RequestOptions, "headers"> {
+  /**
+   * Request headers keyed by wire name. \`undefined\` and \`null\` values are
+   * skipped, a \`Date\` is sent in HTTP-date form, and an array is joined with
+   * commas. Names are matched case-insensitively; later entries win.
+   */
+  headers?: Record<string, unknown>;
+  /**
+   * Query parameters keyed by wire name. \`undefined\` and \`null\` values are
+   * skipped, a \`Date\` is sent as an ISO 8601 string, and an array is joined
+   * with commas unless its key is listed in {@link TransportOptions.explode}.
+   */
+  query?: Record<string, unknown>;
+  /** Query keys whose array values are sent as repeated \`key=value\` pairs. */
+  explode?: readonly string[];
+  /**
+   * Media type of the request body. JSON types (the default) are serialized
+   * with \`JSON.stringify\`; any other body is sent as-is.
+   */
+  contentType?: string;
+}
+
 export class ApiError extends Error {
   constructor(
     public readonly status: number,
@@ -1668,6 +1770,63 @@ function toApiError(response: Response, body?: unknown): ApiError {
   return new ApiError(response.status, response.statusText, body, response);
 }
 
+/** Formats a query value; a \`Date\` becomes an ISO 8601 string. */
+function formatQueryValue(value: unknown): string {
+  if (value instanceof Date) return value.toISOString();
+  if (typeof value === "object" && value !== null) return JSON.stringify(value);
+  return String(value);
+}
+
+/** Formats a header value; a \`Date\` becomes an HTTP-date (RFC 9110). */
+function formatHeaderValue(value: unknown): string {
+  if (value instanceof Date) return value.toUTCString();
+  if (Array.isArray(value)) return value.map(formatHeaderValue).join(",");
+  return String(value);
+}
+
+/** Copies headers into \`target\`, skipping \`undefined\` and \`null\` values. */
+function setHeaders(
+  target: Headers,
+  source: Record<string, unknown> | undefined,
+): void {
+  for (const [name, value] of Object.entries(source ?? {})) {
+    if (value !== undefined && value !== null) {
+      target.set(name, formatHeaderValue(value));
+    }
+  }
+}
+
+/** Whether a media type is JSON (\`application/json\`, \`application/*+json\`). */
+function isJsonContentType(contentType: string): boolean {
+  return /^[^;]*[/+]json\\s*(;|$)/i.test(contentType);
+}
+
+/**
+ * Whether \`fetch\` must choose the \`Content-Type\` itself: a \`FormData\` body
+ * needs a generated multipart boundary, and \`URLSearchParams\` is labelled
+ * automatically.
+ */
+function hasImplicitContentType(body: unknown): boolean {
+  return (
+    (typeof FormData !== "undefined" && body instanceof FormData) ||
+    (typeof URLSearchParams !== "undefined" && body instanceof URLSearchParams)
+  );
+}
+
+/**
+ * Whether a body is already in a form \`fetch\` sends as-is — a form, binary
+ * data, or a stream — and so must never go through \`JSON.stringify\`.
+ */
+function isRawBody(body: unknown): body is BodyInit {
+  return (
+    hasImplicitContentType(body) ||
+    (typeof Blob !== "undefined" && body instanceof Blob) ||
+    body instanceof ArrayBuffer ||
+    ArrayBuffer.isView(body) ||
+    (typeof ReadableStream !== "undefined" && body instanceof ReadableStream)
+  );
+}
+
 /**
  * Folds a middleware list into a single dispatch function, with the first
  * entry as the outermost layer and \`transport\` at the center.
@@ -1703,25 +1862,36 @@ export class HttpClient {
     return this;
   }
 
-  /** Joins the base URL, path, and serialized query string. */
-  protected buildUrl(path: string, query?: Record<string, unknown>): string {
+  /**
+   * Joins the base URL, path, and serialized query string. Array values are
+   * comma-joined, or repeated once per item when their key is in \`explode\`.
+   */
+  protected buildUrl(
+    path: string,
+    query?: Record<string, unknown>,
+    explode?: readonly string[],
+  ): string {
     const url = \`\${this.config.baseUrl.replace(/\\/$/, "")}\${path}\`;
     if (!query) return url;
-    const qs = new URLSearchParams(
-      Object.entries(query)
-        .filter(([, v]) => v !== undefined && v !== null)
-        .map(([k, v]) => [k, String(v)]),
-    ).toString();
+    const params = new URLSearchParams();
+    for (const [key, value] of Object.entries(query)) {
+      if (value === undefined || value === null) continue;
+      if (!Array.isArray(value)) {
+        params.append(key, formatQueryValue(value));
+      } else if (explode?.includes(key)) {
+        for (const item of value) params.append(key, formatQueryValue(item));
+      } else {
+        params.append(key, value.map(formatQueryValue).join(","));
+      }
+    }
+    const qs = params.toString();
     return qs ? \`\${url}?\${qs}\` : url;
   }
 
   protected async request<T>(
     method: string,
     path: string,
-    options?: RequestOptions & {
-      body?: unknown;
-      query?: Record<string, unknown>;
-    },
+    options?: TransportOptions & { body?: unknown },
   ): Promise<T> {
     const { maxAttempts = 3, baseDelayMs = 1000, retryOn = [429, 503] } =
       this.config.retry ?? {};
@@ -1732,14 +1902,13 @@ export class HttpClient {
     let attempt = 0;
     let lastError: unknown;
     try {
-      url = this.buildUrl(path, options?.query);
+      url = this.buildUrl(path, options?.query, options?.explode);
 
-      const headers: Record<string, string> = {
-        "Content-Type": "application/json",
-        Accept: "application/json",
-        ...this.config.defaultHeaders,
-        ...options?.headers,
-      };
+      // A Headers object matches names case-insensitively, so a per-request
+      // \`content-type\` replaces the default instead of being sent alongside it.
+      const headers = new Headers({ Accept: "application/json" });
+      setHeaders(headers, this.config.defaultHeaders);
+      setHeaders(headers, options?.headers);
 
       let signal = options?.signal;
       if (this.config.timeout && !signal) {
@@ -1747,9 +1916,20 @@ export class HttpClient {
       }
 
       // Serialized inside the try so that an unserializable body (a circular
-      // reference, a BigInt) reaches onError like any other failure.
-      const body =
-        options?.body !== undefined ? JSON.stringify(options.body) : undefined;
+      // reference, a BigInt) reaches onError like any other failure. Only a
+      // request that actually has a body gets a Content-Type: on a GET it would
+      // force a CORS preflight for no reason.
+      const contentType = options?.contentType ?? "application/json";
+      let body: BodyInit | undefined;
+      if (options?.body !== undefined) {
+        body =
+          isRawBody(options.body) || !isJsonContentType(contentType)
+            ? (options.body as BodyInit)
+            : JSON.stringify(options.body);
+        if (!headers.has("Content-Type") && !hasImplicitContentType(body)) {
+          headers.set("Content-Type", contentType);
+        }
+      }
       const dispatch = composeMiddleware(
         this.middleware,
         this.config.fetch ?? ((request) => fetch(request)),
@@ -1815,7 +1995,7 @@ export class HttpClient {
 
   protected httpGet<T>(
     path: string,
-    options?: RequestOptions & { query?: Record<string, unknown> },
+    options?: TransportOptions,
   ): Promise<T> {
     return this.request<T>("GET", path, options);
   }
@@ -1823,7 +2003,7 @@ export class HttpClient {
   protected httpPost<T>(
     path: string,
     body?: unknown,
-    options?: RequestOptions & { query?: Record<string, unknown> },
+    options?: TransportOptions,
   ): Promise<T> {
     return this.request<T>("POST", path, { ...options, body });
   }
@@ -1831,7 +2011,7 @@ export class HttpClient {
   protected httpPut<T>(
     path: string,
     body?: unknown,
-    options?: RequestOptions & { query?: Record<string, unknown> },
+    options?: TransportOptions,
   ): Promise<T> {
     return this.request<T>("PUT", path, { ...options, body });
   }
@@ -1839,14 +2019,14 @@ export class HttpClient {
   protected httpPatch<T>(
     path: string,
     body?: unknown,
-    options?: RequestOptions & { query?: Record<string, unknown> },
+    options?: TransportOptions,
   ): Promise<T> {
     return this.request<T>("PATCH", path, { ...options, body });
   }
 
   protected httpDelete<T>(
     path: string,
-    options?: RequestOptions & { query?: Record<string, unknown> },
+    options?: TransportOptions,
   ): Promise<T> {
     return this.request<T>("DELETE", path, options);
   }
@@ -1858,7 +2038,7 @@ export class HttpClient {
    */
   protected httpHead<T = void>(
     path: string,
-    options?: RequestOptions & { query?: Record<string, unknown> },
+    options?: TransportOptions,
   ): Promise<T> {
     return this.request<T>("HEAD", path, options);
   }
@@ -1887,6 +2067,7 @@ export const API_CLIENT_EXPORTS: readonly { name: string; isType: boolean }[] =
     { name: "ErrorHook", isType: true },
     { name: "ClientConfig", isType: true },
     { name: "RequestOptions", isType: true },
+    { name: "TransportOptions", isType: true },
     { name: "ApiError", isType: false },
     { name: "RateLimitError", isType: false },
     { name: "ServiceUnavailableError", isType: false },
@@ -1896,7 +2077,7 @@ export const API_CLIENT_EXPORTS: readonly { name: string; isType: boolean }[] =
 // ─── client/ApiClientRx.ts — RxJS Observable transport ───────────────────────
 
 const RX_API_CLIENT_CONTENT = `import { Observable } from "rxjs";
-import { HttpClient, type RequestOptions } from "./ApiClient.js";
+import { HttpClient, type TransportOptions } from "./ApiClient.js";
 
 /**
  * RxJS-flavored HTTP client base. Extends {@link HttpClient} and exposes
@@ -1955,7 +2136,7 @@ export class RxHttpClient extends HttpClient {
 
   protected httpGet$<T>(
     path: string,
-    options?: RequestOptions & { query?: Record<string, unknown> },
+    options?: TransportOptions,
   ): Observable<T> {
     return this.observe<T>(
       (signal) => this.httpGet<T>(path, { ...options, signal }),
@@ -1966,7 +2147,7 @@ export class RxHttpClient extends HttpClient {
   protected httpPost$<T>(
     path: string,
     body?: unknown,
-    options?: RequestOptions & { query?: Record<string, unknown> },
+    options?: TransportOptions,
   ): Observable<T> {
     return this.observe<T>(
       (signal) => this.httpPost<T>(path, body, { ...options, signal }),
@@ -1977,7 +2158,7 @@ export class RxHttpClient extends HttpClient {
   protected httpPut$<T>(
     path: string,
     body?: unknown,
-    options?: RequestOptions & { query?: Record<string, unknown> },
+    options?: TransportOptions,
   ): Observable<T> {
     return this.observe<T>(
       (signal) => this.httpPut<T>(path, body, { ...options, signal }),
@@ -1988,7 +2169,7 @@ export class RxHttpClient extends HttpClient {
   protected httpPatch$<T>(
     path: string,
     body?: unknown,
-    options?: RequestOptions & { query?: Record<string, unknown> },
+    options?: TransportOptions,
   ): Observable<T> {
     return this.observe<T>(
       (signal) => this.httpPatch<T>(path, body, { ...options, signal }),
@@ -1998,7 +2179,7 @@ export class RxHttpClient extends HttpClient {
 
   protected httpDelete$<T>(
     path: string,
-    options?: RequestOptions & { query?: Record<string, unknown> },
+    options?: TransportOptions,
   ): Observable<T> {
     return this.observe<T>(
       (signal) => this.httpDelete<T>(path, { ...options, signal }),
@@ -2008,7 +2189,7 @@ export class RxHttpClient extends HttpClient {
 
   protected httpHead$<T = void>(
     path: string,
-    options?: RequestOptions & { query?: Record<string, unknown> },
+    options?: TransportOptions,
   ): Observable<T> {
     return this.observe<T>(
       (signal) => this.httpHead<T>(path, { ...options, signal }),
@@ -2505,68 +2686,41 @@ function buildClientMethodView(
   reserved: ReadonlySet<string>,
   localNames: ClientLocalNames,
 ): import("./renderer.js").ClientMethodView {
-  const pathParams = op.parameters.parameters
-    .filter((p) => p.type === "path")
-    .map((p) => ({ name: p.param.name, tsType: "string" }));
+  const pathArgs = resolvePathArgs(op);
 
-  const queryParams = op.parameters.parameters
-    .filter((p) => p.type === "query")
-    .map((p) => ({
-      name: p.param.name,
-      tsType: mapTsType(p.param.type, program, models, enums),
-      optional: p.param.optional,
-    }));
-
-  // Determine request body type
-  let bodyType: string | null = null;
-  if (
-    op.parameters.body?.bodyKind === "single" &&
-    op.parameters.body.type.kind === "Model"
-  ) {
-    const bodyModel = op.parameters.body.type as Model;
-    if (bodyModel.name) {
-      const mergePatchBase = getMergePatchBaseName(bodyModel.name);
-      const baseName = mergePatchBase ?? bodyModel.name;
-      const suffix = requestTypeSuffix(op.verb);
-      const requestTypeName = `${baseName}${suffix}Request`;
-      let resolvedRequestTypeName: string | undefined;
-      if (
-        requestTypes.has(requestTypeName) ||
-        discriminatedRequestUnions.has(requestTypeName)
-      ) {
-        resolvedRequestTypeName = requestTypeName;
-      } else {
-        // A name collision may have forced this request type to be renamed
-        // under its operation's own @tag prefix (see storeRequestType /
-        // collectDiscriminatedRequestType) — retry under that name before
-        // falling back to the unfiltered base model.
-        const tags = getTags(program, op.operation);
-        if (tags.length) {
-          const prefixedRequestTypeName = `${capitalize(tags[0])}${requestTypeName}`;
-          if (
-            requestTypes.has(prefixedRequestTypeName) ||
-            discriminatedRequestUnions.has(prefixedRequestTypeName)
-          ) {
-            resolvedRequestTypeName = prefixedRequestTypeName;
-          }
-        }
-      }
-      if (resolvedRequestTypeName) {
-        bodyType = resolvedRequestTypeName;
-        modelImportSet.add(resolvedRequestTypeName);
-      } else if (bodyModel.name && !isSynthesizedMergePatchModel(bodyModel)) {
-        // Through the rename map like every other type reference, so a model
-        // aliased to dodge a shadowed global (`Promise` → `PromiseModel`) is
-        // aliased here too. Both rewrite kinds are consulted, in the same order
-        // mapTsType uses. The import specifier is derived from the raw name.
-        bodyType =
-          renameMap.get(bodyModel.name) ??
-          renameMap.get(`${RENAME_ALIAS}${bodyModel.name}`) ??
-          bodyModel.name;
-        modelImportSet.add(bodyModel.name);
-      }
-    }
+  const queryParams = op.parameters.parameters.filter(
+    (p) => p.type === "query",
+  );
+  // `Content-Type` is decided by the body's declared media type, not by the
+  // caller, so it is not offered as a header argument.
+  const headerParams = op.parameters.parameters.filter(
+    (p) => p.type === "header" && p.name.toLowerCase() !== "content-type",
+  );
+  const objectType = (
+    params: readonly HttpOperationParameter[],
+    indexSignature: boolean,
+  ) =>
+    `{ ${[
+      ...params.map(
+        (p) =>
+          `${formatPropertyKey(p.name)}${p.param.optional ? "?" : ""}: ${mapTsType(p.param.type, program, models, enums, renameMap)}`,
+      ),
+      ...(indexSignature ? ["[key: string]: unknown"] : []),
+    ].join("; ")} }`;
+  for (const p of [...queryParams, ...headerParams]) {
+    collectModelNamesFromType(p.param.type, modelImportSet);
   }
+
+  const body = resolveBodyParameter(
+    op,
+    requestTypes,
+    discriminatedRequestUnions,
+    program,
+    models,
+    enums,
+    modelImportSet,
+    renameMap,
+  );
 
   // Determine response type from first 2xx response body
   const responseType = resolveResponseType(
@@ -2578,52 +2732,70 @@ function buildClientMethodView(
     renameMap,
   );
 
-  // Build method parameters string
-  const paramParts: string[] = [];
-  for (const { name, tsType } of pathParams) {
-    paramParts.push(`${name}: ${tsType}`);
+  // Arguments in call order. A `query` argument is always offered — whether or
+  // not the operation declares query parameters — so callers can pass ad-hoc
+  // ones; declared parameters keep their types, keyed by their wire names.
+  const args: ParameterSpec[] = pathArgs.map((a) => ({
+    name: a.argName,
+    type: "string",
+    optional: a.optional,
+  }));
+  if (body) {
+    args.push({ name: "body", type: body.type, optional: body.optional });
   }
-  if (bodyType) {
-    paramParts.push(`body: ${bodyType}`);
+  args.push({
+    name: "query",
+    type:
+      queryParams.length > 0
+        ? objectType(queryParams, true)
+        : "Record<string, unknown>",
+    optional: !queryParams.some((p) => !p.param.optional),
+  });
+  if (headerParams.length > 0) {
+    args.push({
+      name: "headers",
+      type: objectType(headerParams, false),
+      optional: !headerParams.some((p) => !p.param.optional),
+    });
   }
-  // A `query` parameter is always available — regardless of HTTP verb or
-  // whether the TypeSpec operation declares any query params — so callers can
-  // pass ad-hoc custom query parameters on any call. Declared query params keep
-  // their specific types; the index signature allows any additional keys.
-  const queryFields = queryParams
-    .map((q) => `${q.name}${q.optional ? "?" : ""}: ${q.tsType}`)
-    .join("; ");
-  const queryType = queryFields
-    ? `{ ${queryFields}; [key: string]: unknown }`
-    : `Record<string, unknown>`;
-  paramParts.push(`query?: ${queryType}`);
-  paramParts.push(`options?: ${localNames.requestOptionsName}`);
-  const methodParams = paramParts.join(", ");
+  args.push({
+    name: "options",
+    type: localNames.requestOptionsName,
+    optional: true,
+  });
+  const methodParams = renderParameterList(args);
 
-  // Build endpoint call expression
-  const pathParamArgs = pathParams.map((p) => p.name).join(", ");
-  const endpointCall = `${localNames.endpointsLocalName}.${op.operation.name}(${pathParamArgs})`;
+  const pathArgNames = pathArgs.map((a) => a.argName).join(", ");
+  const endpointCall = `${localNames.endpointsLocalName}.${op.operation.name}(${pathArgNames})`;
 
-  // Build method body. The Promise flavor calls the base verb helpers
-  // (`this.get`, `this.post`, …); the Observable flavor calls the `$`-suffixed
-  // helpers on RxHttpClient (`this.get$`, `this.post$`, …). Both share the same
-  // unwrapped `responseType` — the wrapping `Promise<…>` / `Observable<…>` is
-  // applied by the respective template.
-  // The base transport helpers are prefixed (`httpGet`, `httpPost`, …) so that a
-  // TypeSpec operation named after an HTTP verb (e.g. `delete`) does not shadow —
-  // and clash with the signature of — the inherited helper it delegates to.
-  const httpMethod = op.verb.toLowerCase();
-  const helper = `http${capitalize(httpMethod)}`;
-  let methodBody: string;
-  let methodBodyObservable: string;
-  if (op.verb === "get" || op.verb === "head" || op.verb === "delete") {
-    methodBody = `return this.${helper}<${responseType}>(${endpointCall}, { ...options, query });`;
-    methodBodyObservable = `return this.${helper}$<${responseType}>(${endpointCall}, { ...options, query });`;
-  } else {
-    const bodyArg = bodyType ? "body" : "undefined";
-    methodBody = `return this.${helper}<${responseType}>(${endpointCall}, ${bodyArg}, { ...options, query });`;
-    methodBodyObservable = `return this.${helper}$<${responseType}>(${endpointCall}, ${bodyArg}, { ...options, query });`;
+  const transport = ["...options", "query"];
+  if (headerParams.length > 0) {
+    // Explicit `options.headers` win, so a caller can always override.
+    transport.push("headers: { ...headers, ...options?.headers }");
   }
+  const exploded = queryParams
+    .filter((p) => p.type === "query" && p.explode)
+    .map((p) => p.name);
+  if (exploded.length > 0) {
+    transport.push(`explode: ${JSON.stringify(exploded)}`);
+  }
+  if (body?.contentType) {
+    transport.push(`contentType: ${JSON.stringify(body.contentType)}`);
+  }
+  const transportArg = `{ ${transport.join(", ")} }`;
+
+  // The Promise flavor calls the base verb helpers (`this.httpGet`,
+  // `this.httpPost`, …); the Observable flavor calls the `$`-suffixed helpers
+  // on RxHttpClient. Both share the same unwrapped `responseType` — the
+  // wrapping `Promise<…>` / `Observable<…>` is applied by the template.
+  // The helpers are prefixed so that a TypeSpec operation named after an HTTP
+  // verb (e.g. `delete`) does not shadow — and clash with the signature of —
+  // the inherited helper it delegates to.
+  const helper = `http${capitalize(op.verb.toLowerCase())}`;
+  const callArgs =
+    op.verb === "get" || op.verb === "head" || op.verb === "delete"
+      ? `${endpointCall}, ${transportArg}`
+      : `${endpointCall}, ${body ? "body" : "undefined"}, ${transportArg}`;
 
   return {
     doc: getDoc(program, op.operation) ?? undefined,
@@ -2631,10 +2803,177 @@ function buildClientMethodView(
     // method name is renamed when it would shadow an inherited base member.
     name: clientMethodName(op.operation.name, siblingNames, reserved),
     methodParams,
-    methodBody,
-    methodBodyObservable,
+    methodBody: `return this.${helper}<${responseType}>(${callArgs});`,
+    methodBodyObservable: `return this.${helper}$<${responseType}>(${callArgs});`,
     responseType,
   };
+}
+
+/** One parameter of a generated method signature. */
+interface ParameterSpec {
+  /** Parameter name. */
+  name: string;
+  /** TypeScript type. */
+  type: string;
+  /** Whether the caller may omit it. */
+  optional: boolean;
+}
+
+/**
+ * Renders a parameter list. An optional parameter followed by a required one
+ * cannot use `?` (TS1016), so it is typed `T | undefined` instead and the
+ * caller passes `undefined` explicitly.
+ */
+function renderParameterList(args: readonly ParameterSpec[]): string {
+  let requiredAfter = false;
+  const rendered: string[] = [];
+  for (let i = args.length - 1; i >= 0; i--) {
+    const { name, type, optional } = args[i];
+    if (!optional) {
+      rendered.unshift(`${name}: ${type}`);
+      requiredAfter = true;
+    } else if (requiredAfter) {
+      rendered.unshift(`${name}: ${type} | undefined`);
+    } else {
+      rendered.unshift(`${name}?: ${type}`);
+    }
+  }
+  return rendered.join(", ");
+}
+
+/** The `body` argument of a generated client method. */
+interface BodyParameter {
+  /** TypeScript type of the argument. */
+  type: string;
+  /** Whether the body may be omitted. */
+  optional: boolean;
+  /**
+   * Media type to send, when it is not plain `application/json`. JSON media
+   * types such as `application/merge-patch+json` are still serialized as JSON.
+   */
+  contentType?: string;
+}
+
+/**
+ * Resolves the request body argument for any body TypeSpec can declare: a
+ * named model (narrowed to its visibility-filtered request type when one was
+ * synthesized), an inline or spread model, an array, a scalar, a raw `bytes`
+ * or text payload, a file, or a multipart form.
+ */
+function resolveBodyParameter(
+  op: HttpOperation,
+  requestTypes: Map<string, RequestType>,
+  discriminatedRequestUnions: Map<string, DiscriminatedRequestUnion>,
+  program: Program,
+  models: Map<string, Model>,
+  enums: Map<string, Enum>,
+  modelImportSet: Set<string>,
+  renameMap: Map<string, string>,
+): BodyParameter | undefined {
+  const body = op.parameters.body;
+  if (!body) return undefined;
+  const declared = body.contentTypes[0];
+  const contentType =
+    declared && declared.toLowerCase() !== "application/json"
+      ? declared
+      : undefined;
+  const optional = body.property?.optional ?? false;
+
+  // The caller assembles a multipart form; `fetch` then sets the multipart
+  // boundary itself, so no content type is passed for it.
+  if (body.bodyKind === "multipart") {
+    return { type: "FormData", optional };
+  }
+  if (body.bodyKind === "file") {
+    return { type: "Blob", optional, contentType };
+  }
+
+  const isJson = !contentType || /[/+]json\s*(;|$)/i.test(contentType);
+  if (
+    !isJson &&
+    body.type.kind === "Scalar" &&
+    builtinScalarName(body.type) === "bytes"
+  ) {
+    return { type: "Blob | ArrayBuffer | Uint8Array", optional, contentType };
+  }
+
+  const named = resolveNamedBodyModelType(
+    op,
+    body.type,
+    requestTypes,
+    discriminatedRequestUnions,
+    program,
+    modelImportSet,
+    renameMap,
+  );
+  if (named) return { type: named, optional, contentType };
+
+  collectModelNamesFromType(body.type, modelImportSet);
+  return {
+    type: mapTsType(body.type, program, models, enums, renameMap),
+    optional,
+    contentType,
+  };
+}
+
+/**
+ * For a body that is a single named, non-generic model, returns the type the
+ * client should accept: its synthesized request type (`WidgetPostRequest`)
+ * when one exists, otherwise the model itself. Returns `undefined` for
+ * anything else — arrays, records, generic instances, inline models, scalars —
+ * which map like any other type.
+ */
+function resolveNamedBodyModelType(
+  op: HttpOperation,
+  type: Type,
+  requestTypes: Map<string, RequestType>,
+  discriminatedRequestUnions: Map<string, DiscriminatedRequestUnion>,
+  program: Program,
+  modelImportSet: Set<string>,
+  renameMap: Map<string, string>,
+): string | undefined {
+  if (type.kind !== "Model") return undefined;
+  const bodyModel = type as Model;
+  if (
+    !bodyModel.name ||
+    isArrayModelType(bodyModel) ||
+    isRecordModelType(bodyModel) ||
+    bodyModel.templateMapper?.args
+  ) {
+    return undefined;
+  }
+  const mergePatchBase = getMergePatchBaseName(bodyModel.name);
+  const baseName = mergePatchBase ?? bodyModel.name;
+  const requestTypeName = `${baseName}${requestTypeSuffix(op.verb)}Request`;
+  const exists = (name: string) =>
+    requestTypes.has(name) || discriminatedRequestUnions.has(name);
+  if (exists(requestTypeName)) {
+    modelImportSet.add(requestTypeName);
+    return requestTypeName;
+  }
+  // A name collision may have forced this request type to be renamed under its
+  // operation's own @tag prefix (see storeRequestType /
+  // collectDiscriminatedRequestType) — retry under that name before falling
+  // back to the unfiltered base model.
+  const tags = getTags(program, op.operation);
+  if (tags.length) {
+    const prefixed = `${capitalize(tags[0])}${requestTypeName}`;
+    if (exists(prefixed)) {
+      modelImportSet.add(prefixed);
+      return prefixed;
+    }
+  }
+  if (isSynthesizedMergePatchModel(bodyModel)) return undefined;
+  // Through the rename map like every other type reference, so a model aliased
+  // to dodge a shadowed global (`Promise` → `PromiseModel`) is aliased here
+  // too. Both rewrite kinds are consulted, in the same order mapTsType uses.
+  // The import specifier is derived from the raw name.
+  modelImportSet.add(bodyModel.name);
+  return (
+    renameMap.get(bodyModel.name) ??
+    renameMap.get(`${RENAME_ALIAS}${bodyModel.name}`) ??
+    bodyModel.name
+  );
 }
 
 function is2xxStatusCode(code: HttpStatusCodeRange | number | "*"): boolean {
@@ -2684,7 +3023,14 @@ function collectModelNamesFromType(type: Type, into: Set<string>): void {
       collectModelNamesFromType(m.indexer.value, into);
       return;
     }
-    if (m.name && !m.templateMapper?.args) {
+    if (!m.name) {
+      // An inline model is rendered in place, so the models it references
+      // are what the client must import.
+      for (const [, prop] of flattenProperties(m)) {
+        collectModelNamesFromType(prop.type, into);
+      }
+      if (m.indexer) collectModelNamesFromType(m.indexer.value, into);
+    } else if (!m.templateMapper?.args) {
       into.add(m.name);
     } else if (m.name && m.templateMapper?.args) {
       // Mirrors mapTsType's own `Array<T>` shortcut, which renders the native
@@ -2856,10 +3202,9 @@ function mapTsType(
       if (isRecordModelType(m)) {
         return `Record<string, ${mapTsType(m.indexer!.value, program, models, enums, renameMap)}>`;
       }
-      if (isErrorModel(program, m)) {
-        // Emit error models — just note them
+      if (!m.name) {
+        return renderInlineModel(m, program, models, enums, renameMap);
       }
-      if (!m.name) return "unknown";
 
       // During the rendering phase, synthesized MergePatch model names are
       // rewritten to their canonical output names (e.g. PetPatchRequest or Tag).
@@ -2937,6 +3282,33 @@ function mapTsType(
     default:
       return "unknown";
   }
+}
+
+/**
+ * Renders an anonymous model — an inline `{ … }` type, a spread operation
+ * body, or an inline response — as a TypeScript object type. HTTP metadata
+ * (`@header`, `@query`, `@path`, `@statusCode`) travels outside the body and
+ * is left out.
+ */
+function renderInlineModel(
+  m: Model,
+  program: Program,
+  models: Map<string, Model>,
+  enums: Map<string, Enum>,
+  renameMap?: Map<string, string>,
+): string {
+  const fields: string[] = [];
+  for (const [, prop] of flattenProperties(m)) {
+    if (isMetadata(program, prop)) continue;
+    const optional = prop.optional ? "?" : "";
+    const type = mapTsType(prop.type, program, models, enums, renameMap);
+    fields.push(`${formatPropertyKey(prop.name)}${optional}: ${type}`);
+  }
+  if (m.indexer) {
+    const value = mapTsType(m.indexer.value, program, models, enums, renameMap);
+    fields.push(`[key: string]: ${value}`);
+  }
+  return fields.length > 0 ? `{ ${fields.join("; ")} }` : "{}";
 }
 
 function mapScalar(scalar: Scalar, program: Program): string {
@@ -3079,6 +3451,90 @@ function gatherTemplateParams(
 }
 
 // ─── Misc helpers ────────────────────────────────────────────────────────────
+
+/** Matches a valid JavaScript identifier (ASCII subset). */
+const IDENTIFIER_PATTERN = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
+
+/**
+ * Words that cannot name a function parameter. Property keys may use them, so
+ * {@link formatPropertyKey} does not consult this list.
+ */
+const RESERVED_WORDS = new Set([
+  "arguments",
+  "await",
+  "break",
+  "case",
+  "catch",
+  "class",
+  "const",
+  "continue",
+  "debugger",
+  "default",
+  "delete",
+  "do",
+  "else",
+  "enum",
+  "eval",
+  "export",
+  "extends",
+  "false",
+  "finally",
+  "for",
+  "function",
+  "if",
+  "implements",
+  "import",
+  "in",
+  "instanceof",
+  "interface",
+  "let",
+  "new",
+  "null",
+  "package",
+  "private",
+  "protected",
+  "public",
+  "return",
+  "static",
+  "super",
+  "switch",
+  "this",
+  "throw",
+  "true",
+  "try",
+  "typeof",
+  "var",
+  "void",
+  "while",
+  "with",
+  "yield",
+]);
+
+/**
+ * Renders an object-type property key, quoting it when it is not a valid
+ * identifier (`x-ms-id` → `"x-ms-id"`).
+ */
+export function formatPropertyKey(name: string): string {
+  return IDENTIFIER_PATTERN.test(name) ? name : JSON.stringify(name);
+}
+
+/**
+ * Converts a name to a valid JavaScript identifier that is not in `taken`, and
+ * claims it. Invalid characters are dropped and the next character
+ * upper-cased (`widget-id` → `widgetId`); a reserved word or a taken name gets
+ * a `Param` suffix, numbered if that is taken too.
+ */
+export function toIdentifier(name: string, taken: Set<string>): string {
+  let id = name.replace(/[^A-Za-z0-9_$]+(.)?/g, (_, next?: string) =>
+    next ? next.toUpperCase() : "",
+  );
+  if (!id || /^[0-9]/.test(id)) id = `_${id}`;
+  if (RESERVED_WORDS.has(id) || taken.has(id)) {
+    id = uniqueName(`${id}Param`, taken);
+  }
+  taken.add(id);
+  return id;
+}
 
 function sanitizeVersionForPath(version: string): string {
   return version.replace(/\./g, "_").replace(/^v/i, "v");
