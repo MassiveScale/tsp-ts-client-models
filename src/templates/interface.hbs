@@ -3,4 +3,8 @@
 
 {{{renderDoc doc "  "}}}  {{key}}{{#if optional}}?{{/if}}: {{type}};
 {{/each}}
+{{#if indexSignature}}
+
+  [key: string]: {{indexSignature}};
+{{/if}}
 }

@@ -10,6 +10,7 @@ import {
   Program,
   Union,
   Tuple,
+  Operation,
   StringLiteral,
   NumericLiteral,
   BooleanLiteral,
@@ -20,6 +21,7 @@ import {
   getFormat,
   getTags,
   getDiscriminator,
+  getDiscriminatedUnion,
   getDiscriminatedUnionFromInheritance,
   isArrayModelType,
   isRecordModelType,
@@ -78,7 +80,7 @@ import {
   filterPropsForRequest,
   flattenProperties,
   getMergePatchBaseName,
-  hasHiddenProperties,
+  bodyHasHiddenProperties,
   isOpInVersion,
   propsHaveSameKeys,
   requestTypeSuffix,
@@ -358,7 +360,16 @@ function buildMergePatchRenameMap(
     const patchTypeEmitted =
       requestTypes.has(patchTypeName) ||
       discriminatedRequestUnions.has(patchTypeName);
-    renameMap.set(name, patchTypeEmitted ? patchTypeName : base);
+    renameMap.set(
+      name,
+      patchTypeEmitted
+        ? emittedRequestTypeName(
+            patchTypeName,
+            requestTypes,
+            discriminatedRequestUnions,
+          )
+        : base,
+    );
   }
   return renameMap;
 }
@@ -547,7 +558,7 @@ async function emitVersion(
   renderer: Renderer,
 ): Promise<void> {
   const models = new Map<string, Model>();
-  const enums = new Map<string, Enum>();
+  const enums = new Map<string, Enum | Union>();
   const requestTypes = new Map<string, RequestType>();
   const requestTypeBaseModels = new Set<string>();
   const discriminatedRequestUnions = new Map<
@@ -581,6 +592,16 @@ async function emitVersion(
   // still discovered and emitted.
   const discriminatedUnions = new Map<string, string[]>();
   deepCollectTypes(models, enums, program, discriminatedUnions);
+
+  // Declared types keep their names; a synthesized request type that would
+  // share one is renamed before anything refers to it.
+  resolveRequestTypeNameClashes(
+    program,
+    models,
+    enums,
+    requestTypes,
+    discriminatedRequestUnions,
+  );
 
   // A model whose only use is as a write body is replaced by its filtered
   // request type and not emitted itself — unless something that is emitted
@@ -851,7 +872,7 @@ function collectTypesFromOp(
   op: HttpOperation,
   program: Program,
   models: Map<string, Model>,
-  enums: Map<string, Enum>,
+  enums: Map<string, Enum | Union>,
 ): void {
   for (const param of op.parameters.parameters) {
     mapTsType(param.param.type, program, models, enums);
@@ -875,7 +896,7 @@ function storeRequestType(
   op: HttpOperation,
   program: Program,
   models: Map<string, Model>,
-  enums: Map<string, Enum>,
+  enums: Map<string, Enum | Union>,
   requestTypes: Map<string, RequestType>,
   requestTypeBaseModels: Set<string>,
 ): void {
@@ -927,7 +948,7 @@ function collectRequestType(
   op: HttpOperation,
   program: Program,
   models: Map<string, Model>,
-  enums: Map<string, Enum>,
+  enums: Map<string, Enum | Union>,
   version: Version | undefined,
   requestTypes: Map<string, RequestType>,
   requestTypeBaseModels: Set<string>,
@@ -967,7 +988,8 @@ function collectRequestType(
   }
 
   const visibility = resolveRequestVisibility(program, op.operation, op.verb);
-  if (!hasHiddenProperties(bodyModel, visibility, program)) return;
+  if (!bodyHasHiddenProperties(bodyModel, visibility, program)) return;
+  const discriminator = getDiscriminator(program, bodyModel);
 
   const suffix = requestTypeSuffix(op.verb);
 
@@ -976,7 +998,6 @@ function collectRequestType(
   // flat {Base}{Verb}Request would silently drop them. Instead, filter each
   // variant individually and expose the write body as a union of the results,
   // mirroring how the plain model itself is exposed as a union of variants.
-  const discriminator = getDiscriminator(program, bodyModel);
   if (discriminator) {
     collectDiscriminatedRequestType(
       bodyModel,
@@ -1034,6 +1055,73 @@ interface DiscriminatedRequestUnion {
   /** The operation that produced this registration — its `@tag` resolves a
    * collision against a later conflicting operation. */
   sourceOp: HttpOperation;
+  /** The name it is emitted under, when a declared type forced a rename. */
+  emittedName?: string;
+}
+
+/**
+ * The name a synthesized request type (or discriminated request union) is
+ * actually emitted under: its registered name, unless a declared type of the
+ * same name forced a rename.
+ */
+function emittedRequestTypeName(
+  name: string,
+  requestTypes: Map<string, RequestType>,
+  discriminatedRequestUnions: Map<string, DiscriminatedRequestUnion>,
+): string {
+  return (
+    requestTypes.get(name)?.name ??
+    discriminatedRequestUnions.get(name)?.emittedName ??
+    name
+  );
+}
+
+/**
+ * Renames every synthesized request type whose name a declared type already
+ * uses. A user model called `WidgetPostRequest` next to a `POST` of a
+ * `Widget` with read-only properties would otherwise produce two
+ * `export interface WidgetPostRequest` declarations, which TypeScript
+ * silently merges into one type with both sets of properties. The declared
+ * type keeps the name; the synthesized one takes a numeric suffix, as other
+ * generated names do, and a `request-type-name-collision` warning says so.
+ */
+function resolveRequestTypeNameClashes(
+  program: Program,
+  models: Map<string, Model>,
+  enums: Map<string, Enum | Union>,
+  requestTypes: Map<string, RequestType>,
+  discriminatedRequestUnions: Map<string, DiscriminatedRequestUnion>,
+): void {
+  const declared = new Set<string>();
+  for (const type of [...models.values(), ...enums.values()]) {
+    if (isEmittable(type)) declared.add(type.name!);
+  }
+  const taken = new Set([
+    ...declared,
+    ...requestTypes.keys(),
+    ...discriminatedRequestUnions.keys(),
+  ]);
+  const rename = (name: string, target: Operation): string => {
+    const renamed = uniqueName(name, taken);
+    taken.add(renamed);
+    reportDiagnostic(program, {
+      code: "request-type-name-collision",
+      format: { name, renamed },
+      target,
+    });
+    return renamed;
+  };
+  for (const rt of requestTypes.values()) {
+    if (declared.has(rt.name)) rt.name = rename(rt.name, rt.sourceOp.operation);
+  }
+  for (const [key, union] of discriminatedRequestUnions) {
+    union.memberNames = union.memberNames.map(
+      (member) => requestTypes.get(member)?.name ?? member,
+    );
+    if (declared.has(key)) {
+      union.emittedName = rename(key, union.sourceOp.operation);
+    }
+  }
 }
 
 /**
@@ -1058,7 +1146,7 @@ function collectDiscriminatedRequestType(
   op: HttpOperation,
   program: Program,
   models: Map<string, Model>,
-  enums: Map<string, Enum>,
+  enums: Map<string, Enum | Union>,
   requestTypes: Map<string, RequestType>,
   requestTypeBaseModels: Set<string>,
   discriminatedRequestUnions: Map<string, DiscriminatedRequestUnion>,
@@ -1175,7 +1263,7 @@ function registerDiscriminatedRequestUnion(
   prefix: string,
   program: Program,
   models: Map<string, Model>,
-  enums: Map<string, Enum>,
+  enums: Map<string, Enum | Union>,
   requestTypes: Map<string, RequestType>,
   requestTypeBaseModels: Set<string>,
   discriminatedRequestUnions: Map<string, DiscriminatedRequestUnion>,
@@ -1228,7 +1316,7 @@ function collectReferencedModelNames(
   requestTypeBaseModels: Set<string>,
 ): Set<string> {
   const tmpModels = new Map<string, Model>();
-  const tmpEnums = new Map<string, Enum>();
+  const tmpEnums = new Map<string, Enum | Union>();
   const reference = (type: Type) =>
     mapTsType(type, program, tmpModels, tmpEnums);
   for (const { ops } of byContainer.values()) {
@@ -1266,7 +1354,7 @@ function isRequestTypedBody(
   requestTypeBaseModels: Set<string>,
 ): boolean {
   if (body.kind !== "Model" || !body.name) return false;
-  if (isArrayModelType(body) || isRecordModelType(body)) return false;
+  if (isArrayModelType(body) || isPlainRecord(body)) return false;
   return requestTypeBaseModels.has(
     getMergePatchBaseName(body.name) ?? body.name,
   );
@@ -1301,7 +1389,7 @@ function collectDiscriminatedVariants(
 
 function deepCollectTypes(
   models: Map<string, Model>,
-  enums: Map<string, Enum>,
+  enums: Map<string, Enum | Union>,
   program: Program,
   discriminatedUnions: Map<string, string[]>,
 ): void {
@@ -1319,13 +1407,27 @@ function deepCollectTypes(
           changed = true;
         }
       }
-      for (const [, prop] of flattenProperties(model)) {
+      const referenced = [...flattenProperties(model).values()].map(
+        (p) => p.type,
+      );
+      if (model.indexer) referenced.push(model.indexer.value);
+      for (const type of referenced) {
         const prevModels = models.size;
         const prevEnums = enums.size;
-        mapTsType(prop.type, program, models, enums);
+        mapTsType(type, program, models, enums);
         if (models.size !== prevModels || enums.size !== prevEnums)
           changed = true;
       }
+    }
+    // A named union is referenced by its alias, so mapping it does not visit
+    // its members; walk them here so the types they name are emitted too.
+    for (const type of [...enums.values()]) {
+      if (type.kind !== "Union") continue;
+      const prevModels = models.size;
+      const prevEnums = enums.size;
+      unionMemberTypes(type, program, models, enums);
+      if (models.size !== prevModels || enums.size !== prevEnums)
+        changed = true;
     }
   }
 }
@@ -1335,7 +1437,7 @@ function deepCollectTypes(
 function buildModelsFile(
   nsFullName: string,
   models: Map<string, Model>,
-  enums: Map<string, Enum>,
+  enums: Map<string, Enum | Union>,
   requestTypes: Map<string, RequestType>,
   requestTypeBaseModels: Set<string>,
   referencedModelNames: Set<string>,
@@ -1350,6 +1452,16 @@ function buildModelsFile(
 
   for (const [, e] of enums) {
     if (!isEmittable(e)) continue;
+    if (e.kind === "Union") {
+      parts.push(
+        renderer.renderUnion({
+          doc: getDoc(program, e) ?? undefined,
+          unionName: e.name!,
+          memberNames: unionMemberTypes(e, program, models, enums, renameMap),
+        }),
+      );
+      continue;
+    }
     parts.push(renderer.renderEnum(buildEnumView(e, program)));
   }
 
@@ -1365,8 +1477,10 @@ function buildModelsFile(
     // never rendered as a plain interface, so whether it separately "has a
     // request type" (e.g. a filtered write-body union) must not skip its
     // union alias — the base's own response-type references still need it.
+    // A base with no concrete variants yet has nothing to form a union from —
+    // `export type Pet = ;` is a syntax error — so it stays a plain interface.
     const variantNames = discriminatedUnions.get(model.name!);
-    if (variantNames) {
+    if (variantNames?.length) {
       const unionView: UnionView = {
         doc: getDoc(program, model) ?? undefined,
         unionName: model.name!,
@@ -1409,8 +1523,11 @@ function buildModelsFile(
   // filtered request types (e.g. `PetPostRequest = DogPostRequest | CatPostRequest`)
   // instead of a single flat interface, so callers must supply a variant's
   // own fields alongside its narrowed discriminator value.
-  for (const [unionName, { memberNames }] of discriminatedRequestUnions) {
-    const unionView: UnionView = { unionName, memberNames };
+  for (const [
+    key,
+    { memberNames, emittedName },
+  ] of discriminatedRequestUnions) {
+    const unionView: UnionView = { unionName: emittedName ?? key, memberNames };
     parts.push(renderer.renderUnion(unionView));
   }
 
@@ -1423,25 +1540,30 @@ function buildInterfaceView(
   model: Model,
   program: Program,
   models: Map<string, Model>,
-  enums: Map<string, Enum>,
+  enums: Map<string, Enum | Union>,
   renameMap?: Map<string, string>,
 ): InterfaceView {
   const typeParams = collectTypeParams(model);
   const genericSuffix =
     typeParams.length > 0 ? `<${typeParams.join(", ")}>` : "";
   const doc = getDoc(program, model);
-  return {
+  const props = flattenProperties(model);
+  const view: InterfaceView = {
     doc: doc ?? undefined,
     interfaceName: model.name!,
     genericSuffix,
-    properties: buildPropertyViews(
-      flattenProperties(model),
-      program,
-      models,
-      enums,
-      renameMap,
-    ),
+    properties: buildPropertyViews(props, program, models, enums, renameMap),
   };
+  const index = indexSignatureType(
+    model,
+    [...props.values()],
+    program,
+    models,
+    enums,
+    renameMap,
+  );
+  if (index) view.indexSignature = index;
+  return view;
 }
 
 function buildFilteredInterfaceView(
@@ -1450,7 +1572,7 @@ function buildFilteredInterfaceView(
   props: Map<string, ModelProperty>,
   program: Program,
   models: Map<string, Model>,
-  enums: Map<string, Enum>,
+  enums: Map<string, Enum | Union>,
   renameMap?: Map<string, string>,
 ): InterfaceView {
   return {
@@ -1474,7 +1596,7 @@ function mapPropertyTsType(
   prop: ModelProperty,
   program: Program,
   models: Map<string, Model>,
-  enums: Map<string, Enum>,
+  enums: Map<string, Enum | Union>,
   renameMap?: Map<string, string>,
 ): string {
   if (prop.type.kind === "Scalar") {
@@ -1493,7 +1615,7 @@ function buildPropertyViews(
   props: Iterable<[string, ModelProperty]>,
   program: Program,
   models: Map<string, Model>,
-  enums: Map<string, Enum>,
+  enums: Map<string, Enum | Union>,
   renameMap?: Map<string, string>,
 ): PropertyView[] {
   const result: PropertyView[] = [];
@@ -2705,7 +2827,7 @@ function buildClientView(
   discriminatedRequestUnions: Map<string, DiscriminatedRequestUnion>,
   program: Program,
   models: Map<string, Model>,
-  enums: Map<string, Enum>,
+  enums: Map<string, Enum | Union>,
   renameMap: Map<string, string>,
   reserved: ReadonlySet<string>,
 ): ClientView {
@@ -2923,7 +3045,7 @@ function buildClientMethodView(
   discriminatedRequestUnions: Map<string, DiscriminatedRequestUnion>,
   program: Program,
   models: Map<string, Model>,
-  enums: Map<string, Enum>,
+  enums: Map<string, Enum | Union>,
   modelImportSet: Set<string>,
   renameMap: Map<string, string>,
   siblingNames: ReadonlySet<string>,
@@ -3114,7 +3236,7 @@ function resolveBodyParameter(
   discriminatedRequestUnions: Map<string, DiscriminatedRequestUnion>,
   program: Program,
   models: Map<string, Model>,
-  enums: Map<string, Enum>,
+  enums: Map<string, Enum | Union>,
   modelImportSet: Set<string>,
   renameMap: Map<string, string>,
 ): BodyParameter | undefined {
@@ -3185,7 +3307,7 @@ function resolveNamedBodyModelType(
   if (
     !bodyModel.name ||
     isArrayModelType(bodyModel) ||
-    isRecordModelType(bodyModel) ||
+    isPlainRecord(bodyModel) ||
     bodyModel.templateMapper?.args
   ) {
     return undefined;
@@ -3195,9 +3317,11 @@ function resolveNamedBodyModelType(
   const requestTypeName = `${baseName}${requestTypeSuffix(op.verb)}Request`;
   const exists = (name: string) =>
     requestTypes.has(name) || discriminatedRequestUnions.has(name);
+  const emitted = (name: string) =>
+    emittedRequestTypeName(name, requestTypes, discriminatedRequestUnions);
   if (exists(requestTypeName)) {
-    modelImportSet.add(requestTypeName);
-    return requestTypeName;
+    modelImportSet.add(emitted(requestTypeName));
+    return emitted(requestTypeName);
   }
   // A name collision may have forced this request type to be renamed under its
   // operation's own @tag prefix (see storeRequestType /
@@ -3207,8 +3331,8 @@ function resolveNamedBodyModelType(
   if (tags.length) {
     const prefixed = `${capitalize(tags[0])}${requestTypeName}`;
     if (exists(prefixed)) {
-      modelImportSet.add(prefixed);
-      return prefixed;
+      modelImportSet.add(emitted(prefixed));
+      return emitted(prefixed);
     }
   }
   if (isSynthesizedMergePatchModel(bodyModel)) return undefined;
@@ -3235,7 +3359,7 @@ function resolveResponseType(
   op: HttpOperation,
   program: Program,
   models: Map<string, Model>,
-  enums: Map<string, Enum>,
+  enums: Map<string, Enum | Union>,
   modelImportSet: Set<string>,
   renameMap: Map<string, string>,
 ): ResponseShape {
@@ -3277,7 +3401,7 @@ function collectModelNamesFromType(type: Type, into: Set<string>): void {
       collectModelNamesFromType(m.indexer.value, into);
       return;
     }
-    if (isRecordModelType(m) && m.indexer) {
+    if (isPlainRecord(m) && m.indexer) {
       collectModelNamesFromType(m.indexer.value, into);
       return;
     }
@@ -3306,6 +3430,10 @@ function collectModelNamesFromType(type: Type, into: Set<string>): void {
     }
   } else if (type.kind === "Union") {
     const u = type as Union;
+    if (isAliasedUnion(u)) {
+      into.add(u.name!);
+      return;
+    }
     for (const [, variant] of u.variants) {
       collectModelNamesFromType(variant.type, into);
     }
@@ -3442,6 +3570,17 @@ function isNativeArrayShortcut(m: Model): boolean {
 }
 
 /**
+ * Whether a model is nothing but a string-keyed map, and so renders as the
+ * native `Record<string, T>`. A model that also declares properties —
+ * `model Extra { known: string; ...Record<int32> }` or
+ * `model X is Record<string> { known: string }` — is not: it is emitted as an
+ * interface with an index signature, so its declared properties survive.
+ */
+function isPlainRecord(m: Model): boolean {
+  return isRecordModelType(m) && flattenProperties(m).size === 0;
+}
+
+/**
  * Whether a templated model renders as the native `Record<string, T>`. A
  * `Record<T>` whose argument is still a template parameter is not recognized
  * by `isRecordModelType`, so it reaches the generic path and would otherwise
@@ -3455,7 +3594,7 @@ function mapTsType(
   type: Type,
   program: Program,
   models: Map<string, Model>,
-  enums: Map<string, Enum>,
+  enums: Map<string, Enum | Union>,
   renameMap?: Map<string, string>,
 ): string {
   switch (type.kind) {
@@ -3469,8 +3608,20 @@ function mapTsType(
       if (isArrayModelType(m)) {
         return `${mapTsType(m.indexer!.value, program, models, enums, renameMap)}[]`;
       }
-      if (isRecordModelType(m)) {
-        return `Record<string, ${mapTsType(m.indexer!.value, program, models, enums, renameMap)}>`;
+      if (isPlainRecord(m)) {
+        const value = mapTsType(
+          m.indexer!.value,
+          program,
+          models,
+          enums,
+          renameMap,
+        );
+        // A type alias may refer to itself through an object type but not
+        // through the `Record` alias (TS2456), so a record inside a recursive
+        // union such as `union Json { …, Record<Json> }` is spelled out.
+        return referencesAliasedUnion(m.indexer!.value)
+          ? `{ [key: string]: ${value} }`
+          : `Record<string, ${value}>`;
       }
       if (!m.name) {
         return renderInlineModel(m, program, models, enums, renameMap);
@@ -3523,12 +3674,12 @@ function mapTsType(
 
     case "Union": {
       const u = type as Union;
-      const parts: string[] = [];
-      for (const [, variant] of u.variants) {
-        parts.push(mapTsType(variant.type, program, models, enums, renameMap));
+      if (isAliasedUnion(u)) {
+        registerNamedType(program, enums, u);
+        return renameMap?.get(`${RENAME_ALIAS}${u.name}`) ?? u.name!;
       }
-      const unique = [...new Set(parts)].filter((p) => p !== "never");
-      return unique.length > 0 ? unique.join(" | ") : "unknown";
+      const parts = unionMemberTypes(u, program, models, enums, renameMap);
+      return parts.length > 0 ? parts.join(" | ") : "unknown";
     }
 
     case "String":
@@ -3561,6 +3712,81 @@ function mapTsType(
 }
 
 /**
+ * Whether a union is declared with a name (`union Status { … }`) and so is
+ * emitted as its own `export type` alias and referenced by name. Referring to
+ * it by name is what lets a recursive union (`union Json { …, Json[] }`)
+ * render at all; inlining it would recurse forever. Anonymous unions
+ * (`A | B`) and instances of generic unions are still written in place.
+ */
+function isAliasedUnion(u: Union): boolean {
+  return !!u.name && !u.templateMapper && isEmittable(u);
+}
+
+/**
+ * Whether a type names an aliased union, directly or through arrays, records,
+ * and anonymous unions — the positions a recursive alias can reach itself
+ * through.
+ */
+function referencesAliasedUnion(
+  type: Type,
+  seen: Set<Type> = new Set(),
+): boolean {
+  if (seen.has(type)) return false;
+  seen.add(type);
+  if (type.kind === "Union") {
+    if (isAliasedUnion(type)) return true;
+    return [...type.variants.values()].some((v) =>
+      referencesAliasedUnion(v.type, seen),
+    );
+  }
+  if (type.kind === "Model" && type.indexer) {
+    return referencesAliasedUnion(type.indexer.value, seen);
+  }
+  return false;
+}
+
+/**
+ * The member types of a union, as TypeScript type strings, ready to be joined
+ * with `|`. Duplicates and `never` are dropped.
+ *
+ * A `@discriminated` union is written in its wire shape: with the default
+ * `envelope: "object"` each member is `{ kind: "a"; value: Cat }`, and with
+ * `envelope: "none"` the discriminator is merged into the variant itself,
+ * `Cat & { kind: "a" }`.
+ */
+function unionMemberTypes(
+  u: Union,
+  program: Program,
+  models: Map<string, Model>,
+  enums: Map<string, Enum | Union>,
+  renameMap?: Map<string, string>,
+): string[] {
+  const map = (t: Type) => mapTsType(t, program, models, enums, renameMap);
+  const [discriminated] = getDiscriminatedUnion(program, u);
+  if (discriminated) {
+    const { envelope, discriminatorPropertyName, envelopePropertyName } =
+      discriminated.options;
+    const kindKey = formatPropertyKey(discriminatorPropertyName);
+    const parts: string[] = [];
+    for (const [name, variantType] of discriminated.variants) {
+      const tag = `${kindKey}: ${JSON.stringify(name)}`;
+      parts.push(
+        envelope === "none"
+          ? `${map(variantType)} & { ${tag} }`
+          : `{ ${tag}; ${formatPropertyKey(envelopePropertyName)}: ${map(variantType)} }`,
+      );
+    }
+    // A default variant is sent bare, without a discriminator or envelope.
+    if (discriminated.defaultVariant) {
+      parts.push(map(discriminated.defaultVariant));
+    }
+    return [...new Set(parts)];
+  }
+  const parts = [...u.variants.values()].map((v) => map(v.type));
+  return [...new Set(parts)].filter((p) => p !== "never");
+}
+
+/**
  * Renders an anonymous model — an inline `{ … }` type, a spread operation
  * body, or an inline response — as a TypeScript object type. HTTP metadata
  * (`@header`, `@query`, `@path`, `@statusCode`) travels outside the body and
@@ -3570,22 +3796,48 @@ function renderInlineModel(
   m: Model,
   program: Program,
   models: Map<string, Model>,
-  enums: Map<string, Enum>,
+  enums: Map<string, Enum | Union>,
   renameMap?: Map<string, string>,
 ): string {
   const fields: string[] = [];
-  for (const [, prop] of flattenProperties(m)) {
-    if (isMetadata(program, prop)) continue;
+  const props = [...flattenProperties(m).values()].filter(
+    (prop) => !isMetadata(program, prop),
+  );
+  for (const prop of props) {
     const optional = prop.optional ? "?" : "";
     const type = mapTsType(prop.type, program, models, enums, renameMap);
     const key = formatPropertyKey(jsonPropertyName(program, prop));
     fields.push(`${key}${optional}: ${type}`);
   }
-  if (m.indexer) {
-    const value = mapTsType(m.indexer.value, program, models, enums, renameMap);
-    fields.push(`[key: string]: ${value}`);
-  }
+  const index = indexSignatureType(m, props, program, models, enums, renameMap);
+  if (index) fields.push(`[key: string]: ${index}`);
   return fields.length > 0 ? `{ ${fields.join("; ")} }` : "{}";
+}
+
+/**
+ * The value type of a model's string index signature, or `undefined` when it
+ * has none. TypeScript requires every declared property to fit the index
+ * signature (TS2411), so the indexer's own type is widened with the type of
+ * each declared property — `{ known: string; ...Record<int32> }` gets
+ * `[key: string]: number | string` — plus `undefined` when one is optional.
+ */
+function indexSignatureType(
+  m: Model,
+  props: readonly ModelProperty[],
+  program: Program,
+  models: Map<string, Model>,
+  enums: Map<string, Enum | Union>,
+  renameMap?: Map<string, string>,
+): string | undefined {
+  if (!m.indexer) return undefined;
+  const types = [
+    mapTsType(m.indexer.value, program, models, enums, renameMap),
+    ...props.map((p) =>
+      mapPropertyTsType(p, program, models, enums, renameMap),
+    ),
+  ];
+  if (props.some((p) => p.optional)) types.push("undefined");
+  return [...new Set(types)].join(" | ");
 }
 
 function mapScalar(scalar: Scalar, program: Program): string {
@@ -3676,14 +3928,14 @@ function builtinScalarName(scalar: Scalar): string {
  * TypeSpec standard library's own types (`TypeSpec.Http.*` and the like),
  * which describe the protocol rather than the API's data.
  */
-function isEmittable(type: Model | Enum): boolean {
+function isEmittable(type: Model | Enum | Union): boolean {
   if (!type.name) return false;
   const ns = namespaceNameOf(type);
   return ns !== "TypeSpec" && !ns.startsWith("TypeSpec.");
 }
 
 /** Full name of the namespace a type is declared in; `""` for global. */
-function namespaceNameOf(type: Model | Enum): string {
+function namespaceNameOf(type: Model | Enum | Union): string {
   return type.namespace ? getNamespaceFullName(type.namespace) : "";
 }
 
@@ -3697,7 +3949,7 @@ const reportedDuplicateNames = new WeakMap<Program, Set<string>>();
  * clash is reported once as an error instead of the second silently replacing
  * the first and retyping every property that referenced it.
  */
-function registerNamedType<T extends Model | Enum>(
+function registerNamedType<T extends Model | Enum | Union>(
   program: Program,
   types: Map<string, T>,
   type: T,

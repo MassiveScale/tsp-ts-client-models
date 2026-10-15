@@ -58,6 +58,11 @@ export interface InterfaceView {
   genericSuffix: string;
   /** Ordered list of property view models. */
   properties: PropertyView[];
+  /**
+   * Value type of a `[key: string]: …` index signature, for a model that
+   * spreads or extends a `Record`. Absent when the model has none.
+   */
+  indexSignature?: string;
 }
 
 /**

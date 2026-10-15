@@ -169,6 +169,12 @@ export const $lib = createTypeSpecLibrary({
         default: paramMessage`Two different types are named "${"name"}": one in namespace "${"kept"}" and one in "${"other"}". Every generated type lives in one models.ts, so only the one in "${"kept"}" is emitted, and references to the other resolve to it. Rename one of them.`,
       },
     },
+    "request-type-name-collision": {
+      severity: "warning",
+      messages: {
+        default: paramMessage`The request type synthesized for this operation would be named "${"name"}", but a declared type already has that name. It was emitted as "${"renamed"}" instead. Rename the declared type to keep the generated name.`,
+      },
+    },
     "multiple-services": {
       severity: "warning",
       messages: {

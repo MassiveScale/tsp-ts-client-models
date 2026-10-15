@@ -94,25 +94,28 @@ Each template receives the corresponding view model as its Handlebars context.
 
 **`interface`** — `InterfaceView`
 
-| Field                   | Type                  | Description                                                   |
-| ----------------------- | --------------------- | ------------------------------------------------------------- |
-| `doc`                   | `string \| undefined` | JSDoc text from `@doc`.                                       |
-| `interfaceName`         | `string`              | PascalCase interface name.                                    |
-| `genericSuffix`         | `string`              | Generic parameter string, e.g. `<T>`, or `""`.                |
-| `properties[]`          | `PropertyView[]`      | Ordered list of properties.                                   |
-| `properties[].doc`      | `string \| undefined` | Per-property `@doc` text.                                     |
-| `properties[].name`     | `string`              | Property name, as declared.                                   |
-| `properties[].key`      | `string`              | JSON name (`@encodedName` if set) as a key, quoted if needed. |
-| `properties[].type`     | `string`              | TypeScript type string.                                       |
-| `properties[].optional` | `boolean`             | When `true`, emit `name?`.                                    |
+| Field                   | Type                  | Description                                                                                 |
+| ----------------------- | --------------------- | ------------------------------------------------------------------------------------------- |
+| `doc`                   | `string \| undefined` | JSDoc text from `@doc`.                                                                     |
+| `interfaceName`         | `string`              | PascalCase interface name.                                                                  |
+| `genericSuffix`         | `string`              | Generic parameter string, e.g. `<T>`, or `""`.                                              |
+| `properties[]`          | `PropertyView[]`      | Ordered list of properties.                                                                 |
+| `properties[].doc`      | `string \| undefined` | Per-property `@doc` text.                                                                   |
+| `properties[].name`     | `string`              | Property name, as declared.                                                                 |
+| `properties[].key`      | `string`              | JSON name (`@encodedName` if set) as a key, quoted if needed.                               |
+| `properties[].type`     | `string`              | TypeScript type string.                                                                     |
+| `properties[].optional` | `boolean`             | When `true`, emit `name?`.                                                                  |
+| `indexSignature`        | `string \| undefined` | Value type of a `[key: string]` index signature, for a model that spreads or is a `Record`. |
 
 **`union`** — `UnionView`
 
-| Field           | Type                  | Description                                                     |
-| --------------- | --------------------- | --------------------------------------------------------------- |
-| `doc`           | `string \| undefined` | JSDoc text from `@doc` on the `@discriminator`-annotated model. |
-| `unionName`     | `string`              | PascalCase name of the base (discriminated) model.              |
-| `memberNames[]` | `string[]`            | Ordered, deduplicated interface names of the concrete variants. |
+Used for three kinds of `export type` alias: a `@discriminator` base model (the union of its variants), a named `union` declaration, and a discriminated write-body request type.
+
+| Field           | Type                  | Description                                                                                                                                                          |
+| --------------- | --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `doc`           | `string \| undefined` | JSDoc text from `@doc`.                                                                                                                                              |
+| `unionName`     | `string`              | Name of the alias.                                                                                                                                                   |
+| `memberNames[]` | `string[]`            | Ordered, deduplicated member types, ready to join with `\|`. Usually type names; for a named union, any TypeScript type (`"active"`, `{ kind: "cat"; value: Cat }`). |
 
 **`endpoints`** — `EndpointsView`
 

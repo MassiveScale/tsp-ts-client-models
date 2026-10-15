@@ -1,4 +1,10 @@
-import { Model, ModelProperty, Program } from "@typespec/compiler";
+import {
+  getDiscriminatedUnionFromInheritance,
+  getDiscriminator,
+  Model,
+  ModelProperty,
+  Program,
+} from "@typespec/compiler";
 import { HttpOperation, Visibility, isVisible } from "@typespec/http";
 import {
   Availability,
@@ -93,6 +99,30 @@ export function hasHiddenProperties(
     if (!isVisible(program, prop, visibility)) return true;
   }
   return false;
+}
+
+/**
+ * Whether a write body has any property hidden for this visibility, and so
+ * needs a filtered request type. For a `@discriminator` body every concrete
+ * variant is a possible payload, so a read-only field on just one variant
+ * counts too — checking only the base model would miss it.
+ */
+export function bodyHasHiddenProperties(
+  bodyModel: Model,
+  visibility: Visibility,
+  program: Program,
+): boolean {
+  const discriminator = getDiscriminator(program, bodyModel);
+  const candidates = discriminator
+    ? [
+        bodyModel,
+        ...getDiscriminatedUnionFromInheritance(
+          bodyModel,
+          discriminator,
+        )[0].variants.values(),
+      ]
+    : [bodyModel];
+  return candidates.some((m) => hasHiddenProperties(m, visibility, program));
 }
 
 export function filterPropsForRequest(

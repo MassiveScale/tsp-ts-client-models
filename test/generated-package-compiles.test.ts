@@ -1039,6 +1039,63 @@ describe("generated package compiles", () => {
   );
 
   it(
+    "compiles named, recursive and discriminated unions, record spreads, and renamed request types",
+    { timeout: TYPE_CHECK_TIMEOUT },
+    async () => {
+      const { errors } = await emitAndTypeCheck(
+        `
+          import "@typespec/http";
+          using Http;
+
+          @service(#{ title: "Test API" })
+          namespace TestApi;
+
+          union JsonValue { string, int32, boolean, null, JsonValue[], Record<JsonValue> }
+          union Status { "active", "inactive" }
+          model Cat { meow: boolean; }
+          model Dog { bark: boolean; }
+          @discriminated union Boxed { cat: Cat, dog: Dog }
+          @discriminated(#{ envelope: "none" }) union Flat { cat: Cat, dog: Dog }
+          @discriminator("kind") model Lonely { kind: string; }
+          model Extra { known: string; opt?: boolean; ...Record<int32> }
+          model Widget {
+            @visibility(Lifecycle.Read) id: string;
+            data: JsonValue;
+            status: Status;
+            boxed: Boxed;
+            flat: Flat;
+            lonely: Lonely;
+            extra: Extra;
+          }
+          model WidgetPostRequest { note: string; }
+
+          @route("/w") interface W {
+            @get read(): Widget;
+            @post create(@body body: Widget): void;
+            @get @route("note") note(): WidgetPostRequest;
+          }
+        `,
+        undefined,
+        `
+          import type { JsonValue, Boxed, Flat, Extra, WidgetPostRequest2 } from "./index.js";
+          const json: JsonValue = { a: [1, "two", null, { b: true }] };
+          const boxed: Boxed = { kind: "cat", value: { meow: true } };
+          const flat: Flat = { kind: "dog", bark: true };
+          const extra: Extra = { known: "k", other: 1 };
+          const request: WidgetPostRequest2["status"] = "active";
+          void json;
+          void boxed;
+          void flat;
+          void extra;
+          void request;
+        `,
+      );
+
+      deepStrictEqual(errors, []);
+    },
+  );
+
+  it(
     "rejects a call that omits a required header",
     { timeout: TYPE_CHECK_TIMEOUT },
     async () => {

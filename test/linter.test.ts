@@ -162,4 +162,48 @@ describe("synthesized-request-type-collision lint rule", () => {
       )
       .toBeValid();
   });
+
+  it("finds a collision when only a discriminated variant has hidden properties", async () => {
+    await ruleTester
+      .expect(
+        `
+        import "@typespec/http";
+        using Http;
+
+        @service(#{ title: "Test API" })
+        namespace TestApi;
+
+        @discriminator("kind")
+        model Pet { kind: string; name: string; }
+
+        model Dog extends Pet {
+          kind: "dog";
+          @visibility(TypeSpec.Lifecycle.Read)
+          licenseId: string;
+          @visibility(TypeSpec.Lifecycle.Create)
+          chip: string;
+        }
+
+        @route("/pets")
+        interface Pets {
+          @patch update(@path id: string, @body body: Pet): Pet;
+        }
+
+        @route("/admin/pets")
+        interface AdminPets {
+          @patch
+          @parameterVisibility(TypeSpec.Lifecycle.Create, TypeSpec.Lifecycle.Update)
+          update(@path id: string, @body body: Pet): Pet;
+        }
+      `,
+      )
+      .toEmitDiagnostics([
+        {
+          code: "@massivescale/tsp-ts-client-models/synthesized-request-type-collision",
+        },
+        {
+          code: "@massivescale/tsp-ts-client-models/synthesized-request-type-collision",
+        },
+      ]);
+  });
 });
