@@ -28,7 +28,7 @@ Passed to the constructor of every client class.
 interface ClientConfig {
   baseUrl: string; // Required. No trailing slash needed.
   defaultHeaders?: Record<string, string>; // Sent with every request.
-  timeout?: number; // Milliseconds. Uses AbortSignal.timeout().
+  timeout?: number; // Milliseconds, for the whole call including retries.
   retry?: RetryConfig;
 
   // Extensibility — see docs/client-extensibility.md
@@ -36,7 +36,7 @@ interface ClientConfig {
   middleware?: HttpMiddleware[]; // Onion-style layers, outermost first.
   onRequest?: RequestHook; // Before middleware, once per attempt.
   onResponse?: ResponseHook; // After middleware, once per attempt.
-  onError?: ErrorHook; // Once, after retries are exhausted.
+  onError?: ErrorHook; // Once, after retries are exhausted. Not on cancel.
 }
 ```
 
@@ -54,7 +54,12 @@ interface RetryConfig {
 }
 ```
 
-Retries use **exponential backoff**: `baseDelayMs * 2^attempt`. For `429` responses, the `Retry-After` header is honored when present.
+Retries use **exponential backoff**: `baseDelayMs * 2^attempt`. When a retried `429` or `503` carries a `Retry-After` header (in seconds), the client waits that long instead.
+
+- A `retryOn` status is retried for every method, because the server sent it to say it did not act on the request.
+- A network failure, where no response arrived, is retried only for idempotent methods: `GET`, `HEAD`, `PUT`, `DELETE` and `OPTIONS`. A `POST` or `PATCH` may already have reached the server, so resending it could apply it twice.
+- A call the caller cancelled, or one that timed out, is never retried. Aborting during a backoff wait ends the wait at once.
+- The body of a response that is retried is discarded, so it does not hold the connection open.
 
 ### `RequestOptions`
 
@@ -372,7 +377,7 @@ The method signatures, path/body/query parameters, and `RequestOptions` are iden
 ### Semantics
 
 - **Cold:** the underlying `fetch` fires on `subscribe`, not when the Observable is created. Each subscription triggers its own request; use `shareReplay`/`share` (or Angular's `async` pipe with a single subscription) if you need to share one result across subscribers.
-- **Cancellation:** unsubscribing aborts the in-flight request via `AbortController`. A `RequestOptions.signal` you pass also aborts it, and a configured `timeout` still applies.
+- **Cancellation:** unsubscribing aborts the in-flight request via `AbortController` and stops any pending retry. A `RequestOptions.signal` you pass also aborts it, and a configured `timeout` still applies and rejects with the same `TimeoutError` as the Promise client. Neither unsubscribing nor your own signal calls `onError`.
 - **Errors:** `ApiError` / `RateLimitError` / `ServiceUnavailableError` are delivered via the Observable's error channel, so `catchError` sees the same types as the Promise client. Retry/backoff and timeout behavior are shared with `HttpClient` — `RxHttpClient` reuses the same transport.
 - **Extensibility:** `config.fetch`, `config.middleware`, `client.useMiddleware()`, and the `onRequest`/`onResponse`/`onError` hooks all behave identically, for the same reason. `onError` fires before the error reaches `subscriber.error`, so a `catchError` downstream sees whatever the hook decided to throw.
 
@@ -428,12 +433,16 @@ Or extend `HttpClient` directly to build a fully custom client that still partic
 
 ## Timeout
 
-Set a global timeout (milliseconds) via `ClientConfig.timeout`. Per-request timeout can be applied using a manual `AbortSignal`:
+Set a global timeout (milliseconds) via `ClientConfig.timeout`. It bounds the whole call, retries and backoff waits included, and it applies even when a request passes its own `signal`: whichever fires first wins. A timeout rejects with a `TimeoutError` and is reported to `onError`.
+
+A per-request timeout or cancellation uses an `AbortSignal`:
 
 ```typescript
-const widget = await client.read("abc123", {
+const widget = await client.read("abc123", undefined, {
   signal: AbortSignal.timeout(5_000), // 5 seconds
 });
 ```
+
+A call the caller aborts rejects with the signal's reason (an `AbortError` by default) and is **not** reported to `onError`, since the caller already knows. The same applies to unsubscribing from an Observable client.
 
 `AbortSignal.timeout()` is available in Node.js 17.3+ and all modern browsers.

@@ -1711,11 +1711,18 @@ function buildEndpointFunctionText(
 // ─── client/ApiClient.ts — static base infrastructure ────────────────────────
 
 const API_CLIENT_CONTENT = `export interface RetryConfig {
-  /** Maximum number of attempts before giving up. Default: 3. */
+  /** Maximum number of attempts, including the first. Default: 3. */
   maxAttempts?: number;
-  /** Base delay in milliseconds for exponential backoff. Default: 1000. */
+  /**
+   * Base delay in milliseconds for exponential backoff (1x, 2x, 4x, …). A
+   * \`Retry-After\` header on the response replaces it. Default: 1000.
+   */
   baseDelayMs?: number;
-  /** HTTP status codes that trigger a retry. Default: [429, 503]. */
+  /**
+   * HTTP status codes that trigger a retry, for any method. A network failure
+   * is retried only for idempotent methods (GET, HEAD, PUT, DELETE, OPTIONS),
+   * and a cancelled or timed-out call is never retried. Default: [429, 503].
+   */
   retryOn?: number[];
 }
 
@@ -1791,7 +1798,10 @@ export interface ClientConfig {
   baseUrl: string;
   /** Headers merged into every request. */
   defaultHeaders?: Record<string, string>;
-  /** Request timeout in milliseconds (passed as AbortSignal). */
+  /**
+   * Timeout in milliseconds for a whole call, retries and backoff included.
+   * Applies together with a per-request \`signal\`; whichever fires first wins.
+   */
   timeout?: number;
   /** Retry configuration. */
   retry?: RetryConfig;
@@ -1807,7 +1817,11 @@ export interface ClientConfig {
   onRequest?: RequestHook;
   /** Runs after all middleware, once per retry attempt. */
   onResponse?: ResponseHook;
-  /** Runs once when a call ultimately fails, after retries are exhausted. */
+  /**
+   * Runs once when a call ultimately fails, after retries are exhausted. Not
+   * called when the caller cancels through \`options.signal\` or by
+   * unsubscribing.
+   */
   onError?: ErrorHook;
 }
 
@@ -1889,8 +1903,47 @@ export class ServiceUnavailableError extends ApiError {
  */
 const MAX_TIMER_DELAY_MS = 2147483647;
 
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+/**
+ * Waits \`ms\` milliseconds, or rejects with the signal's reason as soon as it
+ * aborts, so a cancelled call does not sit out the rest of a retry backoff.
+ */
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason);
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal?.reason);
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+/**
+ * Methods that are safe to resend after a network failure (RFC 9110). A failed
+ * \`POST\` or \`PATCH\` may already have reached the server, so resending it
+ * could apply it twice; those are retried only on a \`retryOn\` status, which
+ * the server sends to say it did not act on the request.
+ */
+const IDEMPOTENT_METHODS = new Set([
+  "GET",
+  "HEAD",
+  "PUT",
+  "DELETE",
+  "OPTIONS",
+  "TRACE",
+]);
+
+/** Discards a response body that will not be read, freeing its connection. */
+async function discardBody(response: Response): Promise<void> {
+  if (response.bodyUsed || !response.body) return;
+  await response.body.cancel().catch(() => undefined);
 }
 
 /**
@@ -2061,8 +2114,10 @@ export class HttpClient {
     path: string,
     options?: TransportOptions & { body?: unknown },
   ): Promise<T> {
-    const { maxAttempts = 3, baseDelayMs = 1000, retryOn = [429, 503] } =
+    const { baseDelayMs = 1000, retryOn = [429, 503] } =
       this.config.retry ?? {};
+    // At least one attempt, so a misconfigured \`maxAttempts: 0\` still sends.
+    const maxAttempts = Math.max(1, this.config.retry?.maxAttempts ?? 3);
 
     // Resolved without the query string up front so the error context always
     // carries a URL, even if building the real one throws below.
@@ -2078,10 +2133,14 @@ export class HttpClient {
       setHeaders(headers, this.config.defaultHeaders);
       setHeaders(headers, options?.headers);
 
-      let signal = options?.signal;
-      if (this.config.timeout && !signal) {
-        signal = AbortSignal.timeout(this.config.timeout);
+      // The timeout bounds the whole call, retries and backoff included, and
+      // applies alongside a caller's own signal rather than being dropped.
+      const signals = [options?.signal];
+      if (this.config.timeout) {
+        signals.push(AbortSignal.timeout(this.config.timeout));
       }
+      const active = signals.filter((s): s is AbortSignal => s !== undefined);
+      const signal = active.length > 1 ? AbortSignal.any(active) : active[0];
 
       // Serialized inside the try so that an unserializable body (a circular
       // reference, a BigInt) reaches onError like any other failure. Only a
@@ -2103,9 +2162,13 @@ export class HttpClient {
         this.config.fetch ?? ((request) => fetch(request)),
       );
 
+      const backoff = (failedAttempt: number) =>
+        baseDelayMs * Math.pow(2, failedAttempt);
+      let wait = 0;
       let succeeded: Response | undefined;
       for (; attempt < maxAttempts; attempt++) {
-        if (attempt > 0) await delay(baseDelayMs * Math.pow(2, attempt - 1));
+        if (attempt > 0) await delay(wait, signal);
+        signal?.throwIfAborted();
         const context: RequestContext = { method, url, attempt };
         try {
           let request = new Request(url, { method, headers, body, signal });
@@ -2121,21 +2184,31 @@ export class HttpClient {
             break;
           }
           if (retryOn.includes(resp.status) && attempt < maxAttempts - 1) {
-            if (resp.status === 429) {
-              const after = retryAfterMs(resp);
-              if (after !== undefined) await delay(after);
-            }
+            // The server's own Retry-After replaces the backoff, rather than
+            // adding to it.
+            wait = retryAfterMs(resp) ?? backoff(attempt);
             lastError = toApiError(resp);
+            await discardBody(resp);
             continue;
           }
           const errorBody = await resp.json().catch(() => undefined);
           throw toApiError(resp, errorBody);
         } catch (err) {
-          if (err instanceof ApiError) throw err;
+          // A status error is final, a cancelled or timed-out call must not be
+          // resent, and a network failure is only retried when resending
+          // cannot apply the request twice.
+          if (
+            err instanceof ApiError ||
+            signal?.aborted ||
+            !IDEMPOTENT_METHODS.has(method.toUpperCase())
+          ) {
+            throw err;
+          }
+          wait = backoff(attempt);
           lastError = err;
         }
       }
-      if (!succeeded) throw lastError ?? new ApiError(0, "Unknown error");
+      if (!succeeded) throw lastError;
       // Parsed outside the retry loop so a malformed success body is surfaced
       // rather than retried.
       if (method === "HEAD" || succeeded.status === 204 || succeeded.status === 205) {
@@ -2143,6 +2216,10 @@ export class HttpClient {
       }
       return (await readBody(succeeded, options?.responseFormat)) as T;
     } catch (err) {
+      // Cancelling is something the caller did, not a failure to report: the
+      // error still reaches them, but onError is not called for it. A timeout
+      // is a failure, so it does reach onError.
+      if (options?.signal?.aborted) throw err;
       throw await this.applyErrorHook(err, {
         method,
         url,
@@ -2269,8 +2346,12 @@ import { HttpClient, type TransportOptions } from "./ApiClient.js";
 export class RxHttpClient extends HttpClient {
   /**
    * Wraps a Promise-returning transport call in a cold Observable, wiring
-   * unsubscribe (and any configured request timeout / outer signal) to an
-   * AbortController passed into the underlying request.
+   * unsubscribe (and any outer signal) to an AbortController passed into the
+   * underlying request as the caller's signal. The transport applies the
+   * configured timeout itself, so both flavors time out the same way.
+   *
+   * Unsubscribing counts as the caller cancelling: the in-flight request is
+   * aborted, no further retry is attempted, and \`onError\` is not called.
    */
   protected observe<T>(
     run: (signal: AbortSignal) => Promise<T>,
@@ -2278,14 +2359,10 @@ export class RxHttpClient extends HttpClient {
   ): Observable<T> {
     return new Observable<T>((subscriber) => {
       const controller = new AbortController();
-      const onAbort = () => controller.abort();
+      const onAbort = () => controller.abort(outerSignal?.reason);
       if (outerSignal) {
-        if (outerSignal.aborted) controller.abort();
+        if (outerSignal.aborted) controller.abort(outerSignal.reason);
         else outerSignal.addEventListener("abort", onAbort, { once: true });
-      }
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      if (this.config.timeout) {
-        timer = setTimeout(() => controller.abort(), this.config.timeout);
       }
       run(controller.signal).then(
         (value) => {
@@ -2295,7 +2372,6 @@ export class RxHttpClient extends HttpClient {
         (err) => subscriber.error(err),
       );
       return () => {
-        if (timer) clearTimeout(timer);
         if (outerSignal) outerSignal.removeEventListener("abort", onAbort);
         controller.abort();
       };

@@ -63,7 +63,7 @@ request()
 Two consequences:
 
 - **Middleware and the `onRequest`/`onResponse` hooks run once per attempt.** A layer that attaches an access token is re-invoked on every retry, so an expired token is refreshed instead of being replayed.
-- **`onError` runs once per logical call**, after the last attempt fails. It is a terminal, app-level handler — not a per-attempt observer. If you need per-attempt error handling, put a `try`/`catch` around `next()` inside a middleware.
+- **`onError` runs once per logical call**, after the last attempt fails. It is a terminal, app-level handler — not a per-attempt observer. If you need per-attempt error handling, put a `try`/`catch` around `next()` inside a middleware. It is not called when the caller cancels the call, through `options.signal` or by unsubscribing from an Observable client; a `config.timeout` expiry is a failure and does reach it.
 
 ---
 
