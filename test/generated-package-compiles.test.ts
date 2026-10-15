@@ -407,69 +407,43 @@ describe("generated package compiles", () => {
     },
   );
 
-  // Regression: a generated type named after a global that a scalar maps to
-  // shadows it inside models.ts, so a sibling model's `utcDateTime` silently
-  // resolved to the user's own interface. It compiled — which is what made it
-  // dangerous — so the probe asserts the property is really a JS Date.
-  for (const [global, builtin, witness] of [
-    ["Date", "utcDateTime", "getTime()"],
-    ["Uint8Array", "bytes", "byteLength"],
-  ] as const) {
-    it(
-      `keeps the global ${global} usable when a model shadows it`,
-      { timeout: TYPE_CHECK_TIMEOUT },
-      async () => {
-        const { errors, files } = await emitAndTypeCheck(
-          `
-          import "@typespec/http";
-          using Http;
+  // Dates and bytes are typed as their JSON wire values (strings), so a model
+  // named after the global they used to map to no longer changes what a
+  // sibling property means — and needs no alias.
+  it(
+    "keeps scalar properties as wire strings when models shadow Date and Uint8Array",
+    { timeout: TYPE_CHECK_TIMEOUT },
+    async () => {
+      const { errors, files } = await emitAndTypeCheck(
+        `
+        import "@typespec/http";
+        using Http;
 
-          @service(#{ title: "Test API" })
-          namespace TestApi;
+        @service(#{ title: "Test API" })
+        namespace TestApi;
 
-          model ${global} { id: string; }
-          model Widget { real: ${builtin}; shadow: ${global}; }
+        model Date { id: string; }
+        model Uint8Array { id: string; }
+        model Widget { when: utcDateTime; raw: bytes; a: Date; b: Uint8Array; }
 
-          @route("/widgets")
-          interface Widgets { @get list(): Widget[]; }
+        @route("/widgets")
+        interface Widgets { @get list(): Widget[]; }
+      `,
+        undefined,
+        `import type { Widget } from "./models.js";
+         declare const w: Widget;
+         export const when: string = w.when;
+         export const raw: string = w.raw;
+         export const a: string = w.a.id;
         `,
-          undefined,
-          // `real` must be the global; `shadow` must be the user's model.
-          `import type { Widget } from "./models.js";
-           declare const w: Widget;
-           export const a = w.real.${witness};
-           export const b: string = w.shadow.id;
-          `,
-        );
+      );
 
-        deepStrictEqual(errors, []);
-
-        const modelsKey = Object.keys(files).find((k) =>
-          k.endsWith("models.ts"),
-        );
-        ok(modelsKey, "Expected models.ts");
-        const models = files[modelsKey];
-        ok(
-          models.includes(
-            `type Global${global} = typeof globalThis.${global}.prototype;`,
-          ),
-          "Expected the global alias declaration",
-        );
-        ok(
-          models.includes(`real: Global${global};`),
-          "The scalar property must use the alias",
-        );
-        ok(
-          models.includes(`shadow: ${global};`),
-          "A reference to the user's own model must not be aliased",
-        );
-        ok(
-          !/^export type Global/m.test(models),
-          "The alias must not be exported into the barrel",
-        );
-      },
-    );
-  }
+      deepStrictEqual(errors, []);
+      const key = Object.keys(files).find((k) => k.endsWith("models.ts"));
+      ok(key, "Expected models.ts");
+      ok(!files[key].includes("Global"), "No global alias is needed");
+    },
+  );
 
   // Regression: the shadow alias is a name-only rewrite, so it must not swallow
   // the model's generic arguments — `Date<string>` became a bare `DateModel`,
@@ -500,52 +474,6 @@ describe("generated package compiles", () => {
       ok(
         files[key].includes("Promise<DateModel<string>>"),
         "The alias must carry the generic argument through",
-      );
-    },
-  );
-
-  // Regression: the shadow alias used `InstanceType<…>`, which a spec declaring
-  // `model InstanceType` shadows in that very file — TS2315.
-  it(
-    "builds the shadow alias without depending on another global name",
-    { timeout: TYPE_CHECK_TIMEOUT },
-    async () => {
-      const { errors, files } = await emitAndTypeCheck(
-        `
-        import "@typespec/http";
-        using Http;
-
-        @service(#{ title: "Test API" })
-        namespace TestApi;
-
-        model InstanceType { id: string; }
-        model globalThis { id: string; }
-        model Date { id: string; }
-        model Widget { real: utcDateTime; a: InstanceType; b: globalThis; c: Date; }
-
-        @route("/widgets")
-        interface Widgets { @get list(): Widget[]; }
-      `,
-        undefined,
-        `import type { Widget } from "./models.js";
-         declare const w: Widget;
-         export const t: number = w.real.getTime();
-        `,
-      );
-
-      deepStrictEqual(errors, []);
-
-      const key = Object.keys(files).find((k) => k.endsWith("models.ts"));
-      ok(key, "Expected models.ts");
-      ok(
-        files[key].includes(
-          "type GlobalDate = typeof globalThis.Date.prototype;",
-        ),
-        "Expected the alias to read .prototype off the constructor",
-      );
-      ok(
-        !files[key].includes("InstanceType<"),
-        "The alias must not depend on the InstanceType utility",
       );
     },
   );
@@ -648,8 +576,8 @@ describe("generated package compiles", () => {
           "The body parameter must use the alias too",
         );
         ok(
-          client.includes("since?: Date"),
-          "A scalar query param must still mean the global Date",
+          client.includes("since?: string"),
+          "A date query param is its wire string, not the Date model",
         );
       },
     );

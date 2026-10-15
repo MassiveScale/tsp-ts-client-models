@@ -659,40 +659,6 @@ async function emitVersion(
     // Read back from the emitted text rather than recomputing the name set, so
     // the collision checks can never disagree with what models.ts exports.
     generatedTypeNames = collectExportedNames(modelsContent);
-
-    // A generated type named after a global that scalars map to shadows it
-    // inside this very file. Re-render with those scalar references pointed at
-    // an alias instead. Rendering is pure, so a second pass is safe — and it
-    // only happens for the rare spec that triggers it.
-    const shadowed = resolveShadowedScalarGlobals(generatedTypeNames);
-    if (shadowed.aliases.size > 0) {
-      for (const [global, alias] of shadowed.aliases) {
-        reportDiagnostic(program, {
-          code: "shadowed-global-type",
-          format: { name: global, alias },
-          target: NoTarget,
-        });
-      }
-      modelsContent = buildModelsFile(
-        nsFullName,
-        models,
-        enums,
-        requestTypes,
-        requestTypeBaseModels,
-        referencedModelNames,
-        discriminatedUnions,
-        discriminatedRequestUnions,
-        program,
-        renderer,
-        new Map([
-          ...mergePatchRenameMap,
-          ...[...shadowed.aliases].map(
-            ([global, alias]) => [`scalar:${global}`, alias] as const,
-          ),
-        ]),
-        shadowed.declarations,
-      );
-    }
   }
 
   // Emit endpoint files and (optionally) client files; collect exports for index
@@ -1446,9 +1412,8 @@ function buildModelsFile(
   program: Program,
   renderer: Renderer,
   renameMap: Map<string, string>,
-  prelude: string[] = [],
 ): string {
-  const parts: string[] = [...prelude];
+  const parts: string[] = [];
 
   for (const [, e] of enums) {
     if (!isEmittable(e)) continue;
@@ -1584,13 +1549,12 @@ function buildFilteredInterfaceView(
 }
 
 /**
- * Maps a model property to its TypeScript type, honoring `@encode(string)` on
- * boolean targets (TypeSpec 1.14.0). The generated client uses native `fetch`
- * with `JSON.stringify`/`response.json()` and performs no per-field transform,
- * so a boolean carried on the wire as the string `"true"`/`"false"` is typed as
- * `string` — matching what `response.json()` actually yields — rather than the
- * logical `boolean`, which would be a runtime type mismatch. All other property
- * types (and all other encodings) fall through to the normal type mapping.
+ * Maps a model property to the TypeScript type of its JSON wire value,
+ * honoring an `@encode` on the property itself — `@encode(string)` on a
+ * boolean, `@encode(unixTimestamp, int64)` on a date, `@encode(seconds,
+ * float64)` on a duration. The client performs no per-field conversion, so the
+ * type must match what `response.json()` actually yields. An `@encode` on the
+ * scalar declaration is handled by {@link mapScalar}.
  */
 function mapPropertyTsType(
   prop: ModelProperty,
@@ -1600,13 +1564,8 @@ function mapPropertyTsType(
   renameMap?: Map<string, string>,
 ): string {
   if (prop.type.kind === "Scalar") {
-    const scalar = prop.type as Scalar;
-    if (builtinScalarName(scalar) === "boolean") {
-      const encode = getEncode(program, prop) ?? getEncode(program, scalar);
-      if (encode && builtinScalarName(encode.type) === "string") {
-        return "string";
-      }
-    }
+    const encode = getEncode(program, prop);
+    if (encode) return mapBuiltinScalar(builtinScalarName(encode.type));
   }
   return mapTsType(prop.type, program, models, enums, renameMap);
 }
@@ -2902,54 +2861,6 @@ function buildClientView(
 }
 
 /**
- * Globals that `models.ts` references as the target of a scalar mapping:
- * `utcDateTime`/`offsetDateTime` → `Date`, `bytes` → `Uint8Array`.
- *
- * A generated type of the same name shadows the global *within that file*, so
- * a sibling model's `utcDateTime` property would silently resolve to the
- * user's own `Date` interface. It still compiles, which is what makes it
- * dangerous — the property is simply typed as the wrong thing.
- *
- * `Record` is not listed: TypeSpec rejects a `model Record` declaration before
- * the emitter ever sees it, since that shadows its own built-in template.
- */
-const MODEL_SCALAR_GLOBALS: readonly string[] = ["Date", "Uint8Array"];
-
-/**
- * For each scalar global shadowed by a generated type, picks a local alias and
- * the declaration that recovers the real global.
- *
- * A plain `type GlobalDate = Date` would not work: module-scope declarations
- * are hoisted, so it would resolve to the shadowing interface too. Going
- * through `globalThis` sidesteps the type namespace entirely.
- *
- * The declaration deliberately names no type other than the global itself:
- * `InstanceType<…>` would break for a spec that also declares `model
- * InstanceType`, which shadows that utility in this very file. Reading
- * `.prototype` off the constructor value has no such dependency — and
- * `globalThis` is resolved in the *value* namespace, so even a `model
- * globalThis` cannot shadow it.
- */
-function resolveShadowedScalarGlobals(
-  generatedTypeNames: ReadonlySet<string>,
-): { aliases: Map<string, string>; declarations: string[] } {
-  const aliases = new Map<string, string>();
-  const declarations: string[] = [];
-  const claimed = new Set(generatedTypeNames);
-  for (const global of MODEL_SCALAR_GLOBALS) {
-    if (!generatedTypeNames.has(global)) continue;
-    const alias = uniqueName(`Global${global}`, claimed);
-    claimed.add(alias);
-    aliases.set(global, alias);
-    declarations.push(
-      `/** The global \`${global}\`, aliased because a generated type shadows that name. */\n` +
-        `type ${alias} = typeof globalThis.${global}.prototype;`,
-    );
-  }
-  return { aliases, declarations };
-}
-
-/**
  * Global identifiers the generated client text references by name. A model
  * import with one of these names would shadow the global inside the client
  * module — `import type { Promise }` turns every `Promise<T>` return type into
@@ -3069,7 +2980,7 @@ function buildClientMethodView(
     `{ ${[
       ...params.map(
         (p) =>
-          `${formatPropertyKey(p.name)}${p.param.optional ? "?" : ""}: ${mapTsType(p.param.type, program, models, enums, renameMap)}`,
+          `${formatPropertyKey(p.name)}${p.param.optional ? "?" : ""}: ${mapPropertyTsType(p.param, program, models, enums, renameMap)}`,
       ),
       ...(indexSignature ? ["[key: string]: unknown"] : []),
     ].join("; ")} }`;
@@ -3541,7 +3452,7 @@ function buildTsConfig(): string {
 // ─── Type mapping ────────────────────────────────────────────────────────────
 
 /**
- * Three kinds of rewrite share one rename map during rendering, distinguished
+ * Two kinds of rewrite share one rename map during rendering, distinguished
  * by key prefix. Keeping them separate matters: they are not interchangeable.
  *
  * | Key              | Meaning                                                |
@@ -3551,12 +3462,8 @@ function buildTsConfig(): string {
  * |                  | are dropped, because the replacement is already concrete. |
  * | `alias:<name>`   | Name-only rewrite. The type is unchanged, so generic    |
  * |                  | arguments are preserved.                                 |
- * | `scalar:<name>`  | Rewrite of a scalar mapping's target (the global `Date` |
- * |                  | a `utcDateTime` maps to), never of a declared type.     |
  */
 const RENAME_ALIAS = "alias:";
-/** See {@link RENAME_ALIAS}. */
-const RENAME_SCALAR = "scalar:";
 
 /**
  * Whether a templated model renders as the native `T[]` rather than by name.
@@ -3598,10 +3505,8 @@ function mapTsType(
   renameMap?: Map<string, string>,
 ): string {
   switch (type.kind) {
-    case "Scalar": {
-      const mapped = mapScalar(type as Scalar, program);
-      return renameMap?.get(`${RENAME_SCALAR}${mapped}`) ?? mapped;
-    }
+    case "Scalar":
+      return mapScalar(type as Scalar, program);
 
     case "Model": {
       const m = type as Model;
@@ -3840,15 +3745,26 @@ function indexSignatureType(
   return [...new Set(types)].join(" | ");
 }
 
+/**
+ * Maps a scalar to the TypeScript type of its JSON wire value.
+ *
+ * The generated client sends and receives plain JSON (`JSON.stringify` and
+ * `response.json()`) with no per-field conversion, so every type says what is
+ * actually on the wire: `utcDateTime`, `offsetDateTime`, `plainDate`,
+ * `plainTime` and `duration` are strings, and `bytes` is a base64 string.
+ * An `@encode` on the scalar declaration picks the wire type instead — for
+ * example `@encode(unixTimestamp, int32)` makes a date a `number`.
+ */
 function mapScalar(scalar: Scalar, program: Program): string {
   const fmt = getFormat(program, scalar);
   if (fmt) return "string"; // all formats (uuid, uri, email, phone, etc.) → string
+  const encode = getEncode(program, scalar);
+  return mapBuiltinScalar(builtinScalarName(encode?.type ?? scalar));
+}
 
-  const builtin = builtinScalarName(scalar);
-  switch (builtin) {
-    case "string":
-    case "url":
-      return "string";
+/** Maps a built-in scalar name to the TypeScript type of its JSON value. */
+function mapBuiltinScalar(name: string): string {
+  switch (name) {
     case "int8":
     case "int16":
     case "int32":
@@ -3868,16 +3784,9 @@ function mapScalar(scalar: Scalar, program: Program): string {
       return "number";
     case "boolean":
       return "boolean";
-    case "bytes":
-      return "Uint8Array";
-    case "utcDateTime":
-    case "offsetDateTime":
-      return "Date";
-    case "plainDate":
-    case "plainTime":
-    case "duration":
-      return "string";
     default:
+      // string, url, bytes (base64), utcDateTime, offsetDateTime, plainDate,
+      // plainTime, duration, and any custom scalar not derived from the above.
       return "string";
   }
 }

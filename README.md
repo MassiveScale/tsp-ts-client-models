@@ -324,25 +324,23 @@ export type Pet = Dog | Cat;
 
 Every reference to `Pet` (e.g. `pets: Pet[]`) resolves to the union, enabling standard TypeScript discriminated-union narrowing on `petKind`. See [docs/discriminated-models.md](docs/discriminated-models.md) for details, including multi-level hierarchies.
 
-### Property encoding
+### Wire types
 
-TypeSpec scalars map to their natural TypeScript types (`string`, `number`, `boolean`, `Date`, `Uint8Array`, …). The one encoding that changes the generated type is `@encode(string)` on a `boolean` (TypeSpec 1.14.0+):
+The generated client sends and receives plain JSON (`JSON.stringify` and `response.json()`) and performs no per-field conversion, so every property is typed as the value that actually arrives:
 
-```typespec
-model Widget {
-  @encode(string) active: boolean; // carried on the wire as "true" / "false"
-  enabled: boolean;
-}
-```
+| TypeSpec                                                          | TypeScript        |
+| ----------------------------------------------------------------- | ----------------- |
+| `utcDateTime`, `offsetDateTime`, `plainDate`, `plainTime`         | `string`          |
+| `duration`                                                        | `string`          |
+| `bytes`                                                           | `string` (base64) |
+| integer and float types, `decimal`                                | `number`          |
+| `@encode(DateTimeKnownEncoding.unixTimestamp, int32) utcDateTime` | `number`          |
+| `@encode(DurationKnownEncoding.seconds, float64) duration`        | `number`          |
+| `@encode(string) boolean`                                         | `string`          |
 
-```typescript
-export interface Widget {
-  active: string; // matches what response.json() actually yields
-  enabled: boolean;
-}
-```
+An `@encode` on a property, or on a custom scalar's declaration, chooses the wire type. Convert in your own code where you need a richer value, for example `new Date(widget.createdAt)`.
 
-The generated `fetch`/JSON client performs no per-field transformation, so a boolean carried as a string arrives from `response.json()` as `"true"`/`"false"` — typing it `string` reflects the real runtime shape. Plain booleans and every other encoding are unaffected.
+Raw payloads are the exception. A `bytes` request body with a binary media type such as `application/octet-stream` accepts `Blob | ArrayBuffer | Uint8Array`, and a `bytes` response with one resolves to a `Uint8Array`. See the [HTTP client docs](docs/http-client.md#request-bodies).
 
 ## Development
 

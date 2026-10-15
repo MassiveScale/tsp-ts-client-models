@@ -19,6 +19,92 @@ async function emitWith(
   `);
 }
 
+describe("wire types", () => {
+  /** Emits `Widget` with the given properties and returns its body. */
+  async function widget(props: string, extra = ""): Promise<string> {
+    const out = await emitWith(`${extra} model Widget { ${props} }`, "Widget");
+    const models = out["models.ts"];
+    const start = models.indexOf("export interface Widget {");
+    return models.slice(start, models.indexOf("\n}", start));
+  }
+
+  it("types dates and times as the strings JSON carries", async () => {
+    const body = await widget(
+      `a: utcDateTime; b: offsetDateTime; c: plainDate; d: plainTime; e: duration;`,
+    );
+    for (const p of ["a", "b", "c", "d", "e"]) {
+      ok(body.includes(`${p}: string;`), `${p} should be a string\n${body}`);
+    }
+  });
+
+  it("types bytes as the base64 string JSON carries", async () => {
+    ok((await widget(`raw: bytes;`)).includes("raw: string;"));
+  });
+
+  it("types a unix-timestamp date as a number", async () => {
+    const body = await widget(
+      `@encode(DateTimeKnownEncoding.unixTimestamp, int32) at: utcDateTime;`,
+    );
+    ok(body.includes("at: number;"), body);
+  });
+
+  it("keeps an rfc7231 date a string", async () => {
+    const body = await widget(
+      `@encode(DateTimeKnownEncoding.rfc7231) at: utcDateTime;`,
+    );
+    ok(body.includes("at: string;"), body);
+  });
+
+  it("types a duration in seconds as a number", async () => {
+    const body = await widget(
+      `@encode(DurationKnownEncoding.seconds, int32) a: duration;
+       @encode(DurationKnownEncoding.seconds, float64) b: duration;`,
+    );
+    ok(body.includes("a: number;") && body.includes("b: number;"), body);
+  });
+
+  it("keeps base64url bytes a string", async () => {
+    const body = await widget(
+      `@encode(BytesKnownEncoding.base64url) raw: bytes;`,
+    );
+    ok(body.includes("raw: string;"), body);
+  });
+
+  it("types a boolean encoded as a string as a string", async () => {
+    ok((await widget(`@encode(string) on: boolean;`)).includes("on: string;"));
+  });
+
+  it("applies an @encode on the scalar declaration wherever it is used", async () => {
+    const body = await widget(
+      `at: Epoch; history: Epoch[];`,
+      `@encode(DateTimeKnownEncoding.unixTimestamp, int64) scalar Epoch extends utcDateTime;`,
+    );
+    ok(body.includes("at: number;"), body);
+    ok(body.includes("history: number[];"), body);
+  });
+
+  it("applies a parameter's @encode to its query type", async () => {
+    const withQuery = await emit(`
+      import "@typespec/http";
+      using Http;
+      @service(#{ title: "Test API" })
+      namespace TestApi;
+      @route("/w") interface W {
+        @get list(
+          @query @encode(DateTimeKnownEncoding.unixTimestamp, int32) since?: utcDateTime,
+          @query until?: utcDateTime,
+        ): string[];
+      }
+    `);
+    ok(
+      withQuery["client/WClient.ts"].includes(
+        "query?: { since?: number; until?: string;",
+      ),
+      withQuery["client/WClient.ts"],
+    );
+  });
+});
+
 describe("generic models", () => {
   it("declares type parameters in declaration order", async () => {
     const out = await emitWith(

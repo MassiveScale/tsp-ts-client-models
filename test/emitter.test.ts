@@ -336,8 +336,8 @@ describe("emitter", () => {
     ok(content.includes("i64: number;"), "int64 → number");
     ok(content.includes("f: number;"), "float64 → number");
     ok(content.includes("b: boolean;"), "boolean → boolean");
-    ok(content.includes("dt: Date;"), "utcDateTime → Date");
-    ok(content.includes("by: Uint8Array;"), "bytes → Uint8Array");
+    ok(content.includes("dt: string;"), "utcDateTime → string");
+    ok(content.includes("by: string;"), "bytes → base64 string");
     ok(content.includes("uid: string;"), "@format(uuid) → string");
   });
 
