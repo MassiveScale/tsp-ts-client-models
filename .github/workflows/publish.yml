@@ -1,0 +1,69 @@
+name: Publish to npm
+
+# Publishing a GitHub release whose tag is the package version (`v1.0.0` or
+# `v1.0.0-beta.2`) publishes the package. npm trusted publishing authenticates
+# the job through GitHub's OIDC token, so no npm token is stored in the
+# repository, and `--provenance` links the published package to this run.
+on:
+  release:
+    types: [published]
+
+jobs:
+  publish:
+    name: Publish to npm
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          registry-url: https://registry.npmjs.org
+
+      # Trusted publishing needs a newer npm than some Node.js releases bundle.
+      - name: Update npm
+        run: npm install -g npm@latest
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check formatting
+        run: npm run format:check
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Build
+        run: npm run build
+
+      - name: Test
+        run: npm test
+
+      - name: Verify version matches release tag
+        run: |
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
+            echo "Version mismatch: package.json=$PKG_VERSION, tag=$GITHUB_REF_NAME"
+            exit 1
+          fi
+
+      # The dist-tag is chosen here from the version, never from package.json,
+      # so a prerelease cannot move `latest` and a stable release always does.
+      # `--ignore-scripts` skips `prepublishOnly` and `prepack`, which would
+      # repeat the lint, build and test steps above.
+      - name: Publish
+        run: |
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          if [[ "$PKG_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+-.*$ ]]; then
+            echo "Publishing prerelease version $PKG_VERSION with --tag beta"
+            npm publish --access public --provenance --ignore-scripts --tag beta
+          else
+            echo "Publishing stable version $PKG_VERSION with --tag latest"
+            npm publish --access public --provenance --ignore-scripts --tag latest
+          fi

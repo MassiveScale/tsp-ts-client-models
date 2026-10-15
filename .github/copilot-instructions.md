@@ -138,9 +138,17 @@ All steps must pass before a change is considered complete.
 The package is published to npm as `@massivescale/tsp-ts-client-models`.
 
 - `package.json` `files` limits the tarball to `dist/src` (JavaScript and declarations), `dist/templates`, `README.md`, and `LICENSE`. Run `npm pack --dry-run` to check what will ship.
-- `publishConfig` sets `access: public` (scoped packages default to restricted) and `tag: beta`, so `npm publish` never moves `latest` while the package is in beta. Remove `tag` from `publishConfig` for the first stable release.
+- `publishConfig` sets `access: public`, because scoped packages default to restricted. It deliberately has no `tag`: the publish workflow picks the dist-tag.
 - `prepublishOnly` runs lint, build, and tests before every publish, and `prepack` builds `dist/`. There is deliberately no `prepare` script: npm can run `prepare` on install, and the published tarball has no TypeScript compiler or `scripts/` folder to run it with.
-- Before publishing, bump `version`, move the `[Unreleased]` changelog entries under a heading for that version, and run `./build-examples.ps1`.
+- `.github/workflows/publish.yml` publishes when a GitHub release is published. It checks that the release tag is `v` plus the `package.json` version, runs format, lint, build, and tests, then publishes with provenance. A prerelease version (`1.0.0-beta.2`) goes to the `beta` dist-tag and a stable version goes to `latest`.
+- The workflow authenticates with npm trusted publishing, so the repository holds no npm token. The package's trusted publisher on npmjs.com must name the `MassiveScale` organization, the `tsp-ts-client-models` repository, and the `publish.yml` workflow.
+- The workflow runs from the tagged commit, so the tag must point at a commit that contains `publish.yml`.
+
+To release:
+
+1. Bump `version`, move the `[Unreleased]` changelog entries under a heading for that version, and run `./build-examples.ps1`.
+2. Merge the change to `main`.
+3. Create a GitHub release with a new tag `v<version>` on that commit, marked as a pre-release for beta versions.
 
 ## Maintenance
 

@@ -43,8 +43,7 @@
     "node": ">=22.0.0"
   },
   "publishConfig": {
-    "access": "public",
-    "tag": "beta"
+    "access": "public"
   },
   "dependencies": {
     "handlebars": "^4.7.9"
