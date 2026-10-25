@@ -182,6 +182,18 @@ export const $lib = createTypeSpecLibrary({
         default: paramMessage`Operation "${"name"}" collides with "${"name"}" inherited from the generated client base class, so the client method was emitted as "${"renamed"}" instead. Rename the operation to keep the method name you intended.`,
       },
     },
+    "unsupported-paging-style": {
+      severity: "warning",
+      messages: {
+        default: paramMessage`Operation "${"operationName"}" is marked @list, but no auto-paging method was generated for it: it uses ${"reason"}. The single-page client method is still generated.`,
+      },
+    },
+    "paging-method-name-collision": {
+      severity: "warning",
+      messages: {
+        default: paramMessage`The auto-paging method for operation "${"name"}" would be named "${"preferred"}", but that name is already taken by another client method or an inherited member. It was emitted as "${"resolved"}" instead. Rename the colliding operation to keep the name you intended.`,
+      },
+    },
   },
   emitter: {
     options: EmitterOptionsSchema,

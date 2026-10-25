@@ -12,6 +12,7 @@ This emitter produces:
 - **Endpoint utilities** — `*Endpoints` `as const` objects with typed path-building functions per interface.
 - **Typed HTTP client** _(optional, on by default)_ — one `*Client` class per TypeSpec interface using native `fetch`, with retry, `AbortSignal`, timeout support, and an always-available `query` parameter for custom query parameters on any call.
 - **Pluggable client** — inject your own `fetch`-compatible transport, add middleware, or hook into every request, response, and failure, so existing auth and error-handling code works with the generated client. See [docs/client-extensibility.md](docs/client-extensibility.md).
+- **Auto-paging** — every `@list` operation also gets a `{method}All` method that walks every page, following `@nextLink`, `@continuationToken`, `@offset` or `@pageIndex`. It returns an async generator on the Promise client and an `Observable` of items on the RxJS client. See [docs/paging.md](docs/paging.md).
 
 The output is a complete, buildable npm package (`package.json`, `tsconfig.json`, `index.ts`) ready to publish or consume locally.
 
@@ -22,10 +23,10 @@ The output is a complete, buildable npm package (`package.json`, `tsconfig.json`
 Add the emitter to your TypeSpec project:
 
 ```bash
-npm install --save-dev @massivescale/tsp-ts-client-models@beta
+npm install --save-dev @massivescale/tsp-ts-client-models
 ```
 
-The emitter is in beta and is published under the `beta` dist-tag. It requires Node.js 22 or later and TypeSpec 1.15 or later.
+The emitter requires Node.js 22 or later and TypeSpec 1.15 or later.
 
 Configure it in your `tspconfig.yaml`:
 
@@ -151,23 +152,31 @@ Used for three kinds of `export type` alias: a `@discriminator` base model (the 
 
 **`client`** / **`clientObservable`** — `ClientView`
 
-| Field                            | Type                  | Description                                                                                                                                                                                                                           |
-| -------------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `className`                      | `string`              | Generated class name, e.g. `WidgetsClient`.                                                                                                                                                                                           |
-| `endpointsClassName`             | `string`              | Name to **import** from the endpoints module, and the module's file name.                                                                                                                                                             |
-| `endpointsLocalName`             | `string`              | Name the method bodies **reference**. Differs from the above only on a name collision.                                                                                                                                                |
-| `baseClassName`                  | `string`              | Local name for `HttpClient` — `"HttpClient"` unless aliased.                                                                                                                                                                          |
-| `rxBaseClassName`                | `string`              | Local name for `RxHttpClient`.                                                                                                                                                                                                        |
-| `requestOptionsName`             | `string`              | Local name for `RequestOptions`, as already embedded in `methodParams`.                                                                                                                                                               |
-| `observableName`                 | `string`              | Local name for rxjs `Observable`.                                                                                                                                                                                                     |
-| `modelImports[]`                 | `string[]`            | Deduplicated import specifiers for `../models.js` — a bare name, or `Name as Alias` when the model shadows a global the client references (`Promise`, `Record`, `Date`, `Uint8Array`). Emit each verbatim inside `import type { … }`. |
-| `methods[]`                      | `ClientMethodView[]`  | Ordered list of client methods.                                                                                                                                                                                                       |
-| `methods[].doc`                  | `string \| undefined` | Per-operation `@doc` text.                                                                                                                                                                                                            |
-| `methods[].name`                 | `string`              | Method name (suffixed when the operation name is reserved).                                                                                                                                                                           |
-| `methods[].methodParams`         | `string`              | Full parameter list, already rendered.                                                                                                                                                                                                |
-| `methods[].methodBody`           | `string`              | Promise-flavor body, already rendered.                                                                                                                                                                                                |
-| `methods[].methodBodyObservable` | `string`              | Observable-flavor body, already rendered.                                                                                                                                                                                             |
-| `methods[].responseType`         | `string`              | Unwrapped response type; the template applies `Promise<…>` / `Observable<…>`.                                                                                                                                                         |
+| Field                                   | Type                  | Description                                                                                                                                                                                                                           |
+| --------------------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `className`                             | `string`              | Generated class name, e.g. `WidgetsClient`.                                                                                                                                                                                           |
+| `endpointsClassName`                    | `string`              | Name to **import** from the endpoints module, and the module's file name.                                                                                                                                                             |
+| `endpointsLocalName`                    | `string`              | Name the method bodies **reference**. Differs from the above only on a name collision.                                                                                                                                                |
+| `baseClassName`                         | `string`              | Local name for `HttpClient` — `"HttpClient"` unless aliased.                                                                                                                                                                          |
+| `rxBaseClassName`                       | `string`              | Local name for `RxHttpClient`.                                                                                                                                                                                                        |
+| `requestOptionsName`                    | `string`              | Local name for `RequestOptions`, as already embedded in `methodParams`.                                                                                                                                                               |
+| `observableName`                        | `string`              | Local name for rxjs `Observable`.                                                                                                                                                                                                     |
+| `modelImports[]`                        | `string[]`            | Deduplicated import specifiers for `../models.js` — a bare name, or `Name as Alias` when the model shadows a global the client references (`Promise`, `Record`, `Date`, `Uint8Array`). Emit each verbatim inside `import type { … }`. |
+| `methods[]`                             | `ClientMethodView[]`  | Ordered list of client methods.                                                                                                                                                                                                       |
+| `methods[].doc`                         | `string \| undefined` | Per-operation `@doc` text.                                                                                                                                                                                                            |
+| `methods[].name`                        | `string`              | Method name (suffixed when the operation name is reserved).                                                                                                                                                                           |
+| `methods[].methodParams`                | `string`              | Full parameter list, already rendered.                                                                                                                                                                                                |
+| `methods[].methodBody`                  | `string`              | Promise-flavor body, already rendered.                                                                                                                                                                                                |
+| `methods[].methodBodyObservable`        | `string`              | Observable-flavor body, already rendered.                                                                                                                                                                                             |
+| `methods[].responseType`                | `string`              | Unwrapped response type; the template applies `Promise<…>` / `Observable<…>`.                                                                                                                                                         |
+| `methods[].paging`                      | `PagingMethodView?`   | Present only for a `@list` operation whose paging is supported. Render it right after the method; it takes the same `methodParams`. See [docs/paging.md](docs/paging.md).                                                             |
+| `methods[].paging.name`                 | `string`              | Paging method name, e.g. `listAll`.                                                                                                                                                                                                   |
+| `methods[].paging.strategy`             | `string`              | `nextLink`, `continuationToken`, `offset` or `pageIndex`.                                                                                                                                                                             |
+| `methods[].paging.doc`                  | `string`              | JSDoc text for the Promise flavor.                                                                                                                                                                                                    |
+| `methods[].paging.docObservable`        | `string`              | JSDoc text for the Observable flavor.                                                                                                                                                                                                 |
+| `methods[].paging.itemType`             | `string`              | Type of one item; the template applies `AsyncGenerator<…, void, undefined>` / `Observable<…>`.                                                                                                                                        |
+| `methods[].paging.methodBody`           | `string`              | Promise-flavor body, already rendered.                                                                                                                                                                                                |
+| `methods[].paging.methodBodyObservable` | `string`              | Observable-flavor body, already rendered.                                                                                                                                                                                             |
 
 The five local-name fields exist because a model used as a response or body can be named `HttpClient`, `RequestOptions`, `Observable`, or after the interface's own `*Endpoints` object. When that happens the model keeps the plain name and the **infrastructure import is aliased**, so a template must import under the declared name and reference the local one:
 
@@ -234,6 +243,18 @@ await client.list({ status: "active", debug: "true" });
 ```
 
 See [docs/http-client.md](docs/http-client.md) for the full `ClientConfig`, error types, and query parameters.
+
+### Paging
+
+An operation marked `@list` also gets a `{method}All` method with the same arguments, which walks every page:
+
+```typescript
+for await (const store of client.listAll({ take: 50 })) {
+  console.log(store.id); // each page is requested only when the loop reaches it
+}
+```
+
+On the Observable client, `listAll()` returns an `Observable` of items that completes after the last page. See [docs/paging.md](docs/paging.md) for the supported strategies and when a paging method is not generated.
 
 ### Plugging in your own code
 

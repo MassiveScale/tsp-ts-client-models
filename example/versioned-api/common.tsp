@@ -47,6 +47,7 @@ model ErrorResponse {
  */
 model PagedResult<T> {
     @doc("The collection of items in the current page of results.")
+    @pageItems
     items: T[];
 
     @doc("The total count of items in the collection, if known.")

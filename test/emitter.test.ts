@@ -2231,7 +2231,7 @@ describe("emitter", () => {
     // Every member declared at class/interface body level across both modules.
     const declared = new Set<string>();
     for (const m of combined.matchAll(
-      /^ {2}(?:public |protected |private )?(?:readonly )?(\w+)\??[<(:]/gm,
+      /^ {2}(?:public |protected |private )?(?:readonly )?(?:async )?\*?(\w+)\??[<(:]/gm,
     )) {
       declared.add(m[1]);
     }

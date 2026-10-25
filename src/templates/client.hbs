@@ -8,5 +8,10 @@ export class {{className}} extends {{baseClassName}} {
 {{renderDoc doc "  "}}  async {{name}}({{methodParams}}): Promise<{{responseType}}> {
     {{methodBody}}
   }
+{{#if paging}}
+{{renderDoc paging.doc "  "}}  {{paging.name}}({{methodParams}}): AsyncGenerator<{{paging.itemType}}, void, undefined> {
+    {{paging.methodBody}}
+  }
+{{/if}}
 {{/each}}
 }

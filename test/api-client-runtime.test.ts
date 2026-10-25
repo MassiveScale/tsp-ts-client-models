@@ -132,6 +132,7 @@ const OBSERVABLE_STUB = `class Observable {
   subscribe(observer) {
     let closed = false;
     const teardown = this._subscribe({
+      get closed() { return closed; },
       next: (v) => { if (!closed) observer.next?.(v); },
       error: (e) => { if (!closed) { closed = true; observer.error?.(e); } },
       complete: () => { if (!closed) { closed = true; observer.complete?.(); } },

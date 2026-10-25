@@ -10,5 +10,10 @@ export class {{className}} extends {{rxBaseClassName}} {
 {{renderDoc doc "  "}}  {{name}}({{methodParams}}): {{../observableName}}<{{responseType}}> {
     {{methodBodyObservable}}
   }
+{{#if paging}}
+{{renderDoc paging.docObservable "  "}}  {{paging.name}}({{methodParams}}): {{../observableName}}<{{paging.itemType}}> {
+    {{paging.methodBodyObservable}}
+  }
+{{/if}}
 {{/each}}
 }
