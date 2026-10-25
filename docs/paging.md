@@ -47,6 +47,8 @@ Every strategy also stops when a page comes back with no body, or when the serve
 
 The walk starts wherever your arguments point. Pass `{ skip: 100 }` and the first page requested is at offset 100. Pass a `token` and the walk resumes from that token.
 
+A cursor sent as a header is read from the headers the request actually sends, so a value in `options.headers` counts too, and it wins over the declared `headers` argument just as it does on the single-page method. Header names match case-insensitively, and each page's cursor replaces every copy of the header, whatever its case.
+
 When you leave a counter out, the walk starts from the parameter's declared default, or from `0` when it has none. Declare `@pageIndex page?: int32 = 1` for an API whose pages are numbered from one.
 
 ### Following next-page links
@@ -107,7 +109,7 @@ The paging method is named `{method}All`, built from the single-page method's na
 
 When `{method}All` is already taken by another operation, the paging method gets a number (`listAll2`), and a `paging-method-name-collision` **warning** says so. Rename the colliding operation to keep the name you intended.
 
-The base classes add `paginate`, `httpGetNextLink` and, on the Observable client, `paginate$`. Like every inherited member, these names are reserved, so an operation with one of them gets an `Operation` suffix. See [Reserved method names](http-client.md#reserved-method-names).
+The base classes add `paginate`, `httpGetNextLink`, `readHeader`, `replaceHeader` and, on the Observable client, `paginate$`. Like every inherited member, these names are reserved, so an operation with one of them gets an `Operation` suffix. See [Reserved method names](http-client.md#reserved-method-names).
 
 ## Custom templates
 

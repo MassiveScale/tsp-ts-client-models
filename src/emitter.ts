@@ -2227,8 +2227,12 @@ export class HttpClient {
     }
     const qs = params.toString();
     if (!qs) return url;
-    // A resolved URL can already carry a query string of its own.
-    return \`\${url}\${typeof path !== "string" && url.includes("?") ? "&" : "?"}\${qs}\`;
+    if (typeof path === "string") return \`\${url}?\${qs}\`;
+    // Through searchParams, so the parameters join any query the URL already
+    // carries and land before its fragment rather than inside it.
+    const target = new URL(path);
+    params.forEach((value, key) => target.searchParams.append(key, value));
+    return target.href;
   }
 
   protected async request<T>(
@@ -2440,6 +2444,43 @@ export class HttpClient {
       );
     }
     return this.request<T>("GET", target, options);
+  }
+
+  /**
+   * Reads header \`name\` from a call's headers, matching names
+   * case-insensitively. When several entries match, the last one that is not
+   * \`undefined\` or \`null\` wins, as it does when the headers are sent.
+   */
+  protected readHeader(
+    headers: Record<string, unknown> | undefined,
+    name: string,
+  ): unknown {
+    const wanted = name.toLowerCase();
+    let value: unknown;
+    for (const [key, entry] of Object.entries(headers ?? {})) {
+      if (key.toLowerCase() !== wanted) continue;
+      if (entry !== undefined && entry !== null) value = entry;
+    }
+    return value;
+  }
+
+  /**
+   * Returns a copy of \`headers\` with \`name\` set to \`value\`, after dropping
+   * every entry whose name matches it case-insensitively, so \`value\` is the
+   * one sent whatever case an earlier entry used.
+   */
+  protected replaceHeader(
+    headers: Record<string, unknown> | undefined,
+    name: string,
+    value: unknown,
+  ): Record<string, unknown> {
+    const wanted = name.toLowerCase();
+    const result: Record<string, unknown> = {};
+    for (const [key, entry] of Object.entries(headers ?? {})) {
+      if (key.toLowerCase() !== wanted) result[key] = entry;
+    }
+    result[name] = value;
+    return result;
   }
 
   /**
@@ -2849,6 +2890,8 @@ const BASE_CLIENT_MEMBERS: readonly string[] = [
   "httpHead",
   "httpGetNextLink",
   "paginate",
+  "readHeader",
+  "replaceHeader",
 ];
 
 /**
@@ -3612,23 +3655,28 @@ function buildPagingMethodView(
     ? memberAccess(page, jsonPropertyName(program, plan.cursorOutput))
     : undefined;
 
-  // The cursor replaces the request parameter it was read from; a header
-  // cursor is merged last so it wins over a caller's own `options.headers`.
-  const cursorOverride = (input: PagingCursorInput): TransportOverrides => {
-    const entry = `${formatPropertyKey(input.wireName)}: ${cursor}`;
-    return input.location === "query"
-      ? { signal, query: `query: { ...query, ${entry} }` }
+  // A header cursor is read from, and written over, the headers the request
+  // actually sends: the declared ones with the caller's `options.headers`
+  // on top, matched case-insensitively, so neither a seed passed through
+  // `options.headers` nor a differently-cased copy of it can mask the cursor.
+  const sentHeaders = "{ ...headers, ...options?.headers }";
+  const headerName = (input: PagingCursorInput) =>
+    JSON.stringify(input.wireName);
+  // The cursor replaces the request parameter it was read from.
+  const cursorOverride = (input: PagingCursorInput): TransportOverrides =>
+    input.location === "query"
+      ? {
+          signal,
+          query: `query: { ...query, ${formatPropertyKey(input.wireName)}: ${cursor} }`,
+        }
       : {
           signal,
-          headers: `headers: { ...headers, ...options?.headers, ${entry} }`,
+          headers: `headers: this.replaceHeader(${sentHeaders}, ${headerName(input)}, ${cursor})`,
         };
-  };
-  const seedOf = (input: PagingCursorInput) =>
-    memberAccess(
-      input.location === "query" ? "query" : "headers",
-      input.wireName,
-      true,
-    );
+  const queryValue = (input: PagingCursorInput) =>
+    memberAccess("query", input.wireName, true);
+  const headerValue = (input: PagingCursorInput) =>
+    `this.readHeader(${sentHeaders}, ${headerName(input)})`;
 
   let cursorType: string;
   let fetchPage: string;
@@ -3650,7 +3698,12 @@ function buildPagingMethodView(
       const input = plan.cursorInput!;
       cursorType = "string | undefined";
       fetchPage = `(${cursor}, ${signal}) => ${ctx.firstPageCall(ctx.buildTransportArg(cursorOverride(input)))}`;
-      first = seedOf(input);
+      // `?? undefined` narrows a nullable token (`string | null`) to the
+      // cursor type.
+      first =
+        input.location === "query"
+          ? `${queryValue(input)} ?? undefined`
+          : `${headerValue(input)} as string | undefined`;
       next = `(${page}) => ${outputAccess} || undefined`;
       break;
     }
@@ -3666,7 +3719,11 @@ function buildPagingMethodView(
         plan.strategy === "offset" ? `${cursor} + ${count}` : `${cursor} + 1`;
       cursorType = "number";
       fetchPage = `(${cursor}, ${signal}) => ${ctx.firstPageCall(ctx.buildTransportArg(cursorOverride(input)))}`;
-      first = `${seedOf(input)} ?? ${seedDefault}`;
+      // A header passed through `options.headers` arrives as a string.
+      first =
+        input.location === "query"
+          ? `${queryValue(input)} ?? ${seedDefault}`
+          : `Number(${headerValue(input)} ?? ${seedDefault})`;
       next = `(_${page}, ${cursor}, ${count}) => (${count} === 0 ? undefined : ${advance})`;
       break;
     }
@@ -3963,6 +4020,10 @@ function collectModelNamesFromType(type: Type, into: Set<string>): void {
         }
       }
     }
+  } else if (type.kind === "Enum") {
+    // Mirrors mapTsType, which names a declared enum and falls back to
+    // `string` for an anonymous one.
+    if (type.name) into.add(type.name);
   } else if (type.kind === "Tuple") {
     for (const value of (type as Tuple).values) {
       collectModelNamesFromType(value, into);

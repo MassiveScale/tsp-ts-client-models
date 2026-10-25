@@ -1060,7 +1060,10 @@ describe("generated package compiles", () => {
     model IndexPage<T> { @pageItems items?: T[]; }
     model LinkPage<T> { @pageItems value: T[]; @nextLink nextLink?: url | null; }
     model TokenPage<T> { @pageItems items: T[]; @continuationToken next?: string; }
+    model NullableTokenPage<T> { @pageItems items: T[]; @continuationToken next?: string | null; }
     model Filter { name?: string; }
+    enum Kind { a, b }
+    model KindPage { @pageItems items: Kind[]; @nextLink next?: url; }
 
     @route("/stores")
     interface Stores {
@@ -1069,6 +1072,10 @@ describe("generated package compiles", () => {
       @list @route("linked/{region}") @get linked(@path region: string, @header("x-tenant") tenant: string): LinkPage<Store>;
       @list @route("token") @get token(@header("x-token") @continuationToken token?: string): TokenPage<Store>;
       @list @route("search") @post search(@body filter: Filter, @query @offset skip?: int32): OffsetPage<Store>;
+      @list @route("nullable") @get nullable(@query @continuationToken token?: string | null): NullableTokenPage<Store>;
+      @list @route("header-skip") @get headerSkip(@header("x-skip") @offset skip?: int32): OffsetPage<Store>;
+      @list @route("kinds") @get kinds(): KindPage;
+      @route("kind-list") @get kindList(@query kind?: Kind): Kind[];
     }
   `;
 

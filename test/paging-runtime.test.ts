@@ -53,6 +53,16 @@ interface StoresClient {
     query?: Record<string, unknown>,
     options?: Options,
   ): AsyncGenerator<{ id: string }>;
+  headerTokenAll(
+    query?: Record<string, unknown>,
+    headers?: Record<string, unknown>,
+    options?: Options,
+  ): AsyncGenerator<{ id: string }>;
+  headerOffsetAll(
+    query?: Record<string, unknown>,
+    headers?: Record<string, unknown>,
+    options?: Options,
+  ): AsyncGenerator<{ id: string }>;
   request<T>(
     method: string,
     path: string | URL,
@@ -88,6 +98,8 @@ const SPEC = `
     @list @route("pages") @get pages(@query @pageIndex page?: int32 = 1): IndexPage<Store>;
     @list @route("linked") @get linked(@query top?: int32, @header("x-tenant") tenant?: string): LinkPage<Store>;
     @list @route("token") @get token(@query @continuationToken token?: string): TokenPage<Store>;
+    @list @route("header-token") @get headerToken(@header("x-token") @continuationToken token?: string): TokenPage<Store>;
+    @list @route("header-offset") @get headerOffset(@header("x-skip") @offset skip?: int32): OffsetPage<Store>;
   }
 `;
 
@@ -323,6 +335,38 @@ describe("generated auto-paging methods", () => {
     });
   });
 
+  describe("header offset", () => {
+    it("counts on from a numeric string passed in options.headers", async () => {
+      const { StoresClient } = await loadClients();
+      const transport = sequence(
+        json({ items: [{ id: "a" }, { id: "b" }] }),
+        json({ items: [] }),
+      );
+      const client = new StoresClient(config(transport));
+
+      await collect(
+        client.headerOffsetAll(undefined, undefined, {
+          headers: { "X-Skip": "10" },
+        }),
+      );
+
+      deepStrictEqual(
+        transport.calls.map((r) => r.headers.get("x-skip")),
+        ["10", "12"],
+      );
+    });
+
+    it("starts at zero when no header is given", async () => {
+      const { StoresClient } = await loadClients();
+      const transport = sequence(json({ items: [] }));
+      const client = new StoresClient(config(transport));
+
+      await collect(client.headerOffsetAll());
+
+      strictEqual(transport.calls[0].headers.get("x-skip"), "0");
+    });
+  });
+
   describe("pageIndex", () => {
     it("counts pages from the declared default and treats missing items as empty", async () => {
       const { StoresClient } = await loadClients();
@@ -356,6 +400,65 @@ describe("generated auto-paging methods", () => {
         transport.calls.map((r) => param(r, "token")),
         [null, "t1", "t2"],
       );
+    });
+
+    it("starts from a header token passed in options.headers", async () => {
+      const { StoresClient } = await loadClients();
+      const transport = sequence(
+        json({ items: [{ id: "a" }], next: "t1" }),
+        json({ items: [{ id: "b" }] }),
+      );
+      const client = new StoresClient(config(transport));
+
+      await collect(
+        client.headerTokenAll(undefined, undefined, {
+          headers: { "X-Token": "start" },
+        }),
+      );
+
+      deepStrictEqual(
+        transport.calls.map((r) => r.headers.get("x-token")),
+        ["start", "t1"],
+      );
+    });
+
+    it("sends the advancing token over a differently-cased copy", async () => {
+      const { StoresClient } = await loadClients();
+      const transport = sequence(
+        json({ items: [{ id: "a" }], next: "t1" }),
+        json({ items: [{ id: "b" }], next: "t2" }),
+        json({ items: [{ id: "c" }] }),
+      );
+      const client = new StoresClient(config(transport));
+
+      const items = await collect(
+        client.headerTokenAll(
+          undefined,
+          { "x-token": "declared" },
+          { headers: { "X-Token": "start" } },
+        ),
+      );
+
+      deepStrictEqual(ids(items), ["a", "b", "c"]);
+      deepStrictEqual(
+        transport.calls.map((r) => r.headers.get("x-token")),
+        ["start", "t1", "t2"],
+      );
+    });
+
+    it("skips a null header entry when reading the token", async () => {
+      const { StoresClient } = await loadClients();
+      const transport = sequence(json({ items: [] }));
+      const client = new StoresClient(config(transport));
+
+      await collect(
+        client.headerTokenAll(undefined, {
+          "x-token": "declared",
+          "X-TOKEN": null,
+        }),
+      );
+
+      strictEqual(transport.calls[0].headers.get("x-token"), "declared");
     });
 
     it("stops when the server repeats the token it was sent", async () => {
@@ -474,6 +577,22 @@ describe("generated auto-paging methods", () => {
       });
 
       strictEqual(transport.calls[0].url, "https://api.example.com/x?a=1&b=2");
+    });
+
+    it("puts the query before a URL's fragment", async () => {
+      const { StoresClient } = await loadClients();
+      const transport = sequence(json({}));
+      const client = new StoresClient(config(transport));
+
+      await client.request(
+        "GET",
+        new URL("https://api.example.com/x?a=1#section"),
+        { query: { b: 2 } },
+      );
+
+      const sent = new URL(transport.calls[0].url);
+      strictEqual(sent.searchParams.get("a"), "1");
+      strictEqual(sent.searchParams.get("b"), "2");
     });
 
     it("starts a query string on a URL without one", async () => {

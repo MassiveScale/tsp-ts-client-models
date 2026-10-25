@@ -17,7 +17,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Changed
 
 - **First stable release.** The version is `1.0.0` and is published under the `latest` dist-tag, so `npm install @massivescale/tsp-ts-client-models` no longer needs `@beta`.
-- **`paginate`, `httpGetNextLink` and `paginate$` are reserved method names.** They are new members of the client base classes, so an operation with one of these names now gets an `Operation` suffix on its client method, with the existing `reserved-client-method-name` warning.
+- **`paginate`, `httpGetNextLink`, `readHeader`, `replaceHeader` and `paginate$` are reserved method names.** They are new members of the client base classes, so an operation with one of these names now gets an `Operation` suffix on its client method, with the existing `reserved-client-method-name` warning.
+
+### Fixed
+
+- **Enums named by a client method are imported.** A response, query or header parameter typed as an enum (`list(): Kind[]`) referenced the enum in the client without importing it, so the generated package failed to compile.
 - **Template authors:** `ClientMethodView` gains an optional `paging` view, which the bundled `client` and `clientObservable` templates render right after the method. An override that ignores it emits no paging methods. The protected `buildUrl` and `request` helpers of `HttpClient` also accept an already-resolved `URL` in place of a path.
 
 ## [1.0.0-beta.1] — 2026-10-15

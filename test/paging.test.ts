@@ -173,7 +173,7 @@ describe("auto-paging methods", () => {
       ok(text.includes('query?.["skip-count"] ?? 0,'));
     });
 
-    it("rewrites a header counter last, over the caller's own headers", async () => {
+    it("reads and rewrites a header counter in the headers actually sent", async () => {
       const { client } = await emitStores(
         offsetPage,
         `@list @get list(@header("x-skip") @offset skip?: int32): OffsetPage<Store>;`,
@@ -181,10 +181,14 @@ describe("auto-paging methods", () => {
       const text = methodText(client, "listAll");
       ok(
         text.includes(
-          'headers: { ...headers, ...options?.headers, "x-skip": cursor }',
+          'headers: this.replaceHeader({ ...headers, ...options?.headers }, "x-skip", cursor)',
         ),
       );
-      ok(text.includes('headers?.["x-skip"] ?? 0,'));
+      ok(
+        text.includes(
+          'Number(this.readHeader({ ...headers, ...options?.headers }, "x-skip") ?? 0),',
+        ),
+      );
     });
 
     it("resends the body of a POST list on every page", async () => {
@@ -249,11 +253,11 @@ describe("auto-paging methods", () => {
         ),
       );
       ok(text.includes("query: { ...query, token: cursor }"));
-      ok(text.includes("query?.token,"));
+      ok(text.includes("query?.token ?? undefined,"));
       ok(text.includes("(page) => page.nextToken || undefined,"));
     });
 
-    it("feeds a header token back into the headers", async () => {
+    it("feeds a header token back into the headers actually sent", async () => {
       const { client } = await emitStores(
         tokenPage,
         `@list @get list(@header("x-token") @continuationToken token?: string): TokenPage<Store>;`,
@@ -261,10 +265,23 @@ describe("auto-paging methods", () => {
       const text = methodText(client, "listAll");
       ok(
         text.includes(
-          'headers: { ...headers, ...options?.headers, "x-token": cursor }',
+          'headers: this.replaceHeader({ ...headers, ...options?.headers }, "x-token", cursor)',
         ),
       );
-      ok(text.includes('headers?.["x-token"],'));
+      ok(
+        text.includes(
+          'this.readHeader({ ...headers, ...options?.headers }, "x-token") as string | undefined,',
+        ),
+      );
+    });
+
+    it("narrows a nullable request token to the cursor type", async () => {
+      const { client, diagnostics } = await emitStores(
+        tokenPage,
+        `@list @get list(@query @continuationToken token?: string | null): TokenPage<Store>;`,
+      );
+      strictEqual(ours(diagnostics, "unsupported-paging-style").length, 0);
+      ok(methodText(client, "listAll").includes("query?.token ?? undefined,"));
     });
 
     it("reads a token whose JSON name differs from its declared name", async () => {
@@ -359,6 +376,24 @@ describe("auto-paging methods", () => {
       ok(
         client.includes(
           "Next-page links are followed only on the base URL's origin.",
+        ),
+      );
+    });
+  });
+
+  describe("item types", () => {
+    it("imports an enum item type that only the paging method names", async () => {
+      const { client, observable } = await emitStores(
+        `enum Kind { a, b }\nmodel Page { @pageItems items: Kind[]; @nextLink next?: url; }`,
+        `@list @get list(): Page;`,
+      );
+      ok(client.includes('import type { Page, Kind } from "../models.js";'));
+      ok(
+        observable.includes('import type { Page, Kind } from "../models.js";'),
+      );
+      ok(
+        methodText(client, "listAll").includes(
+          "AsyncGenerator<Kind, void, undefined>",
         ),
       );
     });
