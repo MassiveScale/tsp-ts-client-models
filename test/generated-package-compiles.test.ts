@@ -28,6 +28,7 @@ import type { EmitterOptions } from "../src/lib.js";
  * instead of drowned in unresolved-module errors.
  */
 const RXJS_STUB = `export declare class Subscriber<T> {
+  readonly closed: boolean;
   next(value: T): void;
   error(err: unknown): void;
   complete(): void;
@@ -1044,6 +1045,99 @@ describe("generated package compiles", () => {
 
       strictEqual(errors.length, 1, errors.join("\n"));
       ok(errors[0].startsWith("TS2554"), errors[0]);
+    },
+  );
+
+  const pagingSpec = `
+    import "@typespec/http";
+    using Http;
+
+    @service(#{ title: "Test API" })
+    namespace TestApi;
+
+    model Store { id: string; }
+    model OffsetPage<T> { @pageItems items: T[]; }
+    model IndexPage<T> { @pageItems items?: T[]; }
+    model LinkPage<T> { @pageItems value: T[]; @nextLink nextLink?: url | null; }
+    model TokenPage<T> { @pageItems items: T[]; @continuationToken next?: string; }
+    model Filter { name?: string; }
+
+    @route("/stores")
+    interface Stores {
+      @list @get offset(@query @offset skip?: int32, @query take?: int32): OffsetPage<Store>;
+      @list @route("pages") @get pages(@query @pageIndex page?: int32 = 1): IndexPage<Store>;
+      @list @route("linked/{region}") @get linked(@path region: string, @header("x-tenant") tenant: string): LinkPage<Store>;
+      @list @route("token") @get token(@header("x-token") @continuationToken token?: string): TokenPage<Store>;
+      @list @route("search") @post search(@body filter: Filter, @query @offset skip?: int32): OffsetPage<Store>;
+    }
+  `;
+
+  for (const clientStyle of ["promise", "observable", "both"] as const) {
+    it(
+      `compiles every paging strategy (${clientStyle})`,
+      { timeout: TYPE_CHECK_TIMEOUT },
+      async () => {
+        const { errors } = await emitAndTypeCheck(pagingSpec, {
+          "client-style": clientStyle,
+        });
+
+        deepStrictEqual(errors, []);
+      },
+    );
+  }
+
+  it(
+    "types each paging method's items as the page's item type",
+    { timeout: TYPE_CHECK_TIMEOUT },
+    async () => {
+      const { errors } = await emitAndTypeCheck(
+        pagingSpec,
+        { "client-style": "both" },
+        `
+          import { StoresClient, StoresObservableClient, type Store } from "./index.js";
+          declare const client: StoresClient;
+          declare const rx: StoresObservableClient;
+          async function walk(): Promise<Store[]> {
+            const all: Store[] = [];
+            for await (const store of client.linkedAll("eu", undefined, { "x-tenant": "t" })) all.push(store);
+            for await (const store of client.searchAll({ name: "x" })) all.push(store);
+            return all;
+          }
+          void walk;
+          rx.offsetAll().subscribe((store: Store) => store.id);
+        `,
+      );
+
+      deepStrictEqual(errors, []);
+    },
+  );
+
+  it(
+    "compiles when a model shadows a global the paging method names",
+    { timeout: TYPE_CHECK_TIMEOUT },
+    async () => {
+      const { errors, files } = await emitAndTypeCheck(`
+        import "@typespec/http";
+        using Http;
+
+        @service(#{ title: "Test API" })
+        namespace TestApi;
+
+        model AsyncGenerator { id: string; }
+        model Page<T> { @pageItems items: T[]; @nextLink next?: url; }
+
+        @route("/stores")
+        interface Stores {
+          @list @get list(): Page<AsyncGenerator>;
+        }
+      `);
+
+      deepStrictEqual(errors, []);
+      ok(
+        files["client/StoresClient.ts"].includes(
+          "AsyncGenerator<AsyncGeneratorModel, void, undefined>",
+        ),
+      );
     },
   );
 });

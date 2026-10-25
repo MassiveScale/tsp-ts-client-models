@@ -14,8 +14,12 @@ namespace MassiveScale.Sandbox.Api;
 @doc("Controller for Store entities.")
 interface Stores {
     @doc("Retrieves a list of all stores.")
+    @list
     @get
-    list(@query skip?: int32, @query take?: int32 = 25): PagedResult<Store>;
+    list(
+        @query @offset skip?: int32,
+        @query @pageSize take?: int32 = 25,
+    ): PagedResult<Store>;
 
     @doc("Retrieves a specific store by its unique identifier.")
     @get

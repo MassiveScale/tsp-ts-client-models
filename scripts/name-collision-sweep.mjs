@@ -17,7 +17,7 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import ts from "typescript";
 
-const RXJS_STUB = `export declare class Subscriber<T> { next(value: T): void; error(err: unknown): void; complete(): void; }
+const RXJS_STUB = `export declare class Subscriber<T> { readonly closed: boolean; next(value: T): void; error(err: unknown): void; complete(): void; }
 export type TeardownLogic = (() => void) | void;
 export declare class Observable<T> { constructor(subscribe?: (s: Subscriber<T>) => TeardownLogic); subscribe(o?: unknown): { unsubscribe(): void }; }
 `;

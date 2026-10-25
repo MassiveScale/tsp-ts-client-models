@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.0.0] — 2026-10-25
+
+### Added
+
+- **Auto-paging methods for `@list` operations.** Each `@list` operation now also gets a `{method}All` method with the same arguments, which walks every page and produces each item in turn. On the Promise client it returns an `AsyncGenerator`, so `for await (const store of client.listAll())` works and each page is requested only when the loop reaches it. On the RxJS client it returns a cold `Observable` of items that completes after the last page, and unsubscribing aborts the request in flight. The strategy comes from TypeSpec's paging decorators, in this order of preference: `@nextLink`, `@continuationToken`, then `@offset` or `@pageIndex`. Next-page links are resolved against `baseUrl` and must stay on its origin, so a response cannot send the client's credentials to another server. A walk also stops when the server repeats the link or token it was just given. See [docs/paging.md](docs/paging.md).
+- **`unsupported-paging-style` warning.** Reported for a `@list` operation whose paging cannot drive a generated loop, such as a next link sent as a response header or a token that is not a string. The single-page method is still generated.
+- **`paging-method-name-collision` warning.** Reported when `{method}All` is already taken by another operation, so the paging method was given a number (`listAll2`).
+
+### Changed
+
+- **First stable release.** The version is `1.0.0` and is published under the `latest` dist-tag, so `npm install @massivescale/tsp-ts-client-models` no longer needs `@beta`.
+- **`paginate`, `httpGetNextLink` and `paginate$` are reserved method names.** They are new members of the client base classes, so an operation with one of these names now gets an `Operation` suffix on its client method, with the existing `reserved-client-method-name` warning.
+- **Template authors:** `ClientMethodView` gains an optional `paging` view, which the bundled `client` and `clientObservable` templates render right after the method. An override that ignores it emits no paging methods. The protected `buildUrl` and `request` helpers of `HttpClient` also accept an already-resolved `URL` in place of a path.
+
 ## [1.0.0-beta.1] — 2026-10-15
 
 ### Fixed

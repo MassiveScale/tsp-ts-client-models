@@ -190,6 +190,40 @@ export interface ClientMethodView {
   methodBodyObservable: string;
   /** TypeScript return type, e.g. `"Widget[]"` or `"void"`. */
   responseType: string;
+  /**
+   * Present when the operation is `@list` and its paging metadata resolves to
+   * a supported strategy; renders a sibling method that walks every page.
+   */
+  paging?: PagingMethodView;
+}
+
+/**
+ * Which signal an auto-paging method follows to reach the next page. When a
+ * page model exposes more than one, the priority is `nextLink`, then
+ * `continuationToken`, then `offset` / `pageIndex`.
+ */
+export type PagingStrategy =
+  "nextLink" | "continuationToken" | "offset" | "pageIndex";
+
+/**
+ * View model for the auto-paging method rendered after a `@list` operation's
+ * single-page method. It takes the same arguments as that method.
+ */
+export interface PagingMethodView {
+  /** Method name, e.g. `"listAll"`. */
+  name: string;
+  /** How the next page is reached. */
+  strategy: PagingStrategy;
+  /** JSDoc text for the Promise flavor, which returns an async generator. */
+  doc: string;
+  /** JSDoc text for the RxJS Observable flavor. */
+  docObservable: string;
+  /** TypeScript type of one item, e.g. `"Store"`. */
+  itemType: string;
+  /** Pre-rendered body of the Promise flavor, delegating to `this.paginate`. */
+  methodBody: string;
+  /** Pre-rendered body of the Observable flavor, delegating to `this.paginate$`. */
+  methodBodyObservable: string;
 }
 
 /** View model for a typed HTTP client class bound to one TypeSpec Interface. */

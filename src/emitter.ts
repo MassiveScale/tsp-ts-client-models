@@ -33,6 +33,9 @@ import {
   resolvePath,
   isService,
   NoTarget,
+  getPagingOperation,
+  isList,
+  type PagingProperty,
 } from "@typespec/compiler";
 import {
   unsafe_MutatorWithNamespace,
@@ -72,6 +75,8 @@ import {
   UnionView,
   TemplateOverrides,
   TemplateName,
+  PagingMethodView,
+  PagingStrategy,
 } from "./renderer.js";
 import { EmitterOptions, createDiagnostic, reportDiagnostic } from "./lib.js";
 import {
@@ -712,8 +717,12 @@ async function emitVersion(
     // members.
     const reservedMembers = reservedClientMembers(emitObservableClient);
 
+    // Resolved once per interface, not per client flavor, so each paging
+    // diagnostic is reported once even when both flavors are emitted.
+    let pagingPlans: ReadonlyMap<HttpOperation, PagingPlan> = new Map();
     if (generateClient) {
       reportReservedClientMethodNames(program, vOps, reservedMembers);
+      pagingPlans = resolvePagingPlans(program, vOps, reservedMembers);
     }
 
     if (generateClient && emitPromiseClient) {
@@ -734,6 +743,7 @@ async function emitVersion(
         enums,
         mergePatchRenameMap,
         reservedMembers,
+        pagingPlans,
       );
       await writeFile(
         program,
@@ -765,6 +775,7 @@ async function emitVersion(
         enums,
         mergePatchRenameMap,
         reservedMembers,
+        pagingPlans,
       );
       await writeFile(
         program,
@@ -2190,13 +2201,18 @@ export class HttpClient {
   /**
    * Joins the base URL, path, and serialized query string. Array values are
    * comma-joined, or repeated once per item when their key is in \`explode\`.
+   * A \`URL\` is an already-resolved address, such as a next-page link, and is
+   * used as-is rather than appended to the base URL.
    */
   protected buildUrl(
-    path: string,
+    path: string | URL,
     query?: Record<string, unknown>,
     explode?: readonly string[],
   ): string {
-    const url = \`\${this.config.baseUrl.replace(/\\/$/, "")}\${path}\`;
+    const url =
+      typeof path === "string"
+        ? \`\${this.config.baseUrl.replace(/\\/$/, "")}\${path}\`
+        : path.href;
     if (!query) return url;
     const params = new URLSearchParams();
     for (const [key, value] of Object.entries(query)) {
@@ -2210,12 +2226,14 @@ export class HttpClient {
       }
     }
     const qs = params.toString();
-    return qs ? \`\${url}?\${qs}\` : url;
+    if (!qs) return url;
+    // A resolved URL can already carry a query string of its own.
+    return \`\${url}\${typeof path !== "string" && url.includes("?") ? "&" : "?"}\${qs}\`;
   }
 
   protected async request<T>(
     method: string,
-    path: string,
+    path: string | URL,
     options?: TransportOptions & { body?: unknown },
   ): Promise<T> {
     const { baseDelayMs = 1000, retryOn = [429, 503] } =
@@ -2398,6 +2416,64 @@ export class HttpClient {
   ): Promise<T> {
     return this.request<T>("HEAD", path, options);
   }
+
+  /**
+   * Sends a GET to a next-page link returned by the server. The link is
+   * resolved against the base URL, so an absolute, root-relative, or relative
+   * link all work, and must stay on the base URL's origin: a link to any other
+   * origin is rejected before anything is sent, so the credentials this client
+   * carries never reach a server the response pointed it at.
+   */
+  protected async httpGetNextLink<T>(
+    link: string,
+    options?: TransportOptions,
+  ): Promise<T> {
+    const page = (globalThis as { location?: { href: string } }).location;
+    const base = new URL(
+      \`\${this.config.baseUrl.replace(/\\/$/, "")}/\`,
+      page?.href,
+    );
+    const target = new URL(link, base);
+    if (target.origin !== base.origin) {
+      throw new Error(
+        \`Refusing to follow a next-page link to \${target.origin}, which is not the origin of the client's base URL.\`,
+      );
+    }
+    return this.request<T>("GET", target, options);
+  }
+
+  /**
+   * Walks a paged operation and yields every item of every page, in order.
+   *
+   * \`fetchPage\` requests the page at a cursor, starting from \`first\`.
+   * \`next\` reads the cursor of the following page off the page just read —
+   * given that page's cursor and item count — or returns \`undefined\` when
+   * it was the last. A page with no body, or a cursor that repeats the one
+   * just used, also ends the walk, so a server that never advances cannot
+   * loop forever. Pages are requested lazily: stop iterating and no further
+   * request is sent.
+   */
+  protected async *paginate<TPage, TItem, TCursor>(
+    fetchPage: (
+      cursor: TCursor,
+      signal: AbortSignal | undefined,
+    ) => Promise<TPage | undefined>,
+    first: TCursor,
+    items: (page: TPage) => readonly TItem[] | undefined,
+    next: (page: TPage, cursor: TCursor, count: number) => TCursor | undefined,
+    signal?: AbortSignal,
+  ): AsyncGenerator<TItem, void, undefined> {
+    let cursor = first;
+    for (;;) {
+      const page = await fetchPage(cursor, signal);
+      if (page === undefined || page === null) return;
+      const pageItems = items(page) ?? [];
+      yield* pageItems;
+      const following = next(page, cursor, pageItems.length);
+      if (following === undefined || Object.is(following, cursor)) return;
+      cursor = following;
+    }
+  }
 }
 `;
 
@@ -2550,6 +2626,55 @@ export class RxHttpClient extends HttpClient {
       (signal) => this.httpHead<T>(path, { ...options, signal }),
       options?.signal,
     );
+  }
+
+  /**
+   * Streams every item of a paged operation as a cold Observable, with the
+   * same arguments and page-walking rules as {@link HttpClient.paginate}.
+   *
+   * Each subscription walks the pages from the start. Items are emitted as
+   * each page arrives, and the Observable completes after the last page.
+   * Unsubscribing — or aborting \`outerSignal\` — aborts the page request in
+   * flight and requests no further pages; as with the verb helpers, that
+   * counts as the caller cancelling, so \`onError\` is not called.
+   */
+  protected paginate$<TPage, TItem, TCursor>(
+    fetchPage: (
+      cursor: TCursor,
+      signal: AbortSignal | undefined,
+    ) => Promise<TPage | undefined>,
+    first: TCursor,
+    items: (page: TPage) => readonly TItem[] | undefined,
+    next: (page: TPage, cursor: TCursor, count: number) => TCursor | undefined,
+    outerSignal?: AbortSignal,
+  ): Observable<TItem> {
+    return new Observable<TItem>((subscriber) => {
+      const controller = new AbortController();
+      const onAbort = () => controller.abort(outerSignal?.reason);
+      if (outerSignal) {
+        if (outerSignal.aborted) controller.abort(outerSignal.reason);
+        else outerSignal.addEventListener("abort", onAbort, { once: true });
+      }
+      const walk = async () => {
+        const pages = this.paginate(
+          fetchPage,
+          first,
+          items,
+          next,
+          controller.signal,
+        );
+        for await (const item of pages) {
+          if (subscriber.closed) return;
+          subscriber.next(item);
+        }
+        subscriber.complete();
+      };
+      walk().catch((err) => subscriber.error(err));
+      return () => {
+        if (outerSignal) outerSignal.removeEventListener("abort", onAbort);
+        controller.abort();
+      };
+    });
   }
 }
 `;
@@ -2722,6 +2847,8 @@ const BASE_CLIENT_MEMBERS: readonly string[] = [
   "httpPatch",
   "httpDelete",
   "httpHead",
+  "httpGetNextLink",
+  "paginate",
 ];
 
 /**
@@ -2737,6 +2864,7 @@ const RX_CLIENT_MEMBERS: readonly string[] = [
   "httpPatch$",
   "httpDelete$",
   "httpHead$",
+  "paginate$",
 ];
 
 /**
@@ -2819,6 +2947,7 @@ function buildClientView(
   enums: Map<string, Enum | Union>,
   renameMap: Map<string, string>,
   reserved: ReadonlySet<string>,
+  pagingPlans: ReadonlyMap<HttpOperation, PagingPlan>,
 ): ClientView {
   const endpointsClassName = `${name}Endpoints`;
   const siblingNames = new Set(ops.map((op) => op.operation.name));
@@ -2841,6 +2970,7 @@ function buildClientView(
         siblingNames,
         reserved,
         localNames,
+        pagingPlans.get(op),
       ),
     );
 
@@ -2898,6 +3028,7 @@ function buildClientView(
  */
 const CLIENT_REFERENCED_GLOBALS: readonly string[] = [
   "Promise",
+  "AsyncGenerator",
   "Record",
   "Date",
   "Uint8Array",
@@ -2995,6 +3126,7 @@ function buildClientMethodView(
   siblingNames: ReadonlySet<string>,
   reserved: ReadonlySet<string>,
   localNames: ClientLocalNames,
+  paging: PagingPlan | undefined,
 ): import("./renderer.js").ClientMethodView {
   const pathArgs = resolvePathArgs(op);
 
@@ -3078,30 +3210,44 @@ function buildClientMethodView(
   const pathArgNames = pathArgs.map((a) => a.argName).join(", ");
   const endpointCall = `${localNames.endpointsLocalName}.${op.operation.name}(${pathArgNames})`;
 
-  const transport = ["...options", "query"];
-  if (headerParams.length > 0) {
-    // Explicit `options.headers` win, so a caller can always override.
-    transport.push("headers: { ...headers, ...options?.headers }");
-  }
   const exploded = queryParams
     .filter((p) => p.type === "query" && p.explode)
     .map((p) => p.name);
-  if (exploded.length > 0) {
-    transport.push(`explode: ${JSON.stringify(exploded)}`);
-  }
-  if (body?.contentType) {
-    transport.push(`contentType: ${JSON.stringify(body.contentType)}`);
-  }
-  if (response.format) {
-    transport.push(`responseFormat: ${JSON.stringify(response.format)}`);
-  }
-  if (response.accept) {
-    transport.push(`accept: ${JSON.stringify(response.accept)}`);
-  }
-  // DELETE takes no positional body, so a declared one rides in the options.
-  if (body && op.verb === "delete") transport.push("body");
+  const buildTransportArg = (overrides: TransportOverrides = {}): string => {
+    const transport = ["...options"];
+    if (overrides.signal) {
+      transport.push(
+        overrides.signal === "signal"
+          ? "signal"
+          : `signal: ${overrides.signal}`,
+      );
+    }
+    if (!overrides.nextLink) transport.push(overrides.query ?? "query");
+    if (headerParams.length > 0) {
+      // Explicit `options.headers` win, so a caller can always override.
+      transport.push(
+        overrides.headers ?? "headers: { ...headers, ...options?.headers }",
+      );
+    }
+    if (overrides.nextLink) return `{ ${transport.join(", ")} }`;
+    if (exploded.length > 0) {
+      transport.push(`explode: ${JSON.stringify(exploded)}`);
+    }
+    if (body?.contentType) {
+      transport.push(`contentType: ${JSON.stringify(body.contentType)}`);
+    }
+    if (response.format) {
+      transport.push(`responseFormat: ${JSON.stringify(response.format)}`);
+    }
+    if (response.accept) {
+      transport.push(`accept: ${JSON.stringify(response.accept)}`);
+    }
+    // DELETE takes no positional body, so a declared one rides in the options.
+    if (body && op.verb === "delete") transport.push("body");
+    return `{ ${transport.join(", ")} }`;
+  };
   const responseType = response.type;
-  const transportArg = `{ ${transport.join(", ")} }`;
+  const transportArg = buildTransportArg();
 
   // The Promise flavor calls the base verb helpers (`this.httpGet`,
   // `this.httpPost`, …); the Observable flavor calls the `$`-suffixed helpers
@@ -3111,20 +3257,445 @@ function buildClientMethodView(
   // verb (e.g. `delete`) does not shadow — and clash with the signature of —
   // the inherited helper it delegates to.
   const helper = `http${capitalize(op.verb.toLowerCase())}`;
-  const callArgs =
+  const callArgsFor = (transport: string) =>
     op.verb === "get" || op.verb === "head" || op.verb === "delete"
-      ? `${endpointCall}, ${transportArg}`
-      : `${endpointCall}, ${body ? "body" : "undefined"}, ${transportArg}`;
+      ? `${endpointCall}, ${transport}`
+      : `${endpointCall}, ${body ? "body" : "undefined"}, ${transport}`;
+  const callArgs = callArgsFor(transportArg);
+
+  const doc = getDoc(program, op.operation) ?? undefined;
+  // The endpoint call above keeps the original operation name; only the
+  // method name is renamed when it would shadow an inherited base member.
+  const name = clientMethodName(op.operation.name, siblingNames, reserved);
 
   return {
-    doc: getDoc(program, op.operation) ?? undefined,
-    // The endpoint call above keeps the original operation name; only the
-    // method name is renamed when it would shadow an inherited base member.
-    name: clientMethodName(op.operation.name, siblingNames, reserved),
+    doc,
+    name,
     methodParams,
     methodBody: `return this.${helper}<${responseType}>(${callArgs});`,
     methodBodyObservable: `return this.${helper}$<${responseType}>(${callArgs});`,
     responseType,
+    paging: paging
+      ? buildPagingMethodView(paging, {
+          rawName: name,
+          doc,
+          pageType: responseType,
+          firstPageCall: (transport) =>
+            `this.${helper}<${responseType}>(${callArgsFor(transport)})`,
+          buildTransportArg,
+          parameterNames: [
+            ...args.map((a) => a.name),
+            localNames.endpointsLocalName,
+          ],
+          itemType: (type) => {
+            collectModelNamesFromType(type, modelImportSet);
+            return mapTsType(type, program, models, enums, renameMap);
+          },
+          program,
+        })
+      : undefined,
+  };
+}
+
+/**
+ * Per-call changes to the transport options a generated method passes to its
+ * verb helper. An auto-paging method requests each page with these, so the
+ * page cursor and the abort signal reach the request.
+ */
+interface TransportOverrides {
+  /** Expression for the abort signal, overriding `options.signal`. */
+  signal?: string;
+  /** `query: …` entry to send instead of the method's own `query` argument. */
+  query?: string;
+  /** `headers: …` entry to send instead of the default merge. */
+  headers?: string;
+  /**
+   * The request follows a server-supplied next-page link: the link already
+   * carries the query string, and the request is a bodiless GET, so only the
+   * caller's options and headers are kept.
+   */
+  nextLink?: boolean;
+}
+
+// ─── Auto-paging methods ──────────────────────────────────────────────────────
+
+/** A request parameter an auto-paging method rewrites for each page. */
+interface PagingCursorInput {
+  /** Where the parameter travels. */
+  location: "query" | "header";
+  /** Its name on the wire, which is its key in the `query`/`headers` argument. */
+  wireName: string;
+  /** The declared parameter. */
+  param: ModelProperty;
+}
+
+/** How a `@list` operation's auto-paging method reaches each page. */
+interface PagingPlan {
+  /** Name of the auto-paging client method, e.g. `"listAll"`. */
+  name: string;
+  /** Which signal drives iteration. */
+  strategy: PagingStrategy;
+  /** The page's `@pageItems` property, as the response body declares it. */
+  items: ModelProperty;
+  /** The page's `@nextLink` or `@continuationToken` property. */
+  cursorOutput?: ModelProperty;
+  /** The `@continuationToken`, `@offset`, or `@pageIndex` request parameter. */
+  cursorInput?: PagingCursorInput;
+}
+
+/**
+ * Resolves, for every `@list` operation of one interface, how its auto-paging
+ * method walks the pages, and allocates that method's name. Reports
+ * `unsupported-paging-style` for a `@list` operation whose paging metadata
+ * cannot drive a generated loop, and `paging-method-name-collision` when the
+ * preferred `{method}All` name is already taken.
+ *
+ * Detection follows the TypeSpec core paging metadata only — `@list` and the
+ * `@pageItems` / `@nextLink` / `@continuationToken` / `@offset` / `@pageIndex`
+ * decorators that `getPagingOperation` reads — never a naming convention.
+ */
+function resolvePagingPlans(
+  program: Program,
+  ops: HttpOperation[],
+  reserved: ReadonlySet<string>,
+): Map<HttpOperation, PagingPlan> {
+  const plans = new Map<HttpOperation, PagingPlan>();
+  const siblingNames = new Set(ops.map((op) => op.operation.name));
+  const rawName = (op: HttpOperation) =>
+    clientMethodName(op.operation.name, siblingNames, reserved);
+  const taken = new Set([...reserved, ...siblingNames, ...ops.map(rawName)]);
+
+  for (const op of ops) {
+    const shape = resolvePagingShape(program, op);
+    if (!shape) continue;
+    const preferred = `${rawName(op)}All`;
+    const name = uniqueName(preferred, taken);
+    taken.add(name);
+    if (name !== preferred) {
+      reportDiagnostic(program, {
+        code: "paging-method-name-collision",
+        format: { name: op.operation.name, preferred, resolved: name },
+        target: op.operation,
+      });
+    }
+    plans.set(op, { ...shape, name });
+  }
+  return plans;
+}
+
+/**
+ * Resolves the paging strategy of one operation, or `undefined` when it is
+ * not `@list` or its paging cannot be generated (reported as a warning).
+ *
+ * When a page exposes more than one forward signal the priority is `nextLink`,
+ * then `continuationToken`, then `offset` / `pageIndex`: a next link already
+ * carries everything the following request needs. `prevLink`, `firstLink`,
+ * `lastLink` and `pageSize` never drive iteration.
+ */
+function resolvePagingShape(
+  program: Program,
+  op: HttpOperation,
+): Omit<PagingPlan, "name"> | undefined {
+  if (!isList(program, op.operation)) return undefined;
+  // A `@list` operation without `@pageItems` resolves to nothing here; the
+  // compiler's own paging validation has already reported it.
+  const [paging] = getPagingOperation(program, op.operation);
+  if (!paging) return undefined;
+
+  const unsupported = (reason: string): undefined => {
+    reportDiagnostic(program, {
+      code: "unsupported-paging-style",
+      format: { operationName: op.operation.name, reason },
+      target: op.operation,
+    });
+    return undefined;
+  };
+
+  const page = pageBodyModel(op);
+  if (!page) {
+    return unsupported("no success response with a JSON object body");
+  }
+  const pageProperties = flattenProperties(page);
+  // Each page is read as the parsed JSON body, so a paging property must be a
+  // top-level property of that body: not nested, and not a header.
+  const onPage = (p: PagingProperty): ModelProperty | undefined =>
+    p.path.length <= 1 && !isMetadata(program, p.property)
+      ? pageProperties.get(p.property.name)
+      : undefined;
+  const offPage =
+    "a paging property that is not a top-level property of the response body (a nested property, or a response header)";
+
+  // The compiler only accepts `@pageItems` on an array, so the items property
+  // needs no type check of its own.
+  const items = onPage(paging.output.pageItems);
+  if (!items) return unsupported(offPage);
+
+  if (paging.output.nextLink) {
+    const link = onPage(paging.output.nextLink);
+    if (!link) return unsupported(offPage);
+    if (pagingValueType(program, link) !== "string") {
+      return unsupported("a @nextLink that is not a string");
+    }
+    return { strategy: "nextLink", items, cursorOutput: link };
+  }
+
+  if (paging.output.continuationToken) {
+    const token = onPage(paging.output.continuationToken);
+    if (!token) return unsupported(offPage);
+    const input = paging.input.continuationToken
+      ? findPagingInput(op, paging.input.continuationToken)
+      : undefined;
+    if (!input) {
+      return unsupported(
+        "a @continuationToken with no query or header parameter to send it back in",
+      );
+    }
+    if (
+      pagingValueType(program, token) !== "string" ||
+      pagingValueType(program, input.param) !== "string"
+    ) {
+      return unsupported(
+        "a @continuationToken that is not a string on both the request and the response",
+      );
+    }
+    return {
+      strategy: "continuationToken",
+      items,
+      cursorOutput: token,
+      cursorInput: input,
+    };
+  }
+
+  const counter = paging.input.offset ?? paging.input.pageIndex;
+  if (counter) {
+    const strategy = paging.input.offset ? "offset" : "pageIndex";
+    const decorator = strategy === "offset" ? "an @offset" : "a @pageIndex";
+    const input = findPagingInput(op, counter);
+    if (!input) {
+      return unsupported(
+        `${decorator} that is not a query or header parameter`,
+      );
+    }
+    if (pagingValueType(program, input.param) !== "number") {
+      return unsupported(`${decorator} parameter that is not a number`);
+    }
+    return { strategy, items, cursorInput: input };
+  }
+
+  return unsupported(
+    "no forward paging signal (@nextLink, @continuationToken, @offset, or @pageIndex); @prevLink, @firstLink, @lastLink, and @pageSize alone cannot drive iteration",
+  );
+}
+
+/**
+ * The model a paged operation's success response carries as its JSON body —
+ * the same body {@link resolveResponseType} types the single-page method by.
+ */
+function pageBodyModel(op: HttpOperation): Model | undefined {
+  for (const resp of op.responses) {
+    if (!is2xxStatusCode(resp.statusCodes)) continue;
+    for (const content of resp.responses) {
+      if (!content.body) continue;
+      const contentType = content.body.contentTypes[0];
+      if (contentType && !/[/+]json\s*(;|$)/i.test(contentType)) {
+        return undefined;
+      }
+      const type = content.body.type;
+      if (isVoidType(type)) continue;
+      return type.kind === "Model" &&
+        !isArrayModelType(type) &&
+        !isPlainRecord(type)
+        ? type
+        : undefined;
+    }
+  }
+  return undefined;
+}
+
+/** The query or header parameter that a paging input property declares. */
+function findPagingInput(
+  op: HttpOperation,
+  input: PagingProperty,
+): PagingCursorInput | undefined {
+  if (input.path.length > 1) return undefined;
+  const candidates = op.parameters.parameters.filter(
+    (p) => p.type === "query" || p.type === "header",
+  );
+  const match =
+    candidates.find((p) => p.param === input.property) ??
+    candidates.find((p) => p.param.name === input.property.name);
+  if (!match) return undefined;
+  return {
+    location: match.type === "query" ? "query" : "header",
+    wireName: match.name,
+    param: match.param,
+  };
+}
+
+/**
+ * The TypeScript type of a paging property's value, ignoring `| null`, or
+ * `undefined` when it is not a scalar. Only scalars are mapped, so checking a
+ * type never registers a model for emission.
+ */
+function pagingValueType(
+  program: Program,
+  prop: ModelProperty,
+): string | undefined {
+  let type = prop.type;
+  if (type.kind === "Union") {
+    const nonNull = [...type.variants.values()]
+      .map((v) => v.type)
+      .filter((t) => !isNullType(t));
+    if (nonNull.length !== 1) return undefined;
+    type = nonNull[0];
+  }
+  if (type.kind !== "Scalar") return undefined;
+  return type === prop.type
+    ? mapPropertyTsType(prop, program, new Map(), new Map())
+    : mapScalar(type, program);
+}
+
+/** `obj.key`, or `obj["key"]` when the key is not an identifier. */
+function memberAccess(obj: string, key: string, optional = false): string {
+  if (IDENTIFIER_PATTERN.test(key))
+    return `${obj}${optional ? "?." : "."}${key}`;
+  return `${obj}${optional ? "?." : ""}[${JSON.stringify(key)}]`;
+}
+
+/** What {@link buildPagingMethodView} needs from the single-page method. */
+interface PagingMethodContext {
+  /** Name of the single-page client method, e.g. `"list"`. */
+  rawName: string;
+  /** The operation's own doc text. */
+  doc: string | undefined;
+  /** TypeScript type of one page, e.g. `"PagedResult<Store>"`. */
+  pageType: string;
+  /** The single-page request expression, given its transport options. */
+  firstPageCall: (transport: string) => string;
+  /** Builds the transport options argument with per-page overrides. */
+  buildTransportArg: (overrides?: TransportOverrides) => string;
+  /** Identifiers the generated closures must not shadow. */
+  parameterNames: readonly string[];
+  /** Maps the item type, recording any model it references for import. */
+  itemType: (type: Type) => string;
+  /** The compiler program. */
+  program: Program;
+}
+
+/**
+ * Renders the auto-paging method for a `@list` operation. Both client flavors
+ * share the page-walking closures and differ only in the helper they hand
+ * them to: `paginate` (an async generator) or `paginate$` (an Observable).
+ */
+function buildPagingMethodView(
+  plan: PagingPlan,
+  ctx: PagingMethodContext,
+): PagingMethodView {
+  const { program } = ctx;
+  const taken = new Set(ctx.parameterNames);
+  const local = (base: string) => {
+    const name = uniqueName(base, taken);
+    taken.add(name);
+    return name;
+  };
+  const cursor = local("cursor");
+  const signal = local("signal");
+  const page = local("page");
+  const count = local("count");
+
+  const itemsArray = plan.items.type as Model;
+  const itemType = ctx.itemType(itemsArray.indexer!.value);
+  const itemsAccess = memberAccess(page, jsonPropertyName(program, plan.items));
+  const readItems = `(${page}) => ${itemsAccess}`;
+
+  const outputAccess = plan.cursorOutput
+    ? memberAccess(page, jsonPropertyName(program, plan.cursorOutput))
+    : undefined;
+
+  // The cursor replaces the request parameter it was read from; a header
+  // cursor is merged last so it wins over a caller's own `options.headers`.
+  const cursorOverride = (input: PagingCursorInput): TransportOverrides => {
+    const entry = `${formatPropertyKey(input.wireName)}: ${cursor}`;
+    return input.location === "query"
+      ? { signal, query: `query: { ...query, ${entry} }` }
+      : {
+          signal,
+          headers: `headers: { ...headers, ...options?.headers, ${entry} }`,
+        };
+  };
+  const seedOf = (input: PagingCursorInput) =>
+    memberAccess(
+      input.location === "query" ? "query" : "headers",
+      input.wireName,
+      true,
+    );
+
+  let cursorType: string;
+  let fetchPage: string;
+  let first: string;
+  let next: string;
+  switch (plan.strategy) {
+    case "nextLink":
+      cursorType = "string | undefined";
+      fetchPage = [
+        `(${cursor}, ${signal}) =>`,
+        `        ${cursor} === undefined`,
+        `          ? ${ctx.firstPageCall(ctx.buildTransportArg({ signal }))}`,
+        `          : this.httpGetNextLink<${ctx.pageType}>(${cursor}, ${ctx.buildTransportArg({ signal, nextLink: true })})`,
+      ].join("\n");
+      first = "undefined";
+      next = `(${page}) => ${outputAccess} || undefined`;
+      break;
+    case "continuationToken": {
+      const input = plan.cursorInput!;
+      cursorType = "string | undefined";
+      fetchPage = `(${cursor}, ${signal}) => ${ctx.firstPageCall(ctx.buildTransportArg(cursorOverride(input)))}`;
+      first = seedOf(input);
+      next = `(${page}) => ${outputAccess} || undefined`;
+      break;
+    }
+    case "offset":
+    case "pageIndex": {
+      const input = plan.cursorInput!;
+      const declaredDefault = input.param.defaultValue;
+      const seedDefault =
+        declaredDefault?.valueKind === "NumericValue"
+          ? declaredDefault.value.toString()
+          : "0";
+      const advance =
+        plan.strategy === "offset" ? `${cursor} + ${count}` : `${cursor} + 1`;
+      cursorType = "number";
+      fetchPage = `(${cursor}, ${signal}) => ${ctx.firstPageCall(ctx.buildTransportArg(cursorOverride(input)))}`;
+      first = `${seedOf(input)} ?? ${seedDefault}`;
+      next = `(_${page}, ${cursor}, ${count}) => (${count} === 0 ? undefined : ${advance})`;
+      break;
+    }
+  }
+
+  const body = (helper: string) =>
+    [
+      `return this.${helper}<${ctx.pageType}, ${itemType}, ${cursorType}>(`,
+      `      ${fetchPage},`,
+      `      ${first},`,
+      `      ${readItems},`,
+      `      ${next},`,
+      `      options?.signal,`,
+      `    );`,
+    ].join("\n");
+
+  const lead = ctx.doc ? `${ctx.doc}\n\n` : "";
+  const linkNote =
+    plan.strategy === "nextLink"
+      ? " Next-page links are followed only on the base URL's origin."
+      : "";
+  return {
+    name: plan.name,
+    strategy: plan.strategy,
+    doc: `${lead}Walks every page of \`${ctx.rawName}\` and yields each item in turn. Each page is requested only when iteration reaches it, so breaking out of the loop stops paging.${linkNote}`,
+    docObservable: `${lead}Walks every page of \`${ctx.rawName}\`, emitting each item as its page arrives, then completes. Unsubscribing aborts the request in flight and stops paging.${linkNote}`,
+    itemType,
+    methodBody: body("paginate"),
+    methodBodyObservable: body("paginate$"),
   };
 }
 
