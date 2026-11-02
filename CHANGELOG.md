@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.1.1] — 2026-11-02
+
 ### Fixed
 
 - **A service namespace ending in `Api` no longer gets an `ApiClient2` root client.** With `client-shape: path` or `interface`, `namespace Acme.Api` names its root client `ApiClient`, which landed on the emitter's own `client/ApiClient.ts` transport file. The root client was renamed `ApiClient2` and a `client-module-name-collision` warning was reported. The same happened to `interface Api` with `client-shape: flat`. Both now keep the name `ApiClient`.
