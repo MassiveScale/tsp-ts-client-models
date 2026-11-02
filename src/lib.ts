@@ -3,6 +3,7 @@ import {
   JSONSchemaType,
   paramMessage,
 } from "@typespec/compiler";
+import type { ClientShape } from "./client-tree.js";
 import type { TemplateOverrides } from "./renderer.js";
 
 export interface EmitterOptions {
@@ -14,6 +15,8 @@ export interface EmitterOptions {
   "route-prefix"?: string;
   "generate-http-client"?: boolean;
   "client-style"?: "promise" | "observable" | "both";
+  "client-shape"?: ClientShape;
+  "client-name"?: string;
   templates?: TemplateOverrides;
 }
 
@@ -69,6 +72,19 @@ const EmitterOptionsSchema: JSONSchemaType<EmitterOptions> = {
         "Return-type flavor of the generated HTTP client(s). 'promise' (default) emits Promise-based `{Name}Client` classes. 'observable' emits RxJS `Observable`-based `{Name}ObservableClient` classes instead. 'both' emits both side by side. The observable flavor adds `rxjs` as an optional peer dependency of the generated package.",
       nullable: true,
     },
+    "client-shape": {
+      type: "string",
+      enum: ["flat", "path", "interface"],
+      description:
+        "How calls are chained. 'flat' (default): one independent `{Name}Client` class per interface, e.g. new WidgetsClient(config).read(id). 'path': one root client where every URL segment is a step, like the Microsoft Graph SDK, e.g. client.stores.byStoreId(id).pets.get(). 'interface': one root client where each interface is a property nested under the interface whose route its own starts with, e.g. client.stores.byStoreId(id).pets.get(). With 'path' and 'interface', operation methods are named after their HTTP verb unless two on one builder share it.",
+      nullable: true,
+    },
+    "client-name": {
+      type: "string",
+      description:
+        "The name the root client is built from with client-shape 'path' or 'interface': `{name}Client`, and `{name}ObservableClient` for the RxJS flavor. Defaults to the last segment of the service namespace (namespace 'Acme.PetStore' → 'PetStoreClient'). Must be a valid JavaScript identifier. Ignored with client-shape 'flat'.",
+      nullable: true,
+    },
     templates: {
       type: "object",
       description:
@@ -115,6 +131,18 @@ const EmitterOptionsSchema: JSONSchemaType<EmitterOptions> = {
           type: "string",
           nullable: true,
           description: "RxJS Observable HTTP client class template.",
+        },
+        requestBuilder: {
+          type: "string",
+          nullable: true,
+          description:
+            "Root client and request builder template, used with client-shape 'path' or 'interface'.",
+        },
+        requestBuilderObservable: {
+          type: "string",
+          nullable: true,
+          description:
+            "RxJS Observable root client and request builder template, used with client-shape 'path' or 'interface'.",
         },
       },
       required: [],
@@ -186,6 +214,18 @@ export const $lib = createTypeSpecLibrary({
       severity: "warning",
       messages: {
         default: paramMessage`Operation "${"operationName"}" is marked @list, but no auto-paging method was generated for it: it uses ${"reason"}. The single-page client method is still generated.`,
+      },
+    },
+    "invalid-client-name": {
+      severity: "error",
+      messages: {
+        default: paramMessage`The "client-name" option "${"name"}" is not a valid JavaScript identifier: use letters, digits, "_" and "$", not starting with a digit. No root client was emitted.`,
+      },
+    },
+    "builder-member-name-collision": {
+      severity: "warning",
+      messages: {
+        default: paramMessage`The ${"kind"} "${"preferred"}" on "${"builder"}" would have the same name as another member of that class, so it was emitted as "${"resolved"}" instead.`,
       },
     },
     "paging-method-name-collision": {

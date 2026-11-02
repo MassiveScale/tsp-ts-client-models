@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **`client-shape` option: Graph-style clients.** `client-shape: path` emits one root client where every URL segment is a step, as the Microsoft Graph SDK does: a literal segment is a getter and a path parameter is a `by<Param>(value)` method, so `GET /stores/{storeId}/pets/{petId}` is `api.stores.byStoreId(id).pets.byPetId(petId).get()`. `client-shape: interface` nests each interface under the interface whose route its own routes start with: `api.stores.byStoreId(id).pets.get()`. Operation methods are named after their HTTP verb (`get`, `post`, `put`, `patch`, `delete`, `head`) unless two on one builder share it, and a `@list` operation gets `getAll`. The default, `flat`, keeps today's per-interface `*Client` classes and its output is unchanged. See [docs/client-shapes.md](docs/client-shapes.md).
+- **`client-name` option.** Names the root client of the `path` and `interface` shapes: `{client-name}Client`, and `{client-name}ObservableClient` for the RxJS flavor. It defaults to the last segment of the service namespace.
+- **`withOptions` on request builders.** Returns a copy of a builder that adds headers and an abort signal to every request it sends and to every builder created from it, without changing the builder it was called on.
+- **Parallel RxJS tree.** With `client-style: observable` or `both`, the `path` and `interface` shapes also emit an Observable root client and builders, with the same steps and method names.
+- **`requestBuilder` and `requestBuilderObservable` templates**, which render the root client and the builders, with a new `RequestBuilderView`.
+- **`invalid-client-name` error** for a `client-name` that is not a JavaScript identifier, and **`builder-member-name-collision` warning** for a step or method renamed because another member of its builder already had the name.
+
 ## [1.0.0] — 2026-10-25
 
 ### Added

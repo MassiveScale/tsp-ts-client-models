@@ -35,6 +35,7 @@ import {
   NoTarget,
   getPagingOperation,
   isList,
+  type DiagnosticTarget,
   type PagingProperty,
 } from "@typespec/compiler";
 import {
@@ -77,8 +78,32 @@ import {
   TemplateName,
   PagingMethodView,
   PagingStrategy,
+  ImportBindingView,
+  RequestBuilderStepView,
+  RequestBuilderView,
+  ClientMethodView,
 } from "./renderer.js";
 import { EmitterOptions, createDiagnostic, reportDiagnostic } from "./lib.js";
+import {
+  buildInterfaceTree,
+  buildPathTree,
+  firstItem,
+  pascalCase,
+  walkTree,
+  type ClientShape,
+  type TreeItem,
+  type TreeNode,
+  type TreeOperation,
+} from "./client-tree.js";
+import {
+  REQUEST_BUILDER_CONTENT,
+  REQUEST_BUILDER_EXPORTS,
+  REQUEST_BUILDER_MEMBERS,
+  ROOT_CLIENT_MEMBERS,
+  RX_REQUEST_BUILDER_CONTENT,
+  RX_REQUEST_BUILDER_EXPORTS,
+  RX_REQUEST_BUILDER_MEMBERS,
+} from "./request-builder-runtime.js";
 import {
   capitalize,
   discriminatedVariantShapesMatch,
@@ -96,8 +121,23 @@ import {
 export async function $onEmit(
   context: EmitContext<EmitterOptions>,
 ): Promise<void> {
-  const { program, emitterOutputDir, options } = context;
+  const { program, emitterOutputDir } = context;
+  let { options } = context;
   if (program.compilerOptions.noEmit) return;
+
+  const clientName = options["client-name"];
+  if (
+    (options["client-shape"] ?? "flat") !== "flat" &&
+    clientName !== undefined &&
+    !IDENTIFIER_PATTERN.test(clientName)
+  ) {
+    reportDiagnostic(program, {
+      code: "invalid-client-name",
+      format: { name: clientName },
+      target: NoTarget,
+    });
+    options = { ...options, "generate-http-client": false };
+  }
 
   const renderer = buildRenderer(program, options);
 
@@ -637,7 +677,11 @@ async function emitVersion(
     discriminatedRequestUnions,
   );
 
+  const clientShape = options["client-shape"] ?? "flat";
   const generateClient = options["generate-http-client"] !== false;
+  // With the `path` and `interface` shapes, one root client replaces the
+  // per-interface classes; the endpoint objects are still emitted per group.
+  const generateFlatClient = generateClient && clientShape === "flat";
   const clientStyle = options["client-style"] ?? "promise";
   const emitPromiseClient = clientStyle === "promise" || clientStyle === "both";
   const emitObservableClient =
@@ -687,12 +731,15 @@ async function emitVersion(
     ...INFRASTRUCTURE_MODULE_NAMES,
     ...generatedTypeNames,
   ]);
+  // The groups the root client of a `path` or `interface` build reaches.
+  const treeGroups: TreeGroup[] = [];
 
   for (const { name, container, ops } of byContainer.values()) {
     const vOps = version
       ? ops.filter((op) => isOpInVersion(program, op, version))
       : ops;
     if (vOps.length === 0) continue;
+    treeGroups.push({ name, ops: vOps });
 
     const doc = getDoc(program, container);
     const className = `${name}Endpoints`;
@@ -720,12 +767,12 @@ async function emitVersion(
     // Resolved once per interface, not per client flavor, so each paging
     // diagnostic is reported once even when both flavors are emitted.
     let pagingPlans: ReadonlyMap<HttpOperation, PagingPlan> = new Map();
-    if (generateClient) {
+    if (generateFlatClient) {
       reportReservedClientMethodNames(program, vOps, reservedMembers);
       pagingPlans = resolvePagingPlans(program, vOps, reservedMembers);
     }
 
-    if (generateClient && emitPromiseClient) {
+    if (generateFlatClient && emitPromiseClient) {
       const clientClassName = allocateClientModuleName(
         program,
         `${name}Client`,
@@ -757,7 +804,7 @@ async function emitVersion(
       });
     }
 
-    if (generateClient && emitObservableClient) {
+    if (generateFlatClient && emitObservableClient) {
       const observableClassName = allocateClientModuleName(
         program,
         `${name}ObservableClient`,
@@ -790,11 +837,54 @@ async function emitVersion(
     }
   }
 
+  const treeBuilt =
+    generateClient &&
+    clientShape !== "flat" &&
+    treeGroups.length > 0 &&
+    (await emitClientTree(program, {
+      shape: clientShape,
+      groups: treeGroups,
+      serviceName: nsFullName.split(".").pop()!,
+      vDir,
+      options,
+      renderer,
+      takenClientNames,
+      generatedModules,
+      clientExports,
+      emitPromiseClient,
+      emitObservableClient,
+      typeContext: {
+        requestTypes,
+        discriminatedRequestUnions,
+        models,
+        enums,
+        renameMap: mergePatchRenameMap,
+      },
+    }));
+
   // Emit the static base client infrastructure. ApiClient.ts is always required
   // when any client flavor is emitted (RxHttpClient extends HttpClient and
   // reuses its transport, error classes, and config). ApiClientRx.ts is emitted
   // only for the Observable flavor.
   if (generateClient && clientExports.length > 0) {
+    // Unshifted before ApiClient.js below, so the barrel lists the base
+    // modules first and the request-builder infrastructure after them.
+    if (treeBuilt) {
+      if (emitObservableClient) {
+        await writeFile(
+          program,
+          resolvePath(vDir, "client/RequestBuilderRx.ts"),
+          `// AUTO-GENERATED. Do not edit this file directly.\n\n${RX_REQUEST_BUILDER_CONTENT}`,
+        );
+        clientExports.unshift("./client/RequestBuilderRx.js");
+      }
+      await writeFile(
+        program,
+        resolvePath(vDir, "client/RequestBuilder.ts"),
+        `// AUTO-GENERATED. Do not edit this file directly.\n\n${REQUEST_BUILDER_CONTENT}`,
+      );
+      clientExports.unshift("./client/RequestBuilder.js");
+    }
     const apiClientContent = `// AUTO-GENERATED. Do not edit this file directly.\n\n${API_CLIENT_CONTENT}`;
     await writeFile(
       program,
@@ -834,6 +924,11 @@ async function emitVersion(
   const infrastructureModules: BarrelModule[] = [
     { path: "./client/ApiClient.js", exports: API_CLIENT_EXPORTS },
     { path: "./client/ApiClientRx.js", exports: RX_API_CLIENT_EXPORTS },
+    { path: "./client/RequestBuilder.js", exports: REQUEST_BUILDER_EXPORTS },
+    {
+      path: "./client/RequestBuilderRx.js",
+      exports: RX_REQUEST_BUILDER_EXPORTS,
+    },
   ];
   for (const module of [...generatedModules, ...infrastructureModules]) {
     if (!exports.includes(module.path)) continue;
@@ -2845,22 +2940,16 @@ function resolveBarrelModule(
 // ─── client/{Name}Client.ts generation ───────────────────────────────────────
 
 /**
- * Members every generated `*Client` inherits from `HttpClient`. An operation
- * method with any of these names would shadow the inherited member with an
- * incompatible signature, so the generated package would fail to type-check —
- * and, for `useMiddleware`, middleware registration would become unreachable.
+ * Names no member of a generated class may take, whatever it extends.
  *
- * Private base members are included: TypeScript rejects a subclass member that
- * shares a name with a private member of its base.
+ * Every own property of Object.prototype — the complete set, as returned by
+ * Object.getOwnPropertyNames(Object.prototype). TypeScript does not type-check
+ * class members against Object's apparent members, so these compile; the
+ * damage is at runtime. An async `toString`/`valueOf` breaks coercion of the
+ * client (`${client}` throws), and a method named `__proto__` shadows the
+ * accessor, so `client.__proto__` stops returning the instance prototype.
  */
-const BASE_CLIENT_MEMBERS: readonly string[] = [
-  // Every own property of Object.prototype — the complete set, as returned by
-  // Object.getOwnPropertyNames(Object.prototype). TypeScript does not
-  // type-check class members against Object's apparent members, so these
-  // compile; the damage is at runtime. An async `toString`/`valueOf` breaks
-  // coercion of the client (`${client}` throws), and a method named
-  // `__proto__` shadows the accessor, so `client.__proto__` stops returning
-  // the instance prototype.
+const PROTOTYPE_MEMBERS: readonly string[] = [
   "constructor",
   "toString",
   "toLocaleString",
@@ -2876,6 +2965,19 @@ const BASE_CLIENT_MEMBERS: readonly string[] = [
   // Not inherited, but a method named `then` makes every client instance a
   // thenable: `await client` would fire a request with the resolver as query.
   "then",
+];
+
+/**
+ * Members every generated `*Client` inherits from `HttpClient`. An operation
+ * method with any of these names would shadow the inherited member with an
+ * incompatible signature, so the generated package would fail to type-check —
+ * and, for `useMiddleware`, middleware registration would become unreachable.
+ *
+ * Private base members are included: TypeScript rejects a subclass member that
+ * shares a name with a private member of its base.
+ */
+const BASE_CLIENT_MEMBERS: readonly string[] = [
+  ...PROTOTYPE_MEMBERS,
   "config",
   "middleware",
   "useMiddleware",
@@ -3170,8 +3272,10 @@ function buildClientMethodView(
   reserved: ReadonlySet<string>,
   localNames: ClientLocalNames,
   paging: PagingPlan | undefined,
+  placement?: BuilderPlacement,
 ): import("./renderer.js").ClientMethodView {
   const pathArgs = resolvePathArgs(op);
+  const boundArg = (arg: PathArg) => placement?.bound.get(arg.wireName);
 
   const queryParams = op.parameters.parameters.filter(
     (p) => p.type === "query",
@@ -3220,11 +3324,13 @@ function buildClientMethodView(
   // Arguments in call order. A `query` argument is always offered — whether or
   // not the operation declares query parameters — so callers can pass ad-hoc
   // ones; declared parameters keep their types, keyed by their wire names.
-  const args: ParameterSpec[] = pathArgs.map((a) => ({
-    name: a.argName,
-    type: "string",
-    optional: a.optional,
-  }));
+  const args: ParameterSpec[] = pathArgs
+    .filter((a) => boundArg(a) === undefined)
+    .map((a) => ({
+      name: a.argName,
+      type: "string",
+      optional: a.optional,
+    }));
   if (body) {
     args.push({ name: "body", type: body.type, optional: body.optional });
   }
@@ -3250,7 +3356,7 @@ function buildClientMethodView(
   });
   const methodParams = renderParameterList(args);
 
-  const pathArgNames = pathArgs.map((a) => a.argName).join(", ");
+  const pathArgNames = pathArgs.map((a) => boundArg(a) ?? a.argName).join(", ");
   const endpointCall = `${localNames.endpointsLocalName}.${op.operation.name}(${pathArgNames})`;
 
   const exploded = queryParams
@@ -3309,7 +3415,9 @@ function buildClientMethodView(
   const doc = getDoc(program, op.operation) ?? undefined;
   // The endpoint call above keeps the original operation name; only the
   // method name is renamed when it would shadow an inherited base member.
-  const name = clientMethodName(op.operation.name, siblingNames, reserved);
+  const name =
+    placement?.name ??
+    clientMethodName(op.operation.name, siblingNames, reserved);
 
   return {
     doc,
@@ -3341,6 +3449,20 @@ function buildClientMethodView(
 }
 
 /**
+ * Where an operation's method sits when it is sent from a request builder
+ * rather than a flat `*Client` class.
+ */
+interface BuilderPlacement {
+  /** The method name, already resolved against the builder's other members. */
+  name: string;
+  /**
+   * The expression for each path parameter the builder holds, by wire name,
+   * e.g. `this.pathParameters[0]`. These are not arguments of the method.
+   */
+  bound: ReadonlyMap<string, string>;
+}
+
+/**
  * Per-call changes to the transport options a generated method passes to its
  * verb helper. An auto-paging method requests each page with these, so the
  * page cursor and the abort signal reach the request.
@@ -3358,6 +3480,559 @@ interface TransportOverrides {
    * caller's options and headers are kept.
    */
   nextLink?: boolean;
+}
+
+// ─── Root client and request builders (client-shape: path | interface) ───────
+
+/** One interface or namespace whose operations the root client reaches. */
+interface TreeGroup {
+  /** The group's name, which its `*Endpoints` object is named after. */
+  name: string;
+  /** Its operations in the version being emitted, in declaration order. */
+  ops: HttpOperation[];
+}
+
+/** An operation placed in a request-builder tree, with the group that declares it. */
+interface TreeOp {
+  /** The operation. */
+  op: HttpOperation;
+  /** The name of the group whose `*Endpoints` object routes it. */
+  group: string;
+}
+
+/** The type maps the method views of a request builder read. */
+interface TreeTypeContext {
+  /** Synthesized request types, by name. */
+  requestTypes: Map<string, RequestType>;
+  /** Synthesized discriminated request unions, by name. */
+  discriminatedRequestUnions: Map<string, DiscriminatedRequestUnion>;
+  /** Every emitted model, by name. */
+  models: Map<string, Model>;
+  /** Every emitted enum and union, by name. */
+  enums: Map<string, Enum | Union>;
+  /** Synthesized MergePatch type names and their output names. */
+  renameMap: Map<string, string>;
+}
+
+/** What {@link emitClientTree} needs from the version being emitted. */
+interface ClientTreeContext {
+  /** The tree to build. */
+  shape: Exclude<ClientShape, "flat">;
+  /** The groups with operations in this version, in declaration order. */
+  groups: TreeGroup[];
+  /** The last segment of the service namespace, the default `client-name`. */
+  serviceName: string;
+  /** The output folder of the version. */
+  vDir: string;
+  /** The emitter options. */
+  options: EmitterOptions;
+  /** The template renderer. */
+  renderer: Renderer;
+  /** Class names already claimed under `client/`; claims every name it uses. */
+  takenClientNames: Set<string>;
+  /** Modules the barrel re-exports; receives every emitted builder. */
+  generatedModules: BarrelModule[];
+  /** Module paths `index.ts` exports; receives every emitted builder. */
+  clientExports: string[];
+  /** Whether the Promise flavor is emitted. */
+  emitPromiseClient: boolean;
+  /** Whether the RxJS Observable flavor is emitted. */
+  emitObservableClient: boolean;
+  /** The type maps the method views read. */
+  typeContext: TreeTypeContext;
+}
+
+/** A step from one builder to the next, its member name resolved. */
+interface PlannedStep {
+  /** The builder the step reaches. */
+  child: TreeNode<TreeOp>;
+  /** The getter or method name. */
+  name: string;
+}
+
+/** An operation sent from a builder, its method names resolved. */
+interface PlannedMethod {
+  /** The operation and the path parameters the builder holds for it. */
+  item: TreeItem<TreeOp>;
+  /** The single-page method name. */
+  name: string;
+  /** The auto-paging method, when the operation is a supported `@list`. */
+  paging?: PagingPlan;
+}
+
+/** The members of one builder, resolved once and shared by both flavors. */
+interface BuilderPlan {
+  /** The builder's class name in each flavor that is emitted. */
+  classNames: { promise?: string; observable?: string };
+  /** Its steps, in tree order. */
+  steps: PlannedStep[];
+  /** Its operation methods, in declaration order. */
+  methods: PlannedMethod[];
+}
+
+/**
+ * Emits the root client and every request builder of a `path` or `interface`
+ * build, in each flavor that is enabled.
+ *
+ * @param program - The compiler program.
+ * @param ctx - The version being emitted.
+ * @returns `true` once the files are written, so the caller emits the
+ *   request-builder infrastructure they import.
+ */
+async function emitClientTree(
+  program: Program,
+  ctx: ClientTreeContext,
+): Promise<boolean> {
+  const clientName = ctx.options["client-name"] ?? ctx.serviceName;
+  const treeOps: TreeOperation<TreeOp>[] = ctx.groups.flatMap((group) =>
+    group.ops.map((op) => ({
+      value: { op, group: group.name },
+      path: op.path,
+      requiredParams: new Set(
+        op.parameters.parameters
+          .filter((p) => p.type === "path" && !p.param.optional)
+          .map((p) => p.name),
+      ),
+      group: group.name,
+    })),
+  );
+  const root =
+    ctx.shape === "path" ? buildPathTree(treeOps) : buildInterfaceTree(treeOps);
+  const nodes = walkTree(root);
+
+  // Each paging diagnostic is reported once, however many flavors are emitted.
+  const pagingShapes = new Map<HttpOperation, Omit<PagingPlan, "name">>();
+  for (const { value } of treeOps) {
+    const shape = resolvePagingShape(program, value.op);
+    if (shape) pagingShapes.set(value.op, shape);
+  }
+
+  // The Rx members are reserved for both flavors when the Observable one is
+  // emitted, so the two trees expose the same member names.
+  const builderReserved = new Set([
+    ...PROTOTYPE_MEMBERS,
+    ...REQUEST_BUILDER_MEMBERS,
+    ...(ctx.emitObservableClient ? RX_REQUEST_BUILDER_MEMBERS : []),
+  ]);
+  const rootReserved = new Set([
+    ...reservedClientMembers(ctx.emitObservableClient),
+    ...ROOT_CLIENT_MEMBERS,
+  ]);
+
+  const classNames = allocateBuilderClassNames(program, nodes, clientName, ctx);
+  const plans = new Map<TreeNode<TreeOp>, BuilderPlan>();
+  for (const node of nodes) {
+    plans.set(
+      node,
+      planBuilder(
+        program,
+        node,
+        node === root ? rootReserved : builderReserved,
+        pagingShapes,
+        classNames,
+      ),
+    );
+  }
+
+  for (const node of nodes) {
+    const plan = plans.get(node)!;
+    const flavors = [
+      { observable: false, className: plan.classNames.promise },
+      { observable: true, className: plan.classNames.observable },
+    ];
+    for (const { observable, className } of flavors) {
+      if (className === undefined) continue;
+      const view = buildRequestBuilderView(
+        program,
+        node,
+        node === root,
+        plan,
+        plans,
+        className,
+        observable,
+        ctx.typeContext,
+      );
+      const content = observable
+        ? ctx.renderer.renderObservableRequestBuilder(view)
+        : ctx.renderer.renderRequestBuilder(view);
+      await writeFile(
+        program,
+        resolvePath(ctx.vDir, `client/${className}.ts`),
+        content,
+      );
+      ctx.clientExports.push(`./client/${className}.js`);
+      ctx.generatedModules.push({
+        path: `./client/${className}.js`,
+        exports: [{ name: className, isType: false }],
+      });
+    }
+  }
+  return true;
+}
+
+/**
+ * Names the class of every builder of a tree, in each flavor that is emitted:
+ * `{client-name}Client` for the root and `{stem}RequestBuilder` for a builder,
+ * with `Observable` before the suffix for the RxJS flavor. Names are claimed
+ * from the shared pool of `client/` modules and compared without regard to
+ * case, since two files whose names differ only in case are one file on
+ * Windows and macOS. A name that is taken gets a number and a
+ * `client-module-name-collision` warning.
+ *
+ * @param program - The compiler program.
+ * @param nodes - Every builder of the tree, the root first.
+ * @param clientName - The `client-name` the root is named after.
+ * @param ctx - The version being emitted.
+ * @returns Each builder's class names.
+ */
+function allocateBuilderClassNames(
+  program: Program,
+  nodes: readonly TreeNode<TreeOp>[],
+  clientName: string,
+  ctx: ClientTreeContext,
+): Map<TreeNode<TreeOp>, BuilderPlan["classNames"]> {
+  // Every infrastructure export is claimed too, so no builder module imports
+  // its own name as a base class.
+  for (const { name } of [
+    ...REQUEST_BUILDER_EXPORTS,
+    ...RX_REQUEST_BUILDER_EXPORTS,
+  ]) {
+    ctx.takenClientNames.add(name);
+  }
+  ctx.takenClientNames.add("RequestBuilder");
+  ctx.takenClientNames.add("RequestBuilderRx");
+  const lower = new Set(
+    [...ctx.takenClientNames].map((name) => name.toLowerCase()),
+  );
+  const allocate = (
+    preferred: string,
+    target: DiagnosticTarget | typeof NoTarget,
+  ) => {
+    let resolved = preferred;
+    for (let n = 2; lower.has(resolved.toLowerCase()); n++) {
+      resolved = `${preferred}${n}`;
+    }
+    lower.add(resolved.toLowerCase());
+    ctx.takenClientNames.add(resolved);
+    if (resolved !== preferred) {
+      reportDiagnostic(program, {
+        code: "client-module-name-collision",
+        format: { preferred, resolved },
+        target,
+      });
+    }
+    return resolved;
+  };
+
+  const names = new Map<TreeNode<TreeOp>, BuilderPlan["classNames"]>();
+  for (const node of nodes) {
+    const isRoot = node.kind === "root";
+    const target = isRoot
+      ? NoTarget
+      : (firstItem(node)?.op.operation ?? NoTarget);
+    const name = (flavor: string) =>
+      allocate(
+        isRoot
+          ? `${clientName}${flavor}Client`
+          : `${node.stem}${flavor}RequestBuilder`,
+        target,
+      );
+    names.set(node, {
+      promise: ctx.emitPromiseClient ? name("") : undefined,
+      observable: ctx.emitObservableClient ? name("Observable") : undefined,
+    });
+  }
+  return names;
+}
+
+/**
+ * Resolves the member names of one builder: its operation methods, their
+ * auto-paging methods, and its steps, in that order of precedence.
+ *
+ * An operation method is named after its HTTP verb (`get`, `post`, …), unless
+ * two operations of the builder share the verb, in which case each keeps its
+ * operation name. A step that would share a name with an operation method or
+ * an inherited member steps aside: a getter gets a `Path` suffix, and both
+ * kinds a number when that is taken too.
+ *
+ * @param program - The compiler program.
+ * @param node - The builder.
+ * @param reserved - The names its base class already uses.
+ * @param pagingShapes - The paging strategy of every supported `@list` operation.
+ * @param classNames - Every builder's class names.
+ * @returns The builder's plan.
+ */
+function planBuilder(
+  program: Program,
+  node: TreeNode<TreeOp>,
+  reserved: ReadonlySet<string>,
+  pagingShapes: ReadonlyMap<HttpOperation, Omit<PagingPlan, "name">>,
+  classNames: ReadonlyMap<TreeNode<TreeOp>, BuilderPlan["classNames"]>,
+): BuilderPlan {
+  const builder =
+    classNames.get(node)!.promise ?? classNames.get(node)!.observable!;
+  const taken = new Set(reserved);
+  const collision = (
+    kind: string,
+    preferred: string,
+    resolved: string,
+    target: DiagnosticTarget | typeof NoTarget,
+  ) => {
+    if (resolved === preferred) return;
+    reportDiagnostic(program, {
+      code: "builder-member-name-collision",
+      format: { kind, preferred, resolved, builder },
+      target,
+    });
+  };
+
+  const verbCounts = new Map<string, number>();
+  for (const { value } of node.items) {
+    verbCounts.set(value.op.verb, (verbCounts.get(value.op.verb) ?? 0) + 1);
+  }
+  const preferredNames = node.items.map(({ value }) =>
+    verbCounts.get(value.op.verb)! > 1
+      ? value.op.operation.name
+      : value.op.verb,
+  );
+  const siblingNames = new Set(preferredNames);
+  const methods: PlannedMethod[] = node.items.map((item, i) => {
+    const target = item.value.op.operation;
+    let name = clientMethodName(preferredNames[i], siblingNames, reserved);
+    if (name !== preferredNames[i]) {
+      reportDiagnostic(program, {
+        code: "reserved-client-method-name",
+        format: { name: preferredNames[i], renamed: name },
+        target,
+      });
+    }
+    const unique = uniqueName(name, taken);
+    collision("method", name, unique, target);
+    name = unique;
+    taken.add(name);
+    return { item, name };
+  });
+
+  for (const method of methods) {
+    const shape = pagingShapes.get(method.item.value.op);
+    if (!shape) continue;
+    const preferred = `${method.name}All`;
+    const name = uniqueName(preferred, taken);
+    taken.add(name);
+    if (name !== preferred) {
+      reportDiagnostic(program, {
+        code: "paging-method-name-collision",
+        format: {
+          name: method.item.value.op.operation.name,
+          preferred,
+          resolved: name,
+        },
+        target: method.item.value.op.operation,
+      });
+    }
+    method.paging = { ...shape, name };
+  }
+
+  const steps = node.children.map((child): PlannedStep => {
+    const preferred =
+      child.kind === "parameter"
+        ? `by${pascalCase(identifierOf(child.name))}`
+        : child.name;
+    const name = taken.has(preferred)
+      ? uniqueName(
+          child.kind === "parameter" ? preferred : `${preferred}Path`,
+          taken,
+        )
+      : preferred;
+    taken.add(name);
+    collision(
+      child.kind === "parameter" ? "step method" : "step property",
+      preferred,
+      name,
+      firstItem(child)?.op.operation ?? NoTarget,
+    );
+    return { child, name };
+  });
+
+  return { classNames: classNames.get(node)!, steps, methods };
+}
+
+/**
+ * Builds the view of the root client or one request builder in one flavor.
+ *
+ * Like {@link buildClientView}, the methods are built twice: once to discover
+ * the models they import, and again once every local name that a model import
+ * would shadow has been aliased.
+ *
+ * @param program - The compiler program.
+ * @param node - The builder.
+ * @param isRoot - Whether the builder is the root client.
+ * @param plan - The builder's resolved members.
+ * @param plans - Every builder's resolved members, for the class names of its steps.
+ * @param className - The class name in this flavor.
+ * @param observable - Whether this is the RxJS Observable flavor.
+ * @param types - The type maps the method views read.
+ * @returns The view.
+ */
+function buildRequestBuilderView(
+  program: Program,
+  node: TreeNode<TreeOp>,
+  isRoot: boolean,
+  plan: BuilderPlan,
+  plans: ReadonlyMap<TreeNode<TreeOp>, BuilderPlan>,
+  className: string,
+  observable: boolean,
+  types: TreeTypeContext,
+): RequestBuilderView {
+  const classOf = (child: TreeNode<TreeOp>) => {
+    const names = plans.get(child)!.classNames;
+    return (observable ? names.observable : names.promise)!;
+  };
+  const builderImports = plan.steps.map((s) => classOf(s.child));
+  const endpointNames = [
+    ...new Set(plan.methods.map((m) => `${m.item.value.group}Endpoints`)),
+  ];
+  const baseName = observable
+    ? isRoot
+      ? "RxRootClient"
+      : "RxRequestBuilder"
+    : isRoot
+      ? "RootClient"
+      : "RequestBuilder";
+
+  const buildMethods = (
+    modelImportSet: Set<string>,
+    local: (name: string) => string,
+    renameMap: Map<string, string>,
+  ): ClientMethodView[] =>
+    plan.methods.map((method) => {
+      const { op, group } = method.item.value;
+      const endpointsName = `${group}Endpoints`;
+      return buildClientMethodView(
+        op,
+        types.requestTypes,
+        types.discriminatedRequestUnions,
+        program,
+        types.models,
+        types.enums,
+        modelImportSet,
+        renameMap,
+        new Set(),
+        new Set(),
+        {
+          ...defaultClientLocalNames(endpointsName),
+          requestOptionsName: local("RequestOptions"),
+          endpointsLocalName: local(endpointsName),
+        },
+        method.paging,
+        {
+          name: method.name,
+          bound: new Map(
+            [...method.item.bound].map(([wireName, index]) => [
+              wireName,
+              `this.pathParameters[${index}]`,
+            ]),
+          ),
+        },
+      );
+    });
+
+  const discovered = new Set<string>();
+  buildMethods(discovered, (name) => name, types.renameMap);
+
+  // Builder class names never match a model's (they are claimed from one
+  // pool), so only the imported infrastructure and endpoint names can clash.
+  const taken = new Set([...discovered, className, ...builderImports]);
+  const locals = new Map<string, string>();
+  const local = (imported: string): string => {
+    let alias = locals.get(imported);
+    if (alias) return alias;
+    alias = taken.has(imported)
+      ? uniqueName(`Client${imported}`, taken)
+      : imported;
+    taken.add(alias);
+    locals.set(imported, alias);
+    return alias;
+  };
+  const base: ImportBindingView = { name: baseName, local: local(baseName) };
+  const requestOptionsName = local("RequestOptions");
+  const observableName = local("Observable");
+  const endpointImports: ImportBindingView[] = endpointNames.map((name) => ({
+    name,
+    local: local(name),
+  }));
+  const globalAliases = resolveShadowedGlobalAliases(discovered, taken);
+  const clientRenameMap = new Map([
+    ...types.renameMap,
+    ...[...globalAliases].map(
+      ([name, alias]) => [`${RENAME_ALIAS}${name}`, alias] as const,
+    ),
+  ]);
+  const modelImportSet = new Set<string>();
+  const methods = buildMethods(modelImportSet, local, clientRenameMap);
+
+  const steps: RequestBuilderStepView[] = plan.steps.map(({ child, name }) => {
+    const stepClass = classOf(child);
+    if (child.kind === "parameter") {
+      const param = toIdentifier(child.name, new Set([stepClass]));
+      const values = isRoot
+        ? `[${param}]`
+        : `[...this.pathParameters, ${param}]`;
+      return {
+        doc: `${child.path ? `Requests under \`${child.path}\`` : "Requests"} for one \`${child.name}\`.\n\n@param ${param} - The \`${child.name}\` path parameter.`,
+        name,
+        className: stepClass,
+        param,
+        args: isRoot
+          ? `this.adapter, ${values}`
+          : `this.adapter, ${values}, this.requestOptions`,
+      };
+    }
+    return {
+      doc: child.path
+        ? `Requests under \`${child.path}\`.`
+        : `Requests of the \`${child.group}\` operations.`,
+      name,
+      className: stepClass,
+      args: isRoot
+        ? "this.adapter, []"
+        : "this.adapter, this.pathParameters, this.requestOptions",
+    };
+  });
+
+  return {
+    doc: builderDoc(node),
+    className,
+    isRoot,
+    base,
+    baseModule: observable ? "./RequestBuilderRx.js" : "./RequestBuilder.js",
+    requestOptionsName,
+    observableName,
+    endpointImports,
+    builderImports,
+    modelImports: [...modelImportSet].map((name) => {
+      const alias = globalAliases.get(name);
+      return alias ? `${name} as ${alias}` : name;
+    }),
+    steps,
+    methods,
+  };
+}
+
+/**
+ * The JSDoc text of a root client or request builder class.
+ *
+ * @param node - The builder.
+ * @returns The text.
+ */
+function builderDoc(node: TreeNode<TreeOp>): string {
+  if (node.kind === "root") {
+    return "The API client. Every call is chained from one of its steps, through request builders, to the operation it sends.";
+  }
+  if (node.path) return `Sends the requests under \`${node.path}\`.`;
+  if (node.group)
+    return `Sends the requests of the \`${node.group}\` operations.`;
+  return `Sends the requests for one \`${node.name}\`.`;
 }
 
 // ─── Auto-paging methods ──────────────────────────────────────────────────────
@@ -4701,16 +5376,26 @@ export function formatPropertyKey(name: string): string {
 }
 
 /**
+ * Converts a name to a valid JavaScript identifier, which may be a reserved
+ * word: invalid characters are dropped and the next character upper-cased
+ * (`widget-id` → `widgetId`), and a name that would start with a digit gets a
+ * leading `_`.
+ */
+function identifierOf(name: string): string {
+  const id = name.replace(/[^A-Za-z0-9_$]+(.)?/g, (_, next?: string) =>
+    next ? next.toUpperCase() : "",
+  );
+  return !id || /^[0-9]/.test(id) ? `_${id}` : id;
+}
+
+/**
  * Converts a name to a valid JavaScript identifier that is not in `taken`, and
  * claims it. Invalid characters are dropped and the next character
  * upper-cased (`widget-id` → `widgetId`); a reserved word or a taken name gets
  * a `Param` suffix, numbered if that is taken too.
  */
 export function toIdentifier(name: string, taken: Set<string>): string {
-  let id = name.replace(/[^A-Za-z0-9_$]+(.)?/g, (_, next?: string) =>
-    next ? next.toUpperCase() : "",
-  );
-  if (!id || /^[0-9]/.test(id)) id = `_${id}`;
+  let id = identifierOf(name);
   if (RESERVED_WORDS.has(id) || taken.has(id)) {
     id = uniqueName(`${id}Param`, taken);
   }

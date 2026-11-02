@@ -109,6 +109,8 @@ The paging method is named `{method}All`, built from the single-page method's na
 
 When `{method}All` is already taken by another operation, the paging method gets a number (`listAll2`), and a `paging-method-name-collision` **warning** says so. Rename the colliding operation to keep the name you intended.
 
+With `client-shape: path` or `interface`, single-page methods are usually named after their HTTP verb, so the paging method is usually `getAll`: `for await (const pet of api.stores.byStoreId(id).pets.getAll())`. Options added to the builder with `withOptions` reach every page. See [Client shapes](client-shapes.md).
+
 The base classes add `paginate`, `httpGetNextLink`, `readHeader`, `replaceHeader` and, on the Observable client, `paginate$`. Like every inherited member, these names are reserved, so an operation with one of them gets an `Operation` suffix. See [Reserved method names](http-client.md#reserved-method-names).
 
 ## Custom templates

@@ -11,6 +11,7 @@ This emitter produces:
 - **Request types** — visibility-filtered interfaces (e.g. `WidgetPostRequest`, `WidgetPatchRequest`) that strip server-managed fields like `id` from write operations. MergePatch operations are also supported.
 - **Endpoint utilities** — `*Endpoints` `as const` objects with typed path-building functions per interface.
 - **Typed HTTP client** _(optional, on by default)_ — one `*Client` class per TypeSpec interface using native `fetch`, with retry, `AbortSignal`, timeout support, and an always-available `query` parameter for custom query parameters on any call.
+- **Graph-style client shapes** — with `client-shape: path` or `interface`, one root client chains every call through request builders, as the Microsoft Graph SDK does: `api.stores.byStoreId(id).pets.get()`. See [docs/client-shapes.md](docs/client-shapes.md).
 - **Pluggable client** — inject your own `fetch`-compatible transport, add middleware, or hook into every request, response, and failure, so existing auth and error-handling code works with the generated client. See [docs/client-extensibility.md](docs/client-extensibility.md).
 - **Auto-paging** — every `@list` operation also gets a `{method}All` method that walks every page, following `@nextLink`, `@continuationToken`, `@offset` or `@pageIndex`. It returns an async generator on the Promise client and an `Observable` of items on the RxJS client. See [docs/paging.md](docs/paging.md).
 
@@ -40,17 +41,19 @@ options:
 
 ### Emitter options
 
-| Option                 | Type      | Default                                 | Description                                                                                                                                                                                                                                                                                                                                 |
-| ---------------------- | --------- | --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `target-version`       | `string`  | Latest declared version                 | Emit only this API version. Ignored when `all-versions` is `true`.                                                                                                                                                                                                                                                                          |
-| `all-versions`         | `boolean` | `false`                                 | When `true`, generate clients for every declared API version in separate subfolders.                                                                                                                                                                                                                                                        |
-| `route-prefix`         | `string`  | `api/{version}`                         | Prefix prepended to every endpoint path. Use `{version}` as a placeholder for the API version (e.g. `api/{version}` → `/api/v1.0/items`). Set to `""` to emit bare paths.                                                                                                                                                                   |
-| `npm-package-name`     | `string`  | Derived from TypeSpec namespace         | The name given to the generated package. When omitted, the namespace is converted to kebab-case (e.g. `MyOrg.PetApi` → `my-org-pet-api`).                                                                                                                                                                                                   |
-| `npm-version`          | `string`  | —                                       | The version assigned to the generated package.                                                                                                                                                                                                                                                                                              |
-| `npm-description`      | `string`  | `Client models for the {namespace} API` | Description applied to the generated package.                                                                                                                                                                                                                                                                                               |
-| `generate-http-client` | `boolean` | `true`                                  | Generate typed HTTP client classes. Set to `false` to emit models and endpoint utilities only.                                                                                                                                                                                                                                              |
-| `client-style`         | `string`  | `promise`                               | Return-type flavor of the generated client(s): `promise` (Promise-based `{Name}Client`), `observable` (RxJS `Observable`-based `{Name}ObservableClient`), or `both`. The observable flavor adds `rxjs` as an optional peer dependency of the generated package. See [Observable (RxJS) client](docs/http-client.md#observable-rxjs-client). |
-| `templates`            | `object`  | —                                       | Override individual built-in Handlebars templates. See [Customizing templates](#customizing-templates).                                                                                                                                                                                                                                     |
+| Option                 | Type      | Default                                 | Description                                                                                                                                                                                                                                                                                                                                    |
+| ---------------------- | --------- | --------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `target-version`       | `string`  | Latest declared version                 | Emit only this API version. Ignored when `all-versions` is `true`.                                                                                                                                                                                                                                                                             |
+| `all-versions`         | `boolean` | `false`                                 | When `true`, generate clients for every declared API version in separate subfolders.                                                                                                                                                                                                                                                           |
+| `route-prefix`         | `string`  | `api/{version}`                         | Prefix prepended to every endpoint path. Use `{version}` as a placeholder for the API version (e.g. `api/{version}` → `/api/v1.0/items`). Set to `""` to emit bare paths.                                                                                                                                                                      |
+| `npm-package-name`     | `string`  | Derived from TypeSpec namespace         | The name given to the generated package. When omitted, the namespace is converted to kebab-case (e.g. `MyOrg.PetApi` → `my-org-pet-api`).                                                                                                                                                                                                      |
+| `npm-version`          | `string`  | —                                       | The version assigned to the generated package.                                                                                                                                                                                                                                                                                                 |
+| `npm-description`      | `string`  | `Client models for the {namespace} API` | Description applied to the generated package.                                                                                                                                                                                                                                                                                                  |
+| `generate-http-client` | `boolean` | `true`                                  | Generate typed HTTP client classes. Set to `false` to emit models and endpoint utilities only.                                                                                                                                                                                                                                                 |
+| `client-style`         | `string`  | `promise`                               | Return-type flavor of the generated client(s): `promise` (Promise-based `{Name}Client`), `observable` (RxJS `Observable`-based `{Name}ObservableClient`), or `both`. The observable flavor adds `rxjs` as an optional peer dependency of the generated package. See [Observable (RxJS) client](docs/http-client.md#observable-rxjs-client).    |
+| `client-shape`         | `string`  | `flat`                                  | How calls are chained: `flat` (one `{Name}Client` class per interface), `path` (one root client where every URL segment is a step, e.g. `api.stores.byStoreId(id).pets.get()`), or `interface` (one root client where interfaces nest under the interface whose route theirs starts with). See [docs/client-shapes.md](docs/client-shapes.md). |
+| `client-name`          | `string`  | Last segment of the service namespace   | The root client of the `path` and `interface` shapes is `{client-name}Client` (and `{client-name}ObservableClient`). Must be a valid JavaScript identifier. Ignored with `flat`.                                                                                                                                                               |
+| `templates`            | `object`  | —                                       | Override individual built-in Handlebars templates. See [Customizing templates](#customizing-templates).                                                                                                                                                                                                                                        |
 
 A project with more than one `@service` namespace gets one package per service, each in a subfolder of the output directory named after its namespace in kebab case (`MyOrg.PetApi` → `my-org-pet-api/`). Each package is named the same way, and `npm-package-name` is ignored with a warning. Namespaces that normalize to the same name (`FooBar` and `Foo.Bar`) are numbered: `foo-bar/` and `foo-bar-2/`.
 
@@ -62,7 +65,7 @@ tsp compile .
 
 ## Customizing templates
 
-Any of the built-in [Handlebars](https://handlebarsjs.com/) templates — `file`, `interface`, `enum`, `union`, `endpoints`, `index`, `client`, and `clientObservable` — can be replaced with your own `.hbs` file. Specify overrides in `tspconfig.yaml`:
+Any of the built-in [Handlebars](https://handlebarsjs.com/) templates — `file`, `interface`, `enum`, `union`, `endpoints`, `index`, `client`, `clientObservable`, `requestBuilder`, and `requestBuilderObservable` — can be replaced with your own `.hbs` file. Specify overrides in `tspconfig.yaml`:
 
 ```yaml
 options:
@@ -193,6 +196,30 @@ extends
 
 A template that hardcodes `HttpClient`/`RequestOptions` still works for every spec without such a model, and emits a package that fails to compile for one that has it.
 
+**`requestBuilder`** / **`requestBuilderObservable`** — `RequestBuilderView`
+
+Used with `client-shape: path` or `interface`, once for the root client and once for every request builder. See [docs/client-shapes.md](docs/client-shapes.md).
+
+| Field                      | Type                       | Description                                                                                                                   |
+| -------------------------- | -------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `doc`                      | `string \| undefined`      | JSDoc text for the class.                                                                                                     |
+| `className`                | `string`                   | Generated class name, e.g. `PetStoreClient` or `StoresItemRequestBuilder`.                                                    |
+| `isRoot`                   | `boolean`                  | `true` for the root client, which takes a `ClientConfig` and has no methods.                                                  |
+| `base.name` / `base.local` | `string`                   | The base class to import (`RootClient`, `RequestBuilder`, `RxRootClient` or `RxRequestBuilder`) and the local name to extend. |
+| `baseModule`               | `string`                   | Module the base class is imported from, `./RequestBuilder.js` or `./RequestBuilderRx.js`.                                     |
+| `requestOptionsName`       | `string`                   | Local name for `RequestOptions`, as already embedded in `methodParams`. Import it only when `methods` is not empty.           |
+| `observableName`           | `string`                   | Local name for rxjs `Observable`.                                                                                             |
+| `endpointImports[]`        | `ImportBindingView[]`      | The `*Endpoints` objects the methods call: `name` to import from `../endpoints/{name}.js`, and `local` to bind it to.         |
+| `builderImports[]`         | `string[]`                 | Class names of the builders the steps return, each imported from `./{name}.js`.                                               |
+| `modelImports[]`           | `string[]`                 | Import specifiers for `../models.js`, as on `ClientView`.                                                                     |
+| `steps[]`                  | `RequestBuilderStepView[]` | The getters and `by<Param>` methods that create the next builders.                                                            |
+| `steps[].doc`              | `string \| undefined`      | JSDoc text for the step.                                                                                                      |
+| `steps[].name`             | `string`                   | Member name, e.g. `stores` or `byStoreId`.                                                                                    |
+| `steps[].className`        | `string`                   | Class of the builder the step returns.                                                                                        |
+| `steps[].param`            | `string \| undefined`      | Parameter name of a `by<Param>` method; absent for a getter.                                                                  |
+| `steps[].args`             | `string`                   | Constructor arguments of the new builder, already rendered.                                                                   |
+| `methods[]`                | `ClientMethodView[]`       | The operations sent from this builder, as on `ClientView`. Path parameters the builder holds are not in `methodParams`.       |
+
 ### Built-in Handlebars helpers
 
 | Helper      | Signature              | Description                                                                                                                                           |
@@ -209,7 +236,7 @@ After running `tsp compile .`, the emitter writes a complete, buildable npm pack
 - `models.ts` — TypeScript interfaces, enums, and request types
 - `endpoints/*.ts` — path utility `as const` objects per TypeSpec interface
 - `client/ApiClient.ts` — base `HttpClient`, `ClientConfig`, `ApiError`, retry logic (requires Node.js 18+ or a modern browser)
-- `client/*Client.ts` — one typed client class per TypeSpec interface
+- `client/*Client.ts` — one typed client class per TypeSpec interface, or with `client-shape: path` or `interface`, one root client and its `*RequestBuilder.ts` classes
 - `index.ts` — barrel export
 - `package.json` and `tsconfig.json` — ready to build and publish
 
@@ -243,6 +270,20 @@ await client.list({ status: "active", debug: "true" });
 ```
 
 See [docs/http-client.md](docs/http-client.md) for the full `ClientConfig`, error types, and query parameters.
+
+With `client-shape: path`, the same calls are chained from one root client instead, following the URL:
+
+```typescript
+import { WidgetApiClient } from "your-package-name";
+
+const api = new WidgetApiClient({ baseUrl: "https://api.example.com" });
+
+const widgets = await api.widgets.get();
+const widget = await api.widgets.byId("abc123").get();
+await api.widgets.post({ name: "New Widget" });
+```
+
+See [docs/client-shapes.md](docs/client-shapes.md).
 
 ### Paging
 
@@ -416,6 +457,7 @@ npm run format:check  # check formatting without writing
 
 - [`example/simple-api/](example/simple-api/) - Simple API example without versioning.
 - [`example/versioned-api/`](example/versioned-api/) - Versioned Pet Store TypeSpec API demonstrating multi-version route and model definitions.
+- [`example/path-tree/`](example/path-tree/) - Store API emitted with `client-shape: path` and both client flavors: a Graph-style root client and its request builders.
 
 ## Contributing
 

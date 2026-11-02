@@ -24,6 +24,8 @@ Every method, property, and enum should include a valid `JSDOC`
 
 Generation is version-aware (`target-version` / `all-versions`) and rendered through Handlebars templates. See `src/emitter.ts` (orchestration + type mapping) and `src/renderer.ts` (view models + templates) for the implementation.
 
+The `client-shape` option picks how the client is chained. `flat`, the default, is the per-interface `*Client` classes above, and its output must not change when the other shapes do. `path` and `interface` emit one root client and a tree of request builders instead, like the Microsoft Graph SDK (`api.stores.byStoreId(id).pets.get()`). `src/client-tree.ts` builds the trees from route templates alone, `src/request-builder-runtime.ts` holds the static `client/RequestBuilder.ts` and `RequestBuilderRx.ts` they import, and `emitClientTree` in `src/emitter.ts` names every member and renders the `requestBuilder` templates. The design follows the `client-shape` option of the sibling `tsp-flurl-client` emitter. See `docs/client-shapes.md`.
+
 ---
 
 ## Commands
@@ -79,6 +81,7 @@ The `example/` directory contains standalone TypeSpec projects used for manual e
 
 - `example/simple-api/` — a minimal single-version API. Build with `cd example/simple-api && npm install && tsp compile .`.
 - `example/versioned-api/` — a versioned Pet Store API demonstrating multi-version routes and models. Build via `example/versioned-api/build.ps1`.
+- `example/path-tree/` — a store API emitted with `client-shape: path` and `client-style: both`: shared steps, a parameter at the start of a route, a mixed segment, a route of `/`, shared verbs and paging.
 
 ---
 

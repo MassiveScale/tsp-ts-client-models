@@ -18,6 +18,8 @@ export type TemplateName =
   | "index"
   | "client"
   | "clientObservable"
+  | "requestBuilder"
+  | "requestBuilderObservable"
   | "union";
 
 /**
@@ -254,6 +256,64 @@ export interface ClientView {
   endpointsLocalName: string;
 }
 
+/** A named import whose local binding may differ from the exported name. */
+export interface ImportBindingView {
+  /** Name exported by the module, which is also its file's basename. */
+  name: string;
+  /** Local binding, equal to `name` unless something else in the module claims it. */
+  local: string;
+}
+
+/**
+ * One step from a root client or request builder to the next builder: a
+ * getter named after a URL segment or interface (`stores`), or a
+ * `by<Param>(value)` method that takes one path parameter.
+ */
+export interface RequestBuilderStepView {
+  /** Optional JSDoc text. */
+  doc?: string;
+  /** Member name, e.g. `"stores"` or `"byStoreId"`. */
+  name: string;
+  /** Class name of the builder the step returns. */
+  className: string;
+  /** The method's parameter name, for a `by<Param>` step; absent for a getter. */
+  param?: string;
+  /** Pre-rendered constructor arguments of the new builder, e.g. `"this.adapter, [storeId]"`. */
+  args: string;
+}
+
+/**
+ * View model for the root client or one request builder of the `path` and
+ * `interface` client shapes. Both flavors (Promise and RxJS Observable) share
+ * the shape; the flavor decides the template and the base class.
+ */
+export interface RequestBuilderView {
+  /** Optional JSDoc text. */
+  doc?: string;
+  /** PascalCase class name, e.g. `"StoresItemRequestBuilder"` or `"PetStoreClient"`. */
+  className: string;
+  /** Whether this is the root client, which takes a `ClientConfig`, rather than a builder. */
+  isRoot: boolean;
+  /** The base class: `RootClient`, `RequestBuilder`, or their Rx counterparts. */
+  base: ImportBindingView;
+  /** Module the base class is imported from, e.g. `"./RequestBuilder.js"`. */
+  baseModule: string;
+  /** Local name for `RequestOptions`, imported only when {@link methods} is non-empty. */
+  requestOptionsName: string;
+  /** Local name for rxjs `Observable` (Observable flavor). */
+  observableName: string;
+  /** The `*Endpoints` objects the methods call, imported from `../endpoints/`. */
+  endpointImports: ImportBindingView[];
+  /** Class names of the builders the steps return, each imported from `./{name}.js`. */
+  builderImports: string[];
+  /** Model type names imported from `"../models.js"`, possibly as `Name as Alias`. */
+  modelImports: string[];
+  /** The steps to the next builders, getters and `by<Param>` methods in tree order. */
+  steps: RequestBuilderStepView[];
+  /** The operations sent from this builder. Always empty for the root client. */
+  methods: ClientMethodView[];
+}
+
 // ---------------------------------------------------------------------------
 // Renderer interface
 // ---------------------------------------------------------------------------
@@ -276,6 +336,10 @@ export interface Renderer {
   renderClient(view: ClientView): string;
   /** Renders a typed RxJS Observable HTTP client class for one TypeSpec Interface. */
   renderObservableClient(view: ClientView): string;
+  /** Renders the Promise-flavored root client or one of its request builders. */
+  renderRequestBuilder(view: RequestBuilderView): string;
+  /** Renders the RxJS Observable root client or one of its request builders. */
+  renderObservableRequestBuilder(view: RequestBuilderView): string;
 }
 
 // ---------------------------------------------------------------------------
@@ -355,6 +419,16 @@ export function createRenderer(overrides: TemplateOverrides = {}): Renderer {
     "clientObservable",
     overrides.clientObservable,
   );
+  const requestBuilderTemplate = loadTemplate(
+    env,
+    "requestBuilder",
+    overrides.requestBuilder,
+  );
+  const requestBuilderObservableTemplate = loadTemplate(
+    env,
+    "requestBuilderObservable",
+    overrides.requestBuilderObservable,
+  );
 
   return {
     renderFile(view) {
@@ -389,6 +463,16 @@ export function createRenderer(overrides: TemplateOverrides = {}): Renderer {
 
     renderObservableClient(view) {
       const body = clientObservableTemplate(view);
+      return fileTemplate({ body, fileName: `${view.className}.ts` });
+    },
+
+    renderRequestBuilder(view) {
+      const body = requestBuilderTemplate(view);
+      return fileTemplate({ body, fileName: `${view.className}.ts` });
+    },
+
+    renderObservableRequestBuilder(view) {
+      const body = requestBuilderObservableTemplate(view);
       return fileTemplate({ body, fileName: `${view.className}.ts` });
     },
   };

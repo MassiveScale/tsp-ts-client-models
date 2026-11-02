@@ -16,6 +16,8 @@ All generated files are exported from `index.ts` and are part of the generated p
 
 To skip client generation, set `generate-http-client: false` in `tspconfig.yaml`. To generate RxJS `Observable`-based clients (for Angular), set `client-style: observable` or `client-style: both` — see [Observable (RxJS) client](#observable-rxjs-client).
 
+This page describes the default `client-shape: flat`. With `client-shape: path` or `interface`, one root client chains every call through request builders instead (`api.stores.byStoreId(id).get()`). Everything below about `ClientConfig`, errors, retry, query parameters, headers and the Observable flavor applies to those shapes too. See [Client shapes](client-shapes.md).
+
 ## ApiClient.ts
 
 Contains the base `HttpClient` class and supporting types. All generated `*Client` classes extend `HttpClient`.
