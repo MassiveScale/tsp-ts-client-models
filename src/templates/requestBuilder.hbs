@@ -1,0 +1,36 @@
+import { {{base.name}}{{#unless (eq base.local base.name)}} as {{base.local}}{{/unless}} } from "{{baseModule}}";
+{{#if methods.length}}
+import type { RequestOptions{{#unless (eq requestOptionsName "RequestOptions")}} as {{requestOptionsName}}{{/unless}} } from "./ApiClient.js";
+{{/if}}
+{{#each endpointImports}}
+import { {{name}}{{#unless (eq local name)}} as {{local}}{{/unless}} } from "../endpoints/{{name}}.js";
+{{/each}}
+{{#each builderImports}}
+import { {{this}} } from "./{{this}}.js";
+{{/each}}
+{{#if modelImports.length}}
+import type { {{#each modelImports}}{{this}}{{#unless @last}}, {{/unless}}{{/each}} } from "../models.js";
+{{/if}}
+{{renderDoc doc ""}}export class {{className}} extends {{base.local}} {
+{{#each steps}}
+{{#if param}}
+{{renderDoc doc "  "}}  {{name}}({{param}}: string): {{className}} {
+    return new {{className}}({{args}});
+  }
+{{else}}
+{{renderDoc doc "  "}}  get {{name}}(): {{className}} {
+    return new {{className}}({{args}});
+  }
+{{/if}}
+{{/each}}
+{{#each methods}}
+{{renderDoc doc "  "}}  async {{name}}({{methodParams}}): Promise<{{responseType}}> {
+    {{methodBody}}
+  }
+{{#if paging}}
+{{renderDoc paging.doc "  "}}  {{paging.name}}({{methodParams}}): AsyncGenerator<{{paging.itemType}}, void, undefined> {
+    {{paging.methodBody}}
+  }
+{{/if}}
+{{/each}}
+}

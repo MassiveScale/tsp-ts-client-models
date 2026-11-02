@@ -1,7 +1,8 @@
 // Adversarial name sweep: emits a TypeSpec spec for every name that has ever
 // collided with something the emitter generates — infrastructure exports,
 // imported bindings, inherited members, JavaScript globals — and type-checks
-// the resulting package under both client styles.
+// the resulting package under both client styles, and under the `path` and
+// `interface` client shapes.
 //
 // The regular test suite pins each *known* collision with a targeted test. This
 // script is the broader net for finding the next one: run it after changing
@@ -201,20 +202,86 @@ for (const e of ["Promise", "Record", "HttpClient", "WidgetsClient"]) {
   ]);
 }
 
+// Names that only the `path` and `interface` shapes generate: URL segments
+// that become getters on the root client or on a request builder, path
+// parameters that become `by<Param>` methods, and models named after the
+// request-builder infrastructure.
+for (const segment of [
+  ...Object.getOwnPropertyNames(Object.prototype),
+  "then",
+  "prototype",
+  "adapter",
+  "pathParameters",
+  "requestOptions",
+  "withOptions",
+  "applyOptions",
+  "config",
+  "request",
+  "useMiddleware",
+  "get",
+  "getAll",
+  "rx",
+  "item",
+  "root",
+  "$count",
+]) {
+  cases.push([
+    `segment ${segment}`,
+    `${HEADER} model Widget { id: string; } @route("/${segment}") interface Root { @get list(): Widget[]; } @route("/w/${segment}") interface Nested { @get list(): Widget[]; } @route("/w") interface W { @get list(): Widget[]; }`,
+  ]);
+}
+for (const param of [
+  "default",
+  "this",
+  "adapter",
+  "Item",
+  "ItemRequestBuilder",
+  "String",
+]) {
+  cases.push([
+    `path parameter ${param}`,
+    `${HEADER} model Widget { id: string; } @route("/w") interface W { @get read(@path \`${param}\`: string): Widget; }`,
+  ]);
+}
+for (const model of [
+  "RequestBuilder",
+  "RxRequestBuilder",
+  "RootClient",
+  "RxRootClient",
+  "RequestAdapter",
+  "WRequestBuilder",
+  "SweepApiClient",
+  "WEndpoints",
+]) {
+  cases.push([
+    `model ${model} in a request builder`,
+    `${HEADER} model ${model} { id: string; } @route("/w") interface W { @get list(): ${model}[]; @post create(@body b: ${model}): ${model}; }`,
+  ]);
+}
+
+/** Every case runs under each of these option sets. */
+const CONFIGS = [
+  { "client-style": "promise" },
+  { "client-style": "both" },
+  { "client-style": "both", "client-shape": "path" },
+  { "client-style": "both", "client-shape": "interface" },
+];
+
 let failures = 0;
 let checks = 0;
 let skipped = 0;
 for (const [label, code] of cases) {
-  for (const style of ["promise", "both"]) {
+  for (const options of CONFIGS) {
+    const name = `${options["client-style"]}${options["client-shape"] ? `/${options["client-shape"]}` : ""}`;
     checks++;
-    const result = await typeCheck(code, { "client-style": style });
+    const result = await typeCheck(code, options);
     if (result.skipped) {
       skipped++;
       continue;
     }
     if (result.errors.length === 0) continue;
     failures++;
-    console.log(`FAIL [${style}] ${label}`);
+    console.log(`FAIL [${name}] ${label}`);
     for (const e of result.errors) console.log(`    ${e}`);
   }
 }
