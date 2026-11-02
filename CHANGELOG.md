@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.1.0] — 2026-11-02
+
 ### Added
 
 - **`client-shape` option: Graph-style clients.** `client-shape: path` emits one root client where every URL segment is a step, as the Microsoft Graph SDK does: a literal segment is a getter and a path parameter is a `by<Param>(value)` method, so `GET /stores/{storeId}/pets/{petId}` is `api.stores.byStoreId(id).pets.byPetId(petId).get()`. `client-shape: interface` nests each interface under the interface whose route its own routes start with: `api.stores.byStoreId(id).pets.get()`. Operation methods are named after their HTTP verb (`get`, `post`, `put`, `patch`, `delete`, `head`) unless two on one builder share it, and a `@list` operation gets `getAll`. The default, `flat`, keeps today's per-interface `*Client` classes and its output is unchanged. See [docs/client-shapes.md](docs/client-shapes.md).
