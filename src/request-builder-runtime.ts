@@ -119,9 +119,26 @@ export class RootClient extends HttpClient {
 }
 
 /**
+ * Puts the headers of \`next\` over those of \`base\`. Names are matched without
+ * regard to case, as they are when sent, so a header of \`next\` replaces one of
+ * \`base\` however either is spelled.
+ */
+function mergeHeaders(
+  base: Record<string, unknown> | undefined,
+  next: Record<string, unknown> | undefined,
+): Record<string, unknown> {
+  const replaced = new Set(Object.keys(next ?? {}).map((name) => name.toLowerCase()));
+  const merged: Record<string, unknown> = {};
+  for (const [name, value] of Object.entries(base ?? {})) {
+    if (!replaced.has(name.toLowerCase())) merged[name] = value;
+  }
+  return Object.assign(merged, next);
+}
+
+/**
  * Merges request options over the options of a builder: headers from \`next\`
- * replace those of \`base\` with the same name, and every abort signal of both
- * applies.
+ * replace those of \`base\` with the same name in any case, and every abort
+ * signal of both applies.
  */
 export function mergeRequestOptions<O extends Pick<TransportOptions, "headers" | "signal">>(
   base: RequestOptions | undefined,
@@ -130,7 +147,7 @@ export function mergeRequestOptions<O extends Pick<TransportOptions, "headers" |
   if (!base) return next;
   const merged = { ...base, ...next } as O;
   if (base.headers || next?.headers) {
-    merged.headers = { ...base.headers, ...next?.headers };
+    merged.headers = mergeHeaders(base.headers, next?.headers);
   }
   const signals = [base.signal, next?.signal].filter(
     (s): s is AbortSignal => s !== undefined,
@@ -244,11 +261,19 @@ export abstract class RequestBuilder<A extends RequestAdapter = RequestAdapter> 
     return this.adapter.paginate(fetchPage, first, items, next, signal);
   }
 
+  /**
+   * Reads a header from a call's headers over this builder's own, the way they
+   * are sent, so a paging cursor sent in a header starts from a value added
+   * with {@link RequestBuilder.withOptions}.
+   */
   protected readHeader(
     headers: Record<string, unknown> | undefined,
     name: string,
   ): unknown {
-    return this.adapter.readHeader(headers, name);
+    return this.adapter.readHeader(
+      mergeHeaders(this.requestOptions?.headers, headers),
+      name,
+    );
   }
 
   protected replaceHeader(

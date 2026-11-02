@@ -1237,4 +1237,57 @@ describe("client-shape runtime", () => {
     );
     deepStrictEqual(ids, ["a", "b"]);
   });
+
+  it("lets a later header win whatever case either is spelled in", async () => {
+    const { ShapeApiClient } = await load(STORE_SPEC, {
+      "client-shape": "path",
+    });
+    const transport = recorder();
+    const api = new ShapeApiClient(config(transport));
+    const stores = api.stores
+      .withOptions({ headers: { Authorization: "first" } })
+      .withOptions({ headers: { authorization: "second" } });
+
+    await stores.get();
+    await stores.get(undefined, { headers: { AUTHORIZATION: "call" } });
+
+    deepStrictEqual(
+      transport.calls.map((r) => r.headers.get("Authorization")),
+      ["second", "call"],
+    );
+  });
+
+  it("starts a header cursor from the value added with withOptions", async () => {
+    const { ShapeApiClient } = await load(
+      `${HEADER}
+        model W { id: string; }
+        model Page { @pageItems items: W[]; }
+        @route("/w") interface Ws {
+          @list @get list(@header("x-skip") @offset skip?: int32): Page;
+        }
+      `,
+      { "client-shape": "path" },
+    );
+    const transport = recorder((request) =>
+      request.headers.get("x-skip") === "12"
+        ? json({ items: [] })
+        : json({ items: [{ id: "a" }, { id: "b" }] }),
+    );
+    const api = new ShapeApiClient(config(transport));
+    const skipped = api.w.withOptions({ headers: { "X-Skip": "10" } });
+
+    const ids: string[] = [];
+    for await (const w of skipped.getAll()) ids.push(w.id);
+    for await (const w of skipped.getAll(undefined, undefined, {
+      headers: { "x-skip": "12" },
+    })) {
+      ids.push(w.id);
+    }
+
+    deepStrictEqual(ids, ["a", "b"]);
+    deepStrictEqual(
+      transport.calls.map((r) => r.headers.get("x-skip")),
+      ["10", "12", "12"],
+    );
+  });
 });

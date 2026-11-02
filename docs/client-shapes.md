@@ -106,11 +106,11 @@ await tenant.pets.byPetId("p1").get(); // sends X-Tenant
 await api.stores.byStoreId("s1").get(); // a new chain: no X-Tenant
 ```
 
-- Headers are merged. A header added later in the chain replaces one of the same name added earlier, and the options passed to a single call replace both.
+- Headers are merged. A header added later in the chain replaces one of the same name added earlier, and the options passed to a single call replace both. Names are matched without regard to case, so `authorization` replaces `Authorization`.
 - Every `signal` added applies: the request is aborted when any of them aborts.
 - What is added to a builder never reaches the builder it was created from.
 
-For an auto-paging method, the builder's options reach every page, including pages fetched from a next-page link.
+For an auto-paging method, the builder's options reach every page, including pages fetched from a next-page link. A paging cursor sent in a header (a `@continuationToken`, `@offset` or `@pageIndex` header parameter) starts from the value added with `withOptions`, unless the call passes its own.
 
 ## Observable (RxJS) flavor
 
