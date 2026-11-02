@@ -1,6 +1,6 @@
 import { Observable{{#unless (eq observableName "Observable")}} as {{observableName}}{{/unless}} } from "rxjs";
-import { RxHttpClient{{#unless (eq rxBaseClassName "RxHttpClient")}} as {{rxBaseClassName}}{{/unless}} } from "./ApiClientRx.js";
-import { type RequestOptions{{#unless (eq requestOptionsName "RequestOptions")}} as {{requestOptionsName}}{{/unless}} } from "./ApiClient.js";
+import { RxHttpClient{{#unless (eq rxBaseClassName "RxHttpClient")}} as {{rxBaseClassName}}{{/unless}} } from "./runtimeRx.js";
+import { type RequestOptions{{#unless (eq requestOptionsName "RequestOptions")}} as {{requestOptionsName}}{{/unless}} } from "./runtime.js";
 import { {{endpointsClassName}}{{#unless (eq endpointsLocalName endpointsClassName)}} as {{endpointsLocalName}}{{/unless}} } from "../endpoints/{{endpointsClassName}}.js";
 {{#if modelImports.length}}
 import type { {{#each modelImports}}{{this}}{{#unless @last}}, {{/unless}}{{/each}} } from "../models.js";

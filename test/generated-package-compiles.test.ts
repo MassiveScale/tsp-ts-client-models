@@ -126,7 +126,7 @@ describe("generated package compiles", () => {
     deepStrictEqual(errors, []);
   });
 
-  // Regression: the barrel star-exports both models.ts and client/ApiClient.ts,
+  // Regression: the barrel star-exports both models.ts and client/runtime.ts,
   // so a model named after a client infrastructure export made the re-export
   // ambiguous and the package failed with TS2308.
   for (const infrastructureName of [
@@ -235,7 +235,7 @@ describe("generated package compiles", () => {
   );
 
   // Regression: `interface RxHttp` emits client/RxHttpClient.ts exporting
-  // RxHttpClient, which the static ApiClientRx.ts also exports — TS2308.
+  // RxHttpClient, which the static runtimeRx.ts also exports — TS2308.
   it(
     "compiles when a generated client class collides with an infrastructure export",
     { timeout: TYPE_CHECK_TIMEOUT },
@@ -294,7 +294,7 @@ describe("generated package compiles", () => {
 
       // Four distinct client modules, none overwriting another.
       const clientFiles = Object.keys(files)
-        .filter((k) => /client\/(?!ApiClient)/.test(k))
+        .filter((k) => /client\/(?!runtime)/.test(k))
         .map((k) => k.slice(k.lastIndexOf("/") + 1))
         .sort();
       deepStrictEqual(clientFiles, [
@@ -364,10 +364,10 @@ describe("generated package compiles", () => {
     );
   }
 
-  // Regression: `interface Api` wrote client/ApiClient.ts, which the static
-  // infrastructure file then silently overwrote — the client vanished.
+  // Regression: the infrastructure was written to client/ApiClient.ts, so
+  // `interface Api` had to step aside to ApiClient2 with a warning.
   it(
-    "keeps a generated client whose file name collides with the infrastructure",
+    "names the client of interface Api ApiClient, beside the infrastructure",
     { timeout: TYPE_CHECK_TIMEOUT },
     async () => {
       const { errors, files } = await emitAndTypeCheck(`
@@ -386,24 +386,25 @@ describe("generated package compiles", () => {
       deepStrictEqual(errors, []);
 
       const infraKey = Object.keys(files).find((k) =>
-        k.endsWith("client/ApiClient.ts"),
+        k.endsWith("client/runtime.ts"),
       );
-      ok(infraKey, "Expected the infrastructure client/ApiClient.ts");
+      ok(infraKey, "Expected the infrastructure client/runtime.ts");
       ok(
         files[infraKey].includes("export class HttpClient"),
         "The infrastructure file must be intact",
       );
 
       const generatedKey = Object.keys(files).find((k) =>
-        k.endsWith("client/ApiClient2.ts"),
+        k.endsWith("client/ApiClient.ts"),
+      );
+      ok(generatedKey, "Expected the generated client/ApiClient.ts");
+      ok(
+        files[generatedKey].includes("export class ApiClient extends"),
+        "Expected the generated client class to keep its name",
       );
       ok(
-        generatedKey,
-        "The generated client must be emitted under a free name",
-      );
-      ok(
-        files[generatedKey].includes("export class ApiClient2 extends"),
-        "Expected the renamed generated client class",
+        !Object.keys(files).some((k) => k.endsWith("client/ApiClient2.ts")),
+        "No renamed client should be emitted",
       );
     },
   );
@@ -1150,7 +1151,7 @@ describe("generated package compiles", () => {
 });
 
 describe("client infrastructure export metadata", () => {
-  // The barrel needs to know what client/ApiClient.ts exports, and whether each
+  // The barrel needs to know what client/runtime.ts exports, and whether each
   // name is type-only, to re-export it by name when a star export would be
   // ambiguous. That list is maintained by hand next to the file's source text,
   // so it is checked against the emitted file here.
@@ -1172,8 +1173,8 @@ describe("client infrastructure export metadata", () => {
     );
 
     for (const [file, declared] of [
-      ["client/ApiClient.ts", API_CLIENT_EXPORTS],
-      ["client/ApiClientRx.ts", RX_API_CLIENT_EXPORTS],
+      ["client/runtime.ts", API_CLIENT_EXPORTS],
+      ["client/runtimeRx.ts", RX_API_CLIENT_EXPORTS],
     ] as const) {
       const key = Object.keys(results).find((k) => k.endsWith(file));
       ok(key, `Expected ${file}`);
@@ -1224,7 +1225,7 @@ describe("client infrastructure export metadata", () => {
       );
     }
     strictEqual(
-      index.includes('export * from "./client/ApiClient.js"'),
+      index.includes('export * from "./client/runtime.js"'),
       false,
       "The ambiguous star export must be gone",
     );

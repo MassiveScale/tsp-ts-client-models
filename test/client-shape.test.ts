@@ -96,7 +96,6 @@ describe("client-shape: path", () => {
     const files = await emit(STORE_SPEC, { "client-shape": "path" });
 
     deepStrictEqual(clientModules(files), [
-      "ApiClient.ts",
       "HealthRequestBuilder.ts",
       "ReportsRequestBuilder.ts",
       "RequestBuilder.ts",
@@ -105,6 +104,7 @@ describe("client-shape: path", () => {
       "StoresItemPetsRequestBuilder.ts",
       "StoresItemRequestBuilder.ts",
       "StoresRequestBuilder.ts",
+      "runtime.ts",
     ]);
     ok(
       has(files, "endpoints/StoresEndpoints.ts"),
@@ -238,7 +238,7 @@ describe("client-shape: path", () => {
     ok(index.includes('export * from "./client/ShapeApiClient.js";'));
     ok(index.includes('export * from "./client/StoresItemRequestBuilder.js";'));
     ok(
-      index.indexOf("./client/ApiClient.js") <
+      index.indexOf("./client/runtime.js") <
         index.indexOf("./client/RequestBuilder.js"),
       "The base infrastructure is listed first",
     );
@@ -250,7 +250,6 @@ describe("client-shape: interface", () => {
     const files = await emit(STORE_SPEC, { "client-shape": "interface" });
 
     deepStrictEqual(clientModules(files), [
-      "ApiClient.ts",
       "HealthRequestBuilder.ts",
       "ReportsItemItemRequestBuilder.ts",
       "ReportsItemRequestBuilder.ts",
@@ -261,6 +260,7 @@ describe("client-shape: interface", () => {
       "StoresItemPetsRequestBuilder.ts",
       "StoresItemRequestBuilder.ts",
       "StoresRequestBuilder.ts",
+      "runtime.ts",
     ]);
     const item = file(files, "client/StoresItemRequestBuilder.ts");
     ok(item.includes("get pets(): StoresItemPetsRequestBuilder {"));
@@ -609,6 +609,36 @@ describe("client-shape member names", () => {
     );
   });
 
+  it("names the root client ApiClient for a namespace ending in Api", async () => {
+    const [files, diagnostics] = await emitWithDiagnostics(
+      `
+        import "@typespec/http";
+        using Http;
+
+        @service(#{ title: "Community API" })
+        namespace MarketOnce.Community.Api;
+
+        model Member { id: string; }
+        @route("/members") interface Members { @get list(): Member[]; }
+      `,
+      { "client-shape": "path", "client-style": "both" },
+    );
+
+    ok(has(files, "client/runtime.ts"));
+    ok(has(files, "client/runtimeRx.ts"));
+    ok(
+      file(files, "client/ApiClient.ts").includes(
+        "export class ApiClient extends RootClient {",
+      ),
+    );
+    ok(
+      file(files, "client/ApiObservableClient.ts").includes(
+        "export class ApiObservableClient extends ",
+      ),
+    );
+    deepStrictEqual(emitterDiagnostics(diagnostics), []);
+  });
+
   it("numbers builder classes whose names differ only in case", async () => {
     const [files, diagnostics] = await emitWithDiagnostics(
       `${HEADER}
@@ -667,7 +697,7 @@ describe("client-shape member names", () => {
     );
     ok(
       stores.includes(
-        'import type { RequestOptions as ClientRequestOptions } from "./ApiClient.js";',
+        'import type { RequestOptions as ClientRequestOptions } from "./runtime.js";',
       ),
     );
     ok(

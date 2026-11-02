@@ -187,7 +187,7 @@ The five local-name fields exist because a model used as a response or body can 
 import { HttpClient{{#unless (eq baseClassName "HttpClient")}}
   as
   {{baseClassName}}{{/unless}}
-} from "./ApiClient.js"; export class
+} from "./runtime.js"; export class
 {{className}}
 extends
 {{baseClassName}}
@@ -235,7 +235,7 @@ After running `tsp compile .`, the emitter writes a complete, buildable npm pack
 
 - `models.ts` — TypeScript interfaces, enums, and request types
 - `endpoints/*.ts` — path utility `as const` objects per TypeSpec interface
-- `client/ApiClient.ts` — base `HttpClient`, `ClientConfig`, `ApiError`, retry logic (requires Node.js 18+ or a modern browser)
+- `client/runtime.ts` — base `HttpClient`, `ClientConfig`, `ApiError`, retry logic (requires Node.js 18+ or a modern browser)
 - `client/*Client.ts` — one typed client class per TypeSpec interface, or with `client-shape: path` or `interface`, one root client and its `*RequestBuilder.ts` classes
 - `index.ts` — barrel export
 - `package.json` and `tsconfig.json` — ready to build and publish

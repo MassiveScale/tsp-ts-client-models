@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A service namespace ending in `Api` no longer gets an `ApiClient2` root client.** With `client-shape: path` or `interface`, `namespace Acme.Api` names its root client `ApiClient`, which landed on the emitter's own `client/ApiClient.ts` transport file. The root client was renamed `ApiClient2` and a `client-module-name-collision` warning was reported. The same happened to `interface Api` with `client-shape: flat`. Both now keep the name `ApiClient`.
+
+### Changed
+
+- **The shared transport moved from `client/ApiClient.ts` to `client/runtime.ts`**, and the RxJS transport from `client/ApiClientRx.ts` to `client/runtimeRx.ts`. The exported names (`HttpClient`, `RxHttpClient`, `ApiError`, `ClientConfig`, …) are unchanged, and the generated package only exports its barrel, so code that imports the package is not affected. A custom `client`, `clientObservable`, `requestBuilder` or `requestBuilderObservable` template that imports `./ApiClient.js` or `./ApiClientRx.js` must import `./runtime.js` or `./runtimeRx.js` instead.
+
 ## [1.1.0] — 2026-11-02
 
 ### Added
