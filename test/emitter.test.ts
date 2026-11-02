@@ -1959,7 +1959,7 @@ describe("emitter", () => {
 
   // ─── HTTP client generation ───────────────────────────────────────────────────
 
-  it("generates client/ApiClient.ts with HttpClient base class", async () => {
+  it("generates client/runtime.ts with HttpClient base class", async () => {
     const results = await emit(`
       import "@typespec/http";
       using Http;
@@ -1977,9 +1977,9 @@ describe("emitter", () => {
     `);
 
     const apiClientFile = Object.keys(results).find((k) =>
-      k.includes("client/ApiClient.ts"),
+      k.includes("client/runtime.ts"),
     );
-    ok(apiClientFile, "Expected client/ApiClient.ts");
+    ok(apiClientFile, "Expected client/runtime.ts");
     const content = results[apiClientFile];
     ok(content.includes("class HttpClient"), "Expected HttpClient class");
     ok(content.includes("ClientConfig"), "Expected ClientConfig interface");
@@ -1987,7 +1987,7 @@ describe("emitter", () => {
     ok(content.includes("RetryConfig"), "Expected RetryConfig interface");
   });
 
-  it("generates the extensibility surface in client/ApiClient.ts", async () => {
+  it("generates the extensibility surface in client/runtime.ts", async () => {
     const results = await emit(`
       import "@typespec/http";
       using Http;
@@ -2004,9 +2004,9 @@ describe("emitter", () => {
     `);
 
     const apiClientFile = Object.keys(results).find((k) =>
-      k.includes("client/ApiClient.ts"),
+      k.includes("client/runtime.ts"),
     );
-    ok(apiClientFile, "Expected client/ApiClient.ts");
+    ok(apiClientFile, "Expected client/runtime.ts");
     const content = results[apiClientFile];
 
     for (const symbol of [
@@ -2224,7 +2224,7 @@ describe("emitter", () => {
     );
 
     const sources = Object.keys(results)
-      .filter((k) => /client\/ApiClient(Rx)?\.ts$/.test(k))
+      .filter((k) => /client\/runtime(Rx)?\.ts$/.test(k))
       .map((k) => results[k]);
     const combined = sources.join("\n");
 
@@ -2345,7 +2345,7 @@ describe("emitter", () => {
       [
         'export * from "./models.js";',
         'export * from "./endpoints/WidgetsEndpoints.js";',
-        'export * from "./client/ApiClient.js";',
+        'export * from "./client/runtime.js";',
         'export * from "./client/WidgetsClient.js";',
       ].join("\n"),
       "The no-collision barrel must stay a plain list of star exports",
@@ -2376,7 +2376,7 @@ describe("emitter", () => {
       "The model keeps the plain name — it is the package's actual API",
     );
     ok(
-      !index.includes('export * from "./client/ApiClient.js";'),
+      !index.includes('export * from "./client/runtime.js";'),
       "The ambiguous star export must be replaced",
     );
     ok(
@@ -2448,9 +2448,9 @@ describe("emitter", () => {
     `);
 
     const apiClientFile = Object.keys(results).find((k) =>
-      k.includes("client/ApiClient.ts"),
+      k.includes("client/runtime.ts"),
     );
-    ok(apiClientFile, "Expected client/ApiClient.ts");
+    ok(apiClientFile, "Expected client/runtime.ts");
     const content = results[apiClientFile];
 
     const tryStart = content.indexOf("    try {\n      url = this.buildUrl(");
@@ -2479,9 +2479,9 @@ describe("emitter", () => {
     `);
 
     const apiClientFile = Object.keys(results).find((k) =>
-      k.includes("client/ApiClient.ts"),
+      k.includes("client/runtime.ts"),
     );
-    ok(apiClientFile, "Expected client/ApiClient.ts");
+    ok(apiClientFile, "Expected client/runtime.ts");
     const content = results[apiClientFile];
 
     const loopStart = content.indexOf("for (; attempt < maxAttempts");
@@ -2510,9 +2510,9 @@ describe("emitter", () => {
     `);
 
     const apiClientFile = Object.keys(results).find((k) =>
-      k.includes("client/ApiClient.ts"),
+      k.includes("client/runtime.ts"),
     );
-    ok(apiClientFile, "Expected client/ApiClient.ts");
+    ok(apiClientFile, "Expected client/runtime.ts");
     const content = results[apiClientFile];
 
     ok(content.includes("function toApiError("), "Expected the error factory");
@@ -2607,10 +2607,7 @@ describe("emitter", () => {
     const indexFile = Object.keys(results).find((k) => k.endsWith("index.ts"));
     ok(indexFile, "Expected index.ts");
     const content = results[indexFile];
-    ok(
-      content.includes("./client/ApiClient.js"),
-      "Expected ApiClient.js export",
-    );
+    ok(content.includes("./client/runtime.js"), "Expected runtime.js export");
     ok(
       content.includes("./client/WidgetsClient.js"),
       "Expected WidgetsClient.js export",
@@ -2667,9 +2664,9 @@ describe("emitter", () => {
     `);
 
     const apiClientFile = Object.keys(results).find((k) =>
-      k.includes("client/ApiClient.ts"),
+      k.includes("client/runtime.ts"),
     );
-    ok(apiClientFile, "Expected client/ApiClient.ts");
+    ok(apiClientFile, "Expected client/runtime.ts");
     const api = results[apiClientFile];
     ok(api.includes("protected httpDelete<T>"), "Expected httpDelete helper");
     ok(api.includes("protected httpGet<T>"), "Expected httpGet helper");
@@ -2726,8 +2723,8 @@ describe("emitter", () => {
       "No Observable client should be emitted by default",
     );
     ok(
-      !Object.keys(results).some((k) => k.includes("client/ApiClientRx.ts")),
-      "No ApiClientRx.ts should be emitted by default",
+      !Object.keys(results).some((k) => k.includes("client/runtimeRx.ts")),
+      "No runtimeRx.ts should be emitted by default",
     );
 
     const pkgFile = Object.keys(results).find((k) =>
@@ -2788,9 +2785,9 @@ describe("emitter", () => {
 
     // Rx transport base
     const rxFile = Object.keys(results).find((k) =>
-      k.includes("client/ApiClientRx.ts"),
+      k.includes("client/runtimeRx.ts"),
     );
-    ok(rxFile, "Expected client/ApiClientRx.ts");
+    ok(rxFile, "Expected client/runtimeRx.ts");
     const rx = results[rxFile];
     ok(
       rx.includes("**Extensibility:**"),
@@ -2802,9 +2799,9 @@ describe("emitter", () => {
     );
     ok(
       rx.includes(
-        'import { HttpClient, type TransportOptions } from "./ApiClient.js";',
+        'import { HttpClient, type TransportOptions } from "./runtime.js";',
       ),
-      "Expected RxHttpClient to reuse the Promise transport from ApiClient.js",
+      "Expected RxHttpClient to reuse the Promise transport from runtime.js",
     );
     ok(rx.includes("httpGet$<T>"), "Expected httpGet$ helper");
     ok(rx.includes("httpPost$<T>"), "Expected httpPost$ helper");
@@ -2812,8 +2809,8 @@ describe("emitter", () => {
 
     // Shared base transport still emitted (RxHttpClient depends on it)
     ok(
-      Object.keys(results).some((k) => k.includes("client/ApiClient.ts")),
-      "Expected shared ApiClient.ts to still be emitted",
+      Object.keys(results).some((k) => k.includes("client/runtime.ts")),
+      "Expected shared runtime.ts to still be emitted",
     );
 
     // Promise client suppressed in observable-only mode
@@ -2826,11 +2823,8 @@ describe("emitter", () => {
     const indexFile = Object.keys(results).find((k) => k.endsWith("index.ts"));
     ok(indexFile, "Expected index.ts");
     const index = results[indexFile];
-    ok(index.includes("./client/ApiClient.js"), "Expected ApiClient export");
-    ok(
-      index.includes("./client/ApiClientRx.js"),
-      "Expected ApiClientRx export",
-    );
+    ok(index.includes("./client/runtime.js"), "Expected runtime export");
+    ok(index.includes("./client/runtimeRx.js"), "Expected runtimeRx export");
     ok(
       index.includes("./client/WidgetsObservableClient.js"),
       "Expected WidgetsObservableClient export",
@@ -2872,12 +2866,12 @@ describe("emitter", () => {
       "Expected the Observable client",
     );
     ok(
-      Object.keys(results).some((k) => k.includes("client/ApiClient.ts")),
-      "Expected shared ApiClient.ts",
+      Object.keys(results).some((k) => k.includes("client/runtime.ts")),
+      "Expected shared runtime.ts",
     );
     ok(
-      Object.keys(results).some((k) => k.includes("client/ApiClientRx.ts")),
-      "Expected ApiClientRx.ts",
+      Object.keys(results).some((k) => k.includes("client/runtimeRx.ts")),
+      "Expected runtimeRx.ts",
     );
 
     const indexFile = Object.keys(results).find((k) => k.endsWith("index.ts"));
@@ -2892,14 +2886,14 @@ describe("emitter", () => {
       "Expected Observable client export",
     );
 
-    // Both clients share the single ApiError from ApiClient.ts
+    // Both clients share the single ApiError from runtime.ts
     const rxFile = Object.keys(results).find((k) =>
-      k.includes("client/ApiClientRx.ts"),
+      k.includes("client/runtimeRx.ts"),
     );
-    ok(rxFile, "Expected ApiClientRx.ts");
+    ok(rxFile, "Expected runtimeRx.ts");
     ok(
-      results[rxFile].includes('from "./ApiClient.js"'),
-      "Rx client must import shared types from ApiClient.js (single ApiError)",
+      results[rxFile].includes('from "./runtime.js"'),
+      "Rx client must import shared types from runtime.js (single ApiError)",
     );
   });
 

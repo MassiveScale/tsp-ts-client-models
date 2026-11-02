@@ -128,7 +128,7 @@ api.stores
 
 ```
 client/
-├── ApiClient.ts                          ← base transport (as in flat)
+├── runtime.ts                            ← base transport (as in flat)
 ├── RequestBuilder.ts                     ← RootClient, RequestBuilder, withOptions
 ├── RequestBuilderRx.ts                   ← RxRootClient, RxRequestBuilder (observable|both)
 ├── PetStoreClient.ts                     ← the root client

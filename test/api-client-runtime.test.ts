@@ -4,7 +4,7 @@ import * as ts from "typescript";
 import { emit } from "./test-host.js";
 
 /**
- * Behavioral tests for the generated `client/ApiClient.ts` transport.
+ * Behavioral tests for the generated `client/runtime.ts` transport.
  *
  * The emitter writes that file as static TypeScript source, so the only way to
  * prove the middleware pipeline, hooks, and retry ordering actually work is to
@@ -50,14 +50,14 @@ const MINIMAL_SPEC = `
 
 let cached: Promise<ApiClientModule> | undefined;
 
-/** Emits, transpiles, and imports the generated `ApiClient.ts` module once. */
+/** Emits, transpiles, and imports the generated `runtime.ts` module once. */
 function loadApiClient(): Promise<ApiClientModule> {
   cached ??= (async () => {
     const results = await emit(MINIMAL_SPEC);
     const key = Object.keys(results).find((k) =>
-      k.endsWith("client/ApiClient.ts"),
+      k.endsWith("client/runtime.ts"),
     );
-    ok(key, "Expected client/ApiClient.ts to be emitted");
+    ok(key, "Expected client/runtime.ts to be emitted");
     const js = ts.transpileModule(results[key], {
       compilerOptions: {
         target: ts.ScriptTarget.ES2022,
@@ -148,8 +148,8 @@ let cachedRx:
   | undefined;
 
 /**
- * Emits the Observable flavor, then imports its `ApiClientRx.ts` with the
- * `ApiClient.js` import pointed at the transpiled infrastructure module and
+ * Emits the Observable flavor, then imports its `runtimeRx.ts` with the
+ * `runtime.js` import pointed at the transpiled infrastructure module and
  * rxjs replaced by {@link OBSERVABLE_STUB}.
  */
 function loadRxClient(): NonNullable<typeof cachedRx> {
@@ -168,11 +168,11 @@ function loadRxClient(): NonNullable<typeof cachedRx> {
     };
     const toUrl = (js: string) =>
       `data:text/javascript;base64,${Buffer.from(js).toString("base64")}`;
-    const rx = source("client/ApiClientRx.ts")
+    const rx = source("client/runtimeRx.ts")
       .replace(/import \{ Observable \} from "rxjs";/, OBSERVABLE_STUB)
       .replace(
-        '"./ApiClient.js"',
-        JSON.stringify(toUrl(source("client/ApiClient.ts"))),
+        '"./runtime.js"',
+        JSON.stringify(toUrl(source("client/runtime.ts"))),
       );
     return import(toUrl(rx));
   })();
@@ -182,7 +182,7 @@ function loadRxClient(): NonNullable<typeof cachedRx> {
 /** Config defaults that keep retry-driven tests from sleeping for seconds. */
 const FAST_RETRY = { maxAttempts: 1, baseDelayMs: 0 };
 
-describe("generated ApiClient transport", () => {
+describe("generated runtime transport", () => {
   describe("transport injection", () => {
     it("uses config.fetch instead of the global fetch", async () => {
       const { HttpClient } = await loadApiClient();

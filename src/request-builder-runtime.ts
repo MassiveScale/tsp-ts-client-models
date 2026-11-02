@@ -21,7 +21,7 @@ export const REQUEST_BUILDER_CONTENT = `import {
   type ClientConfig,
   type RequestOptions,
   type TransportOptions,
-} from "./ApiClient.js";
+} from "./runtime.js";
 
 /**
  * The transport a request builder sends through: the verb helpers of the root
@@ -299,8 +299,8 @@ export const REQUEST_BUILDER_EXPORTS: readonly StaticExport[] = [
 
 /** The contents of `client/RequestBuilderRx.ts`, without the generated-file header. */
 export const RX_REQUEST_BUILDER_CONTENT = `import { Observable } from "rxjs";
-import type { ClientConfig, TransportOptions } from "./ApiClient.js";
-import { RxHttpClient } from "./ApiClientRx.js";
+import type { ClientConfig, TransportOptions } from "./runtime.js";
+import { RxHttpClient } from "./runtimeRx.js";
 import { RequestBuilder, type RequestAdapter } from "./RequestBuilder.js";
 
 /**

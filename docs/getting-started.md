@@ -55,7 +55,7 @@ tsp-output/client/
 ├── endpoints/
 │   └── WidgetsEndpoints.ts    # Path constants per TypeSpec interface
 ├── client/
-│   ├── ApiClient.ts           # Base HttpClient, ClientConfig, ApiError, etc.
+│   ├── runtime.ts             # Base HttpClient, ClientConfig, ApiError, etc.
 │   └── WidgetsClient.ts       # Typed client class per TypeSpec interface
 ├── index.ts                   # Barrel export
 ├── package.json               # Ready-to-publish package manifest

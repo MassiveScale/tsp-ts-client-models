@@ -1,6 +1,6 @@
 import { {{base.name}}{{#unless (eq base.local base.name)}} as {{base.local}}{{/unless}} } from "{{baseModule}}";
 {{#if methods.length}}
-import type { RequestOptions{{#unless (eq requestOptionsName "RequestOptions")}} as {{requestOptionsName}}{{/unless}} } from "./ApiClient.js";
+import type { RequestOptions{{#unless (eq requestOptionsName "RequestOptions")}} as {{requestOptionsName}}{{/unless}} } from "./runtime.js";
 {{/if}}
 {{#each endpointImports}}
 import { {{name}}{{#unless (eq local name)}} as {{local}}{{/unless}} } from "../endpoints/{{name}}.js";

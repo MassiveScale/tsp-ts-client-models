@@ -6,8 +6,8 @@ The emitter generates a typed HTTP client for each TypeSpec interface. The clien
 
 ```
 client/
-├── ApiClient.ts               ← base infrastructure (Promise transport)
-├── ApiClientRx.ts             ← RxJS base (only with client-style: observable|both)
+├── runtime.ts               ← base infrastructure (Promise transport)
+├── runtimeRx.ts             ← RxJS base (only with client-style: observable|both)
 ├── WidgetsClient.ts           ← Promise client, one per interface
 └── WidgetsObservableClient.ts ← Observable client (only with client-style: observable|both)
 ```
@@ -18,7 +18,7 @@ To skip client generation, set `generate-http-client: false` in `tspconfig.yaml`
 
 This page describes the default `client-shape: flat`. With `client-shape: path` or `interface`, one root client chains every call through request builders instead (`api.stores.byStoreId(id).get()`). Everything below about `ClientConfig`, errors, retry, query parameters, headers and the Observable flavor applies to those shapes too. See [Client shapes](client-shapes.md).
 
-## ApiClient.ts
+## runtime.ts
 
 Contains the base `HttpClient` class and supporting types. All generated `*Client` classes extend `HttpClient`.
 
@@ -216,7 +216,7 @@ The barrel resolves it by priority. Whichever module comes first keeps the plain
 
 1. **Declared TypeSpec types** (`models.ts`) — always keep the plain name.
 2. **Generated endpoint objects and client classes.**
-3. **Static client infrastructure** (`ApiClient.ts`, `ApiClientRx.ts`).
+3. **Static client infrastructure** (`runtime.ts`, `runtimeRx.ts`).
 
 ```typespec
 model RequestContext { id: string; }
@@ -225,10 +225,10 @@ model RequestContext { id: string; }
 ```typescript
 // index.ts
 export * from "./models.js"; // RequestContext = your model
-export { ApiError, HttpClient /* … */ } from "./client/ApiClient.js";
+export { ApiError, HttpClient /* … */ } from "./client/runtime.js";
 export type {
   RequestContext as ClientRequestContext /* … */,
-} from "./client/ApiClient.js";
+} from "./client/runtime.js";
 ```
 
 A `generated-export-name-collision` warning reports each substitution. The aliased name is a normal root export, so the infrastructure type is still reachable:
@@ -237,7 +237,7 @@ A `generated-export-name-collision` warning reports each substitution. The alias
 import type { ClientRequestContext } from "@my-org/my-api-client";
 ```
 
-> The generated package's `exports` map only exposes the package root, so `@my-org/my-api-client/client/ApiClient.js` is **not** importable — use the aliased root export above. Rename the TypeSpec declaration if you would rather have the plain name back.
+> The generated package's `exports` map only exposes the package root, so `@my-org/my-api-client/client/runtime.js` is **not** importable — use the aliased root export above. Rename the TypeSpec declaration if you would rather have the plain name back.
 
 The same applies inside a generated client module: if a model used as a response or request body is named `HttpClient`, `RequestOptions`, `Observable`, or after the interface's own `*Endpoints` object, the client's _infrastructure_ import is aliased and the model keeps the plain name in the method signatures. The generated class itself counts too: `interface Http` declares `class HttpClient`, so its base-class import becomes `HttpClient as ClientHttpClient`.
 
@@ -247,13 +247,14 @@ The one case where the **model** import is aliased instead is a model named afte
 
 Generated client class names are allocated from one shared pool, so no two land on the same file. A client steps aside — taking a numeric suffix and reporting a `client-module-name-collision` warning — when its preferred name is already taken by:
 
-| Case                      | Example                                                                                              | Result                 |
-| ------------------------- | ---------------------------------------------------------------------------------------------------- | ---------------------- |
-| The static infrastructure | `interface Api` → `client/ApiClient.ts`                                                              | `ApiClient2`           |
-| Another generated client  | `interface Foo` (Observable) and `interface FooObservable` (Promise) both want `FooObservableClient` | `FooObservableClient2` |
-| A declared type           | `model WidgetsClient` alongside `interface Widgets`                                                  | `WidgetsClient2`       |
+| Case                     | Example                                                                                              | Result                 |
+| ------------------------ | ---------------------------------------------------------------------------------------------------- | ---------------------- |
+| Another generated client | `interface Foo` (Observable) and `interface FooObservable` (Promise) both want `FooObservableClient` | `FooObservableClient2` |
+| A declared type          | `model WidgetsClient` alongside `interface Widgets`                                                  | `WidgetsClient2`       |
 
-The infrastructure path cannot move (every client imports `./ApiClient.js`) and a declared type keeps its own name, so the generated client is what yields. Rename the interface — or the type it collides with — to get the plain name back.
+A declared type keeps its own name, so the generated client is what yields. Rename the interface, or the type it collides with, to get the plain name back.
+
+The shared transport lives in `client/runtime.ts` (and `client/runtimeRx.ts` for the RxJS flavor). Generated client names always end in `Client`, so no interface can land on those files: `interface Api` emits `client/ApiClient.ts` with `class ApiClient`.
 
 ## Query parameters
 
@@ -328,13 +329,13 @@ options:
     client-style: both # "promise" (default) | "observable" | "both"
 ```
 
-| Value        | Emits                                                           |
-| ------------ | --------------------------------------------------------------- |
-| `promise`    | `{Name}Client` only (default; output unchanged, no `rxjs`)      |
-| `observable` | `{Name}ObservableClient` only                                   |
-| `both`       | Both clients side by side, sharing one `ApiClient.ts` transport |
+| Value        | Emits                                                         |
+| ------------ | ------------------------------------------------------------- |
+| `promise`    | `{Name}Client` only (default; output unchanged, no `rxjs`)    |
+| `observable` | `{Name}ObservableClient` only                                 |
+| `both`       | Both clients side by side, sharing one `runtime.ts` transport |
 
-When `observable`/`both` is selected the emitter adds a `client/ApiClientRx.ts` base (`RxHttpClient extends HttpClient`) and declares `rxjs` in the generated `package.json` as both an **optional** `peerDependency` (so consumers resolve their own version) and a `devDependency` (so the generated package type-checks and builds standalone — npm does not auto-install optional peers). The Promise flavor is completely unaffected — with the default `promise` style, no `rxjs` dependency is added and no extra files are emitted.
+When `observable`/`both` is selected the emitter adds a `client/runtimeRx.ts` base (`RxHttpClient extends HttpClient`) and declares `rxjs` in the generated `package.json` as both an **optional** `peerDependency` (so consumers resolve their own version) and a `devDependency` (so the generated package type-checks and builds standalone — npm does not auto-install optional peers). The Promise flavor is completely unaffected — with the default `promise` style, no `rxjs` dependency is added and no extra files are emitted.
 
 ```typescript
 // Generated (client-style: observable | both)

@@ -147,17 +147,17 @@ let cached:
 function loadClients(): NonNullable<typeof cached> {
   cached ??= (async () => {
     const files = await emit(SPEC, { "client-style": "both" });
-    const apiClient = toModuleUrl(files["client/ApiClient.ts"]);
+    const apiClient = toModuleUrl(files["client/runtime.ts"]);
     const endpoints = toModuleUrl(files["endpoints/StoresEndpoints.ts"]);
     const rxClient = toModuleUrl(
-      files["client/ApiClientRx.ts"]
+      files["client/runtimeRx.ts"]
         .replace('import { Observable } from "rxjs";', OBSERVABLE_STUB)
-        .replace('"./ApiClient.js"', JSON.stringify(apiClient)),
+        .replace('"./runtime.js"', JSON.stringify(apiClient)),
     );
     const link = (source: string) =>
       source
-        .replace('"./ApiClient.js"', JSON.stringify(apiClient))
-        .replace('"./ApiClientRx.js"', JSON.stringify(rxClient))
+        .replace('"./runtime.js"', JSON.stringify(apiClient))
+        .replace('"./runtimeRx.js"', JSON.stringify(rxClient))
         .replace('"../endpoints/StoresEndpoints.js"', JSON.stringify(endpoints))
         // Only referenced in type positions, so nothing is lost.
         .replace('import { Observable } from "rxjs";', "");
