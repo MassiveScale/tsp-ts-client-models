@@ -1,6 +1,6 @@
 # HTTP Client
 
-The emitter generates a typed HTTP client for each TypeSpec interface. The client uses the native `fetch` API and requires no external dependencies.
+The emitter generates a typed HTTP client for each TypeSpec interface. The client uses the native `fetch` API and requires no external dependencies. Because it does not go through Angular's `HttpClient` or axios, their interceptors do not see its requests unless you route them there with a [custom transport](client-extensibility.md#adapting-a-non-fetch-http-library).
 
 ## Generated structure
 

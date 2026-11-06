@@ -69,6 +69,33 @@ export class WidgetsService {
 
 The client methods already return `Observable`s, so there is no `from(...)` wrapping — you pipe directly. `ApiError` (and its subclasses) flow through the Observable's error channel, so `catchError` sees the same error types as the Promise client.
 
+> **Your `HttpInterceptor`s do not run for this client yet.** It sends its requests with `fetch`, not Angular's `HttpClient`. To keep your auth, logging and error interceptors, add the adapter below.
+
+## Keeping your HTTP interceptors
+
+Angular runs `HttpInterceptor`s only for requests made through its `HttpClient`. The generated client calls `fetch` directly, so without help an auth interceptor never adds its token and an error interceptor never sees a failure.
+
+Pass an adapter as `config.fetch` to send every request through `HttpClient` instead. Copy `angularFetch` from [Angular `HttpClient` (keeps your interceptors)](../client-extensibility.md#angular-httpclient-keeps-your-interceptors) into your app, then create the client with it:
+
+```typescript
+// src/app/services/widgets.service.ts
+import { Injectable, inject } from "@angular/core";
+import { HttpClient } from "@angular/common/http";
+import { WidgetsObservableClient } from "@my-org/my-api-client";
+import { angularFetch } from "../api/angular-fetch";
+import { environment } from "../../environments/environment";
+
+@Injectable({ providedIn: "root" })
+export class WidgetsService {
+  private readonly client = new WidgetsObservableClient({
+    baseUrl: environment.apiBaseUrl,
+    fetch: angularFetch(inject(HttpClient)),
+  });
+}
+```
+
+Every interceptor registered with `provideHttpClient(withInterceptors(...))` or `HTTP_INTERCEPTORS` now runs for the generated client, once per attempt. The client still maps error statuses to `ApiError`, applies its retry rules and cancels the request when you unsubscribe. If an interceptor already retries, set `retry: { maxAttempts: 1 }` so a request is not retried twice.
+
 ## Using in a component
 
 ```typescript
@@ -141,6 +168,8 @@ export class WidgetsService {
 ```
 
 ## Injecting auth tokens per request
+
+If an `HttpInterceptor` already adds your token, use the [adapter](#keeping-your-http-interceptors) instead: it lets that interceptor add the token here too.
 
 If you need to inject auth tokens dynamically (e.g. from an Angular auth service), pass them per-request via `RequestOptions.headers`:
 
