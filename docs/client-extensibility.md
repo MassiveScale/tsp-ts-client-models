@@ -112,7 +112,7 @@ expect(await client.list()).toEqual([{ id: "w1", name: "Widget" }]);
 
 ### Adapting a non-`fetch` HTTP library
 
-The client only understands `fetch`-compatible transports. To use `axios`, Angular's `HttpClient`, or anything else, write a small adapter that converts between `Request`/`Response` and your library's types:
+The client only understands `fetch`-compatible transports. By default it calls the global `fetch` directly, so interceptors you registered with another HTTP library, such as Angular `HttpInterceptor`s or axios interceptors, never see its requests. To send its requests through `axios`, Angular's `HttpClient`, or anything else, write a small adapter that converts between `Request`/`Response` and your library's types:
 
 ```typescript
 import axios from "axios";
@@ -138,6 +138,119 @@ const client = new WidgetsClient({
   },
 });
 ```
+
+### Angular `HttpClient` (keeps your interceptors)
+
+This adapter sends every request through Angular's `HttpClient`, so the interceptors you registered with `provideHttpClient(withInterceptors(...))` or `HTTP_INTERCEPTORS` run for the generated client too:
+
+```typescript
+// src/app/api/angular-fetch.ts
+import {
+  HttpClient,
+  HttpErrorResponse,
+  HttpHeaders,
+} from "@angular/common/http";
+import type { FetchFunction } from "@my-org/my-api-client";
+
+/** Statuses whose `Response` must not have a body. */
+const NULL_BODY_STATUSES = new Set([101, 204, 205, 304]);
+
+function toResponse(
+  body: ArrayBuffer | null,
+  status: number,
+  statusText: string,
+  headers: HttpHeaders,
+): Response {
+  const responseHeaders = new Headers();
+  for (const name of headers.keys()) {
+    for (const value of headers.getAll(name) ?? []) {
+      responseHeaders.append(name, value);
+    }
+  }
+  return new Response(NULL_BODY_STATUSES.has(status) ? null : body, {
+    status,
+    statusText,
+    headers: responseHeaders,
+  });
+}
+
+/** A `config.fetch` transport that sends each request through Angular's `HttpClient`. */
+export function angularFetch(http: HttpClient): FetchFunction {
+  return async (request) => {
+    const body = request.body ? await request.arrayBuffer() : null;
+    const { signal } = request;
+    signal.throwIfAborted();
+    return new Promise<Response>((resolve, reject) => {
+      const subscription = http
+        .request(request.method, request.url, {
+          body,
+          headers: new HttpHeaders(Object.fromEntries(request.headers)),
+          observe: "response",
+          responseType: "arraybuffer",
+        })
+        .subscribe({
+          next: (response) =>
+            resolve(
+              toResponse(
+                response.body,
+                response.status,
+                response.statusText,
+                response.headers,
+              ),
+            ),
+          error: (error: unknown) => {
+            // An error status is still a response. Returning it lets the client
+            // map it to ApiError and apply its retry rules. Status 0 means no
+            // response arrived, which the client treats as a network failure.
+            if (error instanceof HttpErrorResponse && error.status !== 0) {
+              resolve(
+                toResponse(
+                  error.error,
+                  error.status,
+                  error.statusText,
+                  error.headers,
+                ),
+              );
+            } else {
+              reject(error);
+            }
+          },
+        });
+      // Unsubscribing, a timeout, or your own signal cancels the HttpClient request.
+      signal.addEventListener(
+        "abort",
+        () => {
+          subscription.unsubscribe();
+          reject(signal.reason);
+        },
+        { once: true },
+      );
+    });
+  };
+}
+```
+
+Pass it when you create the client, from an injection context such as a service field:
+
+```typescript
+import { Injectable, inject } from "@angular/core";
+import { HttpClient } from "@angular/common/http";
+import { WidgetsObservableClient } from "@my-org/my-api-client";
+import { angularFetch } from "../api/angular-fetch";
+
+@Injectable({ providedIn: "root" })
+export class WidgetsService {
+  private readonly client = new WidgetsObservableClient({
+    baseUrl: "https://api.example.com",
+    fetch: angularFetch(inject(HttpClient)),
+  });
+}
+```
+
+- Interceptors run once per attempt, like middleware, so an auth interceptor also sees every retry.
+- Request and response bodies pass through as `ArrayBuffer`s, so JSON, text, binary and multipart bodies arrive unchanged.
+- An error status such as `404` comes back as a `Response`, so the client still throws `ApiError` and applies its own retry rules. If an interceptor already retries, turn the client's retry off with `retry: { maxAttempts: 1 }` so a request is not retried twice.
+- The generated package also exports a class named `HttpClient`, the base of every generated client. Import Angular's from `@angular/common/http`, and alias one of them if a file needs both.
 
 ---
 
